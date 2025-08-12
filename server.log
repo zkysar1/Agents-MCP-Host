@@ -1,0 +1,181 @@
+=== ZAK-Agent Starting ===
+Java version: 21.0.8
+Working directory: /mnt/c/Users/zkysa/OneDrive/Zak/SmartNPCs/MCPThink/ZAK-Agent
+Data path: ./data
+ZAK Agent path: ./data/agent
+HostAPIVerticle starting...
+Creating HTTP server on port 8080...
+LlmAPIService initialized with OpenAI API
+OpenAI API service initialized successfully
+Deploying MCP infrastructure...
+*** Host API server successfully started on HTTP port 8080 ***
+
+=== Available API Endpoints ===
+
+1. Health Check:
+   GET http://localhost:8080/health
+
+2. Host Status:
+   GET http://localhost:8080/host/v1/status
+
+3. Conversation API (OpenAI-compatible with auto MCP tool detection):
+   POST http://localhost:8080/host/v1/conversations
+   
+   Examples:
+   
+   # Simple message (uses LLM if API key is set):
+     curl -X POST http://localhost:8080/host/v1/conversations \
+       -H "Content-Type: application/json" \
+       -d '{"messages":[{"role":"user","content":"Hello"}]}'
+   
+   # Tool-triggering message (auto-detects and uses MCP tools):
+     curl -X POST http://localhost:8080/host/v1/conversations \
+       -H "Content-Type: application/json" \
+       -d '{"messages":[{"role":"user","content":"Calculate 10 plus 20"}]}'
+
+   Note: Messages with keywords like 'calculate', 'weather', 'database', or 'file'
+         will automatically trigger MCP tools.
+
+================================
+Loaded MCP configuration from: src/main/resources/mcp-config.json
+Loaded MCP configuration
+Created sandbox directory: /tmp/mcp-sandbox
+Database MCP Server started on port 8083
+FileSystem MCP Server started on port 8084
+Weather MCP Server started on port 8082
+Calculator MCP Server started on port 8081
+[LOG] Database MCP Server started,1,DatabaseServer,StartUp,MCP
+[LOG] FileSystem MCP Server started,1,FileSystemServer,StartUp,MCP
+Server ready: filesystem on port 8084
+Server ready: database on port 8083
+Deployed DatabaseServer [c2715b77-de1c-42d0-b9fd-b1676f931ec5]
+Deployed FileSystemServer [b00c164c-1fa9-409b-b89f-faf93f8b874e]
+[LOG] Weather MCP Server started,1,WeatherServer,StartUp,MCP
+Server ready: weather on port 8082
+Deployed WeatherServer [1b28c4c7-7cc1-4afa-be12-da9a31b7d700]
+[LOG] Calculator MCP Server started,1,CalculatorServer,StartUp,MCP
+Server ready: calculator on port 8081
+Deployed CalculatorServer [05285814-9de4-4c0f-8c18-dad5e570981b]
+Updated allowed roots: [/tmp/mcp-sandbox, /tmp]
+Initialized connection to calculator server
+Initialized connection to weather server
+Initialized connection to database server
+Initialized connection to filesystem server with 2 roots
+Client dual discovered 4 tools from calculator
+DualServerClient connected to Calculator and Weather servers
+Deployed DualServerClient [e679a8ed-77ec-45cd-aed7-843c0e7e3348]
+Client filesystem discovered 4 tools from filesystem
+Client single-db discovered 4 tools from database
+SingleServerClient connected to Database server
+Deployed SingleServerClient [38c8e255-fe41-484f-8587-b9999ef839cf]
+Client dual discovered 2 tools from weather
+Client ready: dual with 6 tools
+[LOG] DualServerClient ready with 6 tools,1,DualServerClient,StartUp,MCP
+Client filesystem discovered 4 tools from filesystem
+Client single-db discovered 4 tools from database
+Client ready: single-db with 4 tools
+[LOG] SingleServerClient ready with 4 tools,1,SingleServerClient,StartUp,MCP
+Updated resources list: 0 resources
+FileSystemClient connected to FileSystem server
+Deployed FileSystemClient [c8135bf8-e09b-465d-93d6-fcc7e3de2f12]
+=== MCP Host Manager Ready ===
+Servers: 4
+Clients: 2
+Total tools: 14
+MCP Host Manager deployed successfully
+Client ready: filesystem with 4 tools
+[LOG] FileSystemClient ready with 4 tools,1,FileSystemClient,StartUp,MCP
+[LOG] MCP infrastructure ready,1,McpHostManager,StartUp,MCP
+MCP tools enabled for conversation endpoint: 14 tools available
+[LOG] MCP Host Manager deployed,3,Driver,StartUp,MCP
+=== ZAK-Agent Started ===
+MCP Infrastructure: READY
+[LOG] ZAK-Agent startup complete,0,Driver,StartUp,System
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "user",
+    "content" : "What is 100 minus 45?"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "user",
+    "content" : "Update records in the products table"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "user",
+    "content" : "Hello, how are you?"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "user",
+    "content" : "What is artificial intelligence?"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "user",
+    "content" : "Update records in the products table"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "user",
+    "content" : "Update records in the products table"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "user",
+    "content" : "Hello, how are you?"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "user",
+    "content" : "What is artificial intelligence?"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success

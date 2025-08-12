@@ -1,0 +1,19 @@
+Message,Level,Class,Category,Character,SequenceReceived,EpochTimeMillis
+Database MCP Server started,1,DatabaseServer,StartUp,MCP,1,1754991420437
+FileSystem MCP Server started,1,FileSystemServer,StartUp,MCP,2,1754991420456
+Weather MCP Server started,1,WeatherServer,StartUp,MCP,3,1754991420463
+Calculator MCP Server started,1,CalculatorServer,StartUp,MCP,4,1754991420463
+DualServerClient ready with 6 tools,1,DualServerClient,StartUp,MCP,5,1754991423161
+SingleServerClient ready with 4 tools,1,SingleServerClient,StartUp,MCP,6,1754991423163
+FileSystemClient ready with 4 tools,1,FileSystemClient,StartUp,MCP,7,1754991423182
+MCP infrastructure ready,1,McpHostManager,StartUp,MCP,8,1754991423182
+MCP Host Manager deployed,3,Driver,StartUp,MCP,9,1754991423183
+ZAK-Agent startup complete,0,Driver,StartUp,System,10,1754991424020
+OpenAI API call successful,2,LlmAPIService,API,Success,11,1754991543238
+OpenAI API call successful,2,LlmAPIService,API,Success,12,1754991625650
+OpenAI API call successful,2,LlmAPIService,API,Success,13,1754991678013
+OpenAI API call successful,2,LlmAPIService,API,Success,14,1754991690611
+OpenAI API call successful,2,LlmAPIService,API,Success,15,1754991713883
+OpenAI API call successful,2,LlmAPIService,API,Success,16,1754991732024
+OpenAI API call successful,2,LlmAPIService,API,Success,17,1754991733237
+OpenAI API call successful,2,LlmAPIService,API,Success,18,1754991737538
