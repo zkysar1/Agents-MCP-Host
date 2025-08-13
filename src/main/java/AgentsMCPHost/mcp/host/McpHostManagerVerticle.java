@@ -303,6 +303,7 @@ public class McpHostManagerVerticle extends AbstractVerticle {
     private void routeToolCall(Message<JsonObject> msg) {
         JsonObject request = msg.body();
         String toolName = request.getString("tool");
+        String streamId = request.getString("streamId"); // Optional stream ID for SSE
         
         if (!systemReady) {
             msg.fail(503, "MCP system not ready");
@@ -326,6 +327,11 @@ public class McpHostManagerVerticle extends AbstractVerticle {
         
         if (clientId == null) {
             msg.fail(404, "Tool not found: " + toolName);
+            // Publish error to stream if streaming
+            if (streamId != null) {
+                vertx.eventBus().publish("conversation." + streamId + ".error",
+                    new JsonObject().put("error", "Tool not found: " + toolName));
+            }
             return;
         }
         
@@ -337,6 +343,16 @@ public class McpHostManagerVerticle extends AbstractVerticle {
         
         // Make toolName final for lambda
         final String finalToolName = toolName;
+        
+        // Publish tool routing event if streaming
+        if (streamId != null) {
+            vertx.eventBus().publish("mcp.tool.routing",
+                new JsonObject()
+                    .put("streamId", streamId)
+                    .put("tool", finalToolName)
+                    .put("client", clientId)
+                    .put("status", "routing"));
+        }
         
         // Update request with original tool name for client
         JsonObject clientRequest = request.copy()
@@ -350,10 +366,27 @@ public class McpHostManagerVerticle extends AbstractVerticle {
                 JsonObject result = (JsonObject) reply.body();
                 result.put("_routedBy", "McpHostManager");
                 result.put("_toolName", finalToolName);  // Include prefixed name in response
+                
+                // Publish tool completion event if streaming
+                if (streamId != null) {
+                    vertx.eventBus().publish("mcp.tool.completed",
+                        new JsonObject()
+                            .put("streamId", streamId)
+                            .put("tool", finalToolName)
+                            .put("result", result)
+                            .put("status", "completed"));
+                }
+                
                 msg.reply(result);
             })
             .onFailure(err -> {
                 msg.fail(500, "Tool execution failed: " + err.getMessage());
+                
+                // Publish error to stream if streaming
+                if (streamId != null) {
+                    vertx.eventBus().publish("conversation." + streamId + ".error",
+                        new JsonObject().put("error", "Tool execution failed: " + err.getMessage()));
+                }
             });
     }
     

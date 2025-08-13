@@ -92,3 +92,33 @@ tasks.withType<Test> {
 tasks.withType<Copy>().configureEach {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
+
+// Configure the run task explicitly
+tasks.named<JavaExec>("run") {
+    // Ensure clean build before running to avoid file locks
+    dependsOn("classes")
+    
+    // Set main class explicitly
+    mainClass.set(launcherClassName)
+    
+    // Add JVM arguments for better Windows compatibility
+    jvmArgs = listOf(
+        "-Xmx2g",
+        "-Dfile.encoding=UTF-8",
+        "-Djava.awt.headless=true"
+    )
+    
+    // Set working directory
+    workingDir = projectDir
+    
+    // Ensure classpath is set correctly
+    classpath = sourceSets["main"].runtimeClasspath
+}
+
+// Add a clean task that handles Windows file locks better
+tasks.named("clean") {
+    doFirst {
+        // Try to delete build directory, ignore errors on Windows
+        delete(layout.buildDirectory)
+    }
+}

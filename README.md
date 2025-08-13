@@ -12,6 +12,7 @@
 - **⚙️ Configuration-Driven Architecture** - Flexible JSON-based server configuration
 - **🔌 Local Server Support** - Spawn and manage local MCP servers via stdio
 - **🎨 Enhanced Tool Routing** - Smart routing with prefixed and unprefixed name support
+- **📡 SSE Streaming** - Real-time tool call notifications via Server-Sent Events
 
 ## 🚀 Quick Start for New Developers
 
@@ -47,6 +48,9 @@ java -jar build/libs/Agents-MCP-Host-1.0.0-fat.jar
 # Run comprehensive MCP tests
 ./test-mcp-full.sh
 
+# Test SSE streaming
+./test-sse.sh
+
 # Or test individual components:
 
 # Check MCP infrastructure status
@@ -60,6 +64,12 @@ curl http://localhost:8080/host/v1/tools
 curl -X POST http://localhost:8080/host/v1/conversations \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Calculate 10 plus 20"}]}'
+
+# Test SSE streaming (see real-time tool notifications!)
+curl -N -X POST http://localhost:8080/host/v1/conversations \
+  -H "Accept: text/event-stream" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Calculate 42 plus 58"}]}'
 ```
 
 ## 🏗️ Architecture Overview
@@ -90,6 +100,7 @@ This system implements the complete Model Context Protocol (MCP) specification w
 2. **McpConfigLoader** - Loads and manages MCP configuration
 3. **HostAPIVerticle** - Main HTTP server on port 8080
 4. **ConversationVerticle** - Unified chat endpoint with auto tool detection
+5. **StreamingConversationHandler** - SSE streaming for real-time tool notifications
 
 ### Tech Stack
 - **Java 21** - Language
@@ -201,6 +212,19 @@ Agents-MCP-Host/
 | `/health` | GET | System health and metrics |
 | `/host/v1/status` | GET | Server configuration info |
 | `/host/v1/conversations` | POST | Unified chat endpoint with auto tool detection |
+
+### Streaming Support (SSE)
+The conversation endpoint supports Server-Sent Events for real-time streaming:
+- Add `Accept: text/event-stream` header to enable SSE
+- Receive real-time notifications for tool calls
+- See tool execution progress as it happens
+
+**SSE Event Types:**
+- `connected` - Connection established
+- `tool_call_start` - Tool execution beginning
+- `tool_call_complete` - Tool finished with result
+- `final_response` - Complete response ready
+- `done` - Stream complete
 
 ### MCP Management Endpoints
 | Endpoint | Method | Description |

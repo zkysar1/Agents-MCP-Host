@@ -49,6 +49,7 @@ java -jar build/libs/Agents-MCP-Host-1.0.0-fat.jar
 - Local process server support via VertxStdioTransport
 - MCP status and monitoring endpoints
 - OpenAI integration for non-tool queries
+- **SSE Streaming for real-time tool notifications** 🔥
 
 🚀 **Recent Enhancements (January 2025)**:
 - ✅ Stdio transport for local MCP servers
@@ -56,6 +57,7 @@ java -jar build/libs/Agents-MCP-Host-1.0.0-fat.jar
 - ✅ Configuration-driven server setup
 - ✅ LocalServerClientVerticle for process management
 - ✅ McpConfigLoader for flexible configuration
+- ✅ **Server-Sent Events (SSE) streaming for tool call transparency**
 
 🚧 **Future Enhancements**:
 - Elicitation workflow (partially implemented)
@@ -80,15 +82,37 @@ HTTP Request → HostAPIVerticle → ConversationVerticle → [Auto-Detection]
                                     No Tool? → LlmAPIService → OpenAI
 ```
 
+### SSE Streaming Architecture
+
+```
+Client Request (Accept: text/event-stream)
+         ↓
+ConversationVerticle (detects streaming request)
+         ↓
+StreamingConversationHandler (manages SSE connection)
+         ↓
+Event Bus Messages:
+  - conversation.{streamId}.tool.start → 🔧 Tool starting notification
+  - conversation.{streamId}.tool.complete → ✓ Tool completed notification
+  - conversation.{streamId}.final → Final response
+         ↓
+SSE Events to Client:
+  - event: tool_call_start
+  - event: tool_call_complete  
+  - event: final_response
+  - event: done
+```
+
 ### Key Files to Understand
 
 1. **Driver.java** - Entry point, deploys all verticles
-2. **McpHostManagerVerticle.java** - Orchestrates all MCP components
+2. **McpHostManagerVerticle.java** - Orchestrates all MCP components, publishes tool events
 3. **VertxStreamableHttpTransport.java** - HTTP/SSE transport adapter
-4. **ConversationVerticle.java** - Unified chat with auto tool detection
-5. **4 Server Verticles** - Calculator, Weather, Database, FileSystem
-6. **3 Client Verticles** - DualServer, SingleServer, FileSystem
-7. **LlmAPIService.java** - OpenAI API integration
+4. **ConversationVerticle.java** - Unified chat with auto tool detection and SSE support
+5. **StreamingConversationHandler.java** - NEW: Manages SSE connections and event streaming
+6. **4 Server Verticles** - Calculator, Weather, Database, FileSystem
+7. **3 Client Verticles** - DualServer, SingleServer, FileSystem
+8. **LlmAPIService.java** - OpenAI API integration
 
 ### Vert.x Patterns Used
 
@@ -174,7 +198,14 @@ When adding new features:
 
 # Testing
 ./test-mcp-endpoints.sh         # Test all endpoints
+./test-sse.sh                   # Test SSE streaming
 curl http://localhost:8080/health  # Quick health check
+
+# Test SSE streaming
+curl -N -X POST http://localhost:8080/host/v1/conversations \
+  -H "Accept: text/event-stream" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Calculate 42 plus 58"}]}'
 
 # Debugging
 lsof -i :8080                   # Check port usage
@@ -202,6 +233,25 @@ git diff                        # View modifications
 5. **Track progress** - Use TodoWrite tool consistently
 6. **Test with API key** - Run `./test-openai.sh` for full testing
 7. **Understand routing** - Know when tools vs LLM are used
+8. **Test SSE streaming** - Run `./test-sse.sh` to verify streaming works
+
+## 🔄 SSE Streaming Details
+
+### How to Enable Streaming
+Add `Accept: text/event-stream` header to conversation requests. The system automatically detects and switches to SSE mode.
+
+### Event Flow for Tool Calls
+1. Client sends request with streaming header
+2. ConversationVerticle detects streaming mode
+3. StreamingConversationHandler creates SSE connection
+4. Tool execution publishes events to event bus
+5. Events stream to client in real-time
+
+### Troubleshooting SSE
+- **No events received**: Check Accept header is set correctly
+- **Connection drops**: Verify no proxy/firewall blocking SSE
+- **Events delayed**: Ensure no buffering in reverse proxies (nginx needs `proxy_buffering off;`)
+- **Tool events missing**: Check McpHostManagerVerticle is publishing events with streamId
 
 ## 🔗 External Resources
 

@@ -4,6 +4,7 @@ import AgentsMCPHost.services.LlmAPIService;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
+import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
@@ -35,6 +36,20 @@ public class ConversationVerticle extends AbstractVerticle {
       availableTools = update.getInteger("totalTools", 0);
     });
     
+    // Register streaming processor
+    vertx.eventBus().consumer("conversation.process.streaming", msg -> {
+      JsonObject request = (JsonObject) msg.body();
+      String streamId = request.getString("streamId");
+      JsonArray streamMessages = request.getJsonArray("messages");
+      String userMsg = request.getString("userMessage");
+      
+      if (mcpEnabled && needsTools(userMsg)) {
+        handleWithToolsStreaming(vertx, streamId, userMsg, streamMessages);
+      } else {
+        handleStandardLLMStreaming(vertx, streamId, streamMessages);
+      }
+    });
+    
     startPromise.complete();
   }
   
@@ -48,11 +63,15 @@ public class ConversationVerticle extends AbstractVerticle {
   }
   
   /**
-   * Handle conversation requests
+   * Handle conversation requests (supports both regular JSON and SSE streaming)
    * @param ctx The routing context
    */
   private static void handleConversation(RoutingContext ctx) {
     try {
+      // Check if client wants SSE streaming
+      String acceptHeader = ctx.request().getHeader("Accept");
+      boolean wantsStreaming = "text/event-stream".equals(acceptHeader);
+      
       // Parse the request body
       JsonObject requestBody = ctx.body().asJsonObject();
       
@@ -86,7 +105,13 @@ public class ConversationVerticle extends AbstractVerticle {
       // Extract last user message for tool detection
       String lastUserMessage = extractLastUserMessage(messages);
       
-      // Check if message needs MCP tools
+      // If streaming is requested, handle with SSE
+      if (wantsStreaming) {
+        StreamingConversationHandler.handle(ctx, messages, ctx.vertx());
+        return;
+      }
+      
+      // Check if message needs MCP tools (non-streaming path)
       if (mcpEnabled && needsTools(lastUserMessage)) {
         handleWithTools(ctx, lastUserMessage, messages);
       } else {
@@ -609,5 +634,82 @@ public class ConversationVerticle extends AbstractVerticle {
       }
     }
     return null;
+  }
+  
+  /**
+   * Handle conversation with tools - streaming version
+   */
+  private static void handleWithToolsStreaming(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
+    String tool = detectTool(userMessage);
+    
+    if (tool != null) {
+      // Notify tool call start
+      vertx.eventBus().publish("conversation." + streamId + ".tool.start", 
+        new JsonObject().put("tool", tool));
+      
+      JsonObject toolArguments = createToolArguments(userMessage, tool);
+      
+      // Route through MCP host manager for proper tool execution
+      JsonObject routeRequest = new JsonObject()
+        .put("tool", tool)
+        .put("arguments", toolArguments)
+        .put("userMessage", userMessage)
+        .put("streamId", streamId);
+      
+      vertx.eventBus().request("mcp.host.route", routeRequest, ar -> {
+        if (ar.succeeded()) {
+          JsonObject toolResult = (JsonObject) ar.result().body();
+          
+          // Notify tool completion
+          vertx.eventBus().publish("conversation." + streamId + ".tool.complete", 
+            new JsonObject()
+              .put("tool", tool)
+              .put("result", toolResult));
+          
+          // Send final response
+          String response = formatMcpToolResponse(tool, toolResult);
+          vertx.eventBus().publish("conversation." + streamId + ".final", 
+            new JsonObject().put("content", response));
+        } else {
+          // Handle error
+          vertx.eventBus().publish("conversation." + streamId + ".error", 
+            new JsonObject().put("error", "Tool execution failed: " + ar.cause().getMessage()));
+        }
+      });
+    } else {
+      handleStandardLLMStreaming(vertx, streamId, messages);
+    }
+  }
+  
+  /**
+   * Handle standard LLM processing - streaming version
+   */
+  private static void handleStandardLLMStreaming(Vertx vertx, String streamId, JsonArray messages) {
+    LlmAPIService llmService = LlmAPIService.getInstance();
+    
+    if (llmService.isInitialized()) {
+      // Send fallback message if not initialized
+      vertx.eventBus().publish("conversation." + streamId + ".final", 
+        new JsonObject().put("content", "I'm currently running without an AI backend. Please set the OPENAI_API_KEY environment variable to enable AI responses."));
+      return;
+    }
+    
+    Future<JsonObject> llmFuture = llmService.chatCompletion(messages);
+    
+    llmFuture.onSuccess(response -> {
+      // Extract content from OpenAI response
+      if (response.containsKey("choices") && response.getJsonArray("choices").size() > 0) {
+        String content = response.getJsonArray("choices")
+          .getJsonObject(0)
+          .getJsonObject("message")
+          .getString("content");
+        
+        vertx.eventBus().publish("conversation." + streamId + ".final", 
+          new JsonObject().put("content", content));
+      }
+    }).onFailure(error -> {
+      vertx.eventBus().publish("conversation." + streamId + ".error", 
+        new JsonObject().put("error", "LLM service error: " + error.getMessage()));
+    });
   }
 }
