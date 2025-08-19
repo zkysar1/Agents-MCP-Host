@@ -1,19 +1,1 @@
 Message,Level,Class,Category,Character,SequenceReceived,EpochTimeMillis
-ZAK-Agent startup complete,0,Driver,StartUp,System,1,1755570646721
-Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,2,1755570661124
-Oracle Agent Loop deployed,3,Driver,StartUp,Oracle,3,1755570661128
-Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,4,1755570664780
-Oracle MCP Server started,1,OracleServer,StartUp,MCP,5,1755570664826
-Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,6,1755570671628
-Oracle Metadata Server started,1,OracleMetadata,StartUp,MCP,7,1755570671632
-OracleClient ready with 7 tools,1,OracleClient,StartUp,MCP,8,1755570673815
-MCP infrastructure ready,1,McpHostManager,StartUp,MCP,9,1755570673816
-MCP Host Manager deployed,3,Driver,StartUp,MCP,10,1755570673816
-Starting Oracle Agent pipeline for: Execute query: SELECT * FROM customers; DROP TABLE customers; --,1,OracleAgentLoop,Pipeline,Oracle,11,1755570738551
-OpenAI API call successful,2,LlmAPIService,API,Success,12,1755570748756
-OpenAI API call successful,2,LlmAPIService,API,Success,13,1755570770289
-Query execution failed: Query execution failed: ORA-00933: SQL command not properly ended
-
-https://docs.oracle.com/error-help/db/ora-00933/,0,OracleAgentLoop,Execute,Oracle,14,1755570771761
-OpenAI API call successful,2,LlmAPIService,API,Success,15,1755570772894
-OpenAI API call successful,2,LlmAPIService,API,Success,16,1755570789443
