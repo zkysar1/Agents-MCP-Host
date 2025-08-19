@@ -84,12 +84,25 @@ public class OracleAgentLoop extends AbstractVerticle {
                 vertx.eventBus().consumer("oracle.session.status", this::handleStatusRequest);
                 
                 System.out.println("OracleAgentLoop started - ready for intelligent SQL generation");
+                
+                // Publish ready event for Driver to know we're initialized
+                vertx.eventBus().publish("oracle.agent.ready", new JsonObject()
+                    .put("timestamp", System.currentTimeMillis())
+                    .put("status", "ready"));
+                
                 startPromise.complete();
             })
             .onFailure(err -> {
                 System.err.println("Failed to initialize Oracle connection in Agent Loop: " + err.getMessage());
                 // Still start but without DB
                 vertx.eventBus().consumer("oracle.agent.process", this::handleAgentProcess);
+                
+                // Still publish ready event (with degraded status)
+                vertx.eventBus().publish("oracle.agent.ready", new JsonObject()
+                    .put("timestamp", System.currentTimeMillis())
+                    .put("status", "degraded")
+                    .put("error", err.getMessage()));
+                
                 startPromise.complete();
             });
     }
@@ -342,7 +355,128 @@ public class OracleAgentLoop extends AbstractVerticle {
     }
     
     /**
-     * Generate SQL intelligently using LLM with full schema context
+     * Discover actual data values for entities mentioned in the query
+     */
+    private Future<JsonObject> discoverDataValues(ConversationContext context) {
+        if (!llmService.isInitialized()) {
+            return Future.succeededFuture(new JsonObject());
+        }
+        
+        JsonObject discoveries = new JsonObject();
+        List<Future<Void>> discoveryFutures = new ArrayList<>();
+        
+        // If user mentioned geographic locations, discover how they're represented
+        if (context.nluResult != null) {
+            JsonArray locations = context.nluResult.getJsonArray("locations", new JsonArray());
+            for (int i = 0; i < locations.size(); i++) {
+                String location = locations.getString(i);
+                discoveryFutures.add(discoverLocationMapping(location, discoveries));
+            }
+            
+            // Discover status values
+            JsonArray statusValues = context.nluResult.getJsonArray("status_values", new JsonArray());
+            for (int i = 0; i < statusValues.size(); i++) {
+                String status = statusValues.getString(i);
+                discoveryFutures.add(discoverStatusMapping(status, discoveries));
+            }
+        }
+        
+        return Future.all(discoveryFutures)
+            .map(v -> {
+                context.dataDiscoveries = discoveries;
+                return discoveries;
+            });
+    }
+    
+    /**
+     * Discover how a location is represented in the actual data
+     */
+    private Future<Void> discoverLocationMapping(String location, JsonObject discoveries) {
+        // Sample customer data to see what geographic fields exist
+        String sampleQuery = "SELECT * FROM customers WHERE ROWNUM <= 20";
+        
+        return oracleManager.executeQuery(sampleQuery)
+            .compose(sampleData -> {
+                if (sampleData.isEmpty()) {
+                    return Future.succeededFuture();
+                }
+                
+                // Ask LLM to identify how the location might be represented
+                String prompt = "Given this sample customer data:\n" + 
+                              sampleData.encodePrettily() + "\n\n" +
+                              "The user is asking about '" + location + "'.\n" +
+                              "How is this location represented in the data? " +
+                              "List the specific column names and values that would identify " + location + ".\n" +
+                              "Return as JSON: {\"column\": \"column_name\", \"values\": [\"value1\", \"value2\"], \"explanation\": \"why\"}";
+                
+                JsonArray messages = new JsonArray()
+                    .add(new JsonObject()
+                        .put("role", "system")
+                        .put("content", "You are a data analyst examining database records to find geographic patterns."))
+                    .add(new JsonObject()
+                        .put("role", "user")
+                        .put("content", prompt));
+                
+                return llmService.chatCompletion(messages);
+            })
+            .compose(response -> {
+                try {
+                    JsonArray choices = response.getJsonArray("choices");
+                    if (choices != null && !choices.isEmpty()) {
+                        String content = choices.getJsonObject(0)
+                            .getJsonObject("message")
+                            .getString("content");
+                        
+                        // Try to parse as JSON
+                        JsonObject mapping = new JsonObject(content);
+                        discoveries.put("location_" + location, mapping);
+                        System.out.println("Discovered location mapping for " + location + ": " + mapping.encode());
+                    }
+                } catch (Exception e) {
+                    System.err.println("Failed to parse location discovery: " + e.getMessage());
+                }
+                return Future.succeededFuture((Void) null);
+            })
+            .recover(err -> {
+                System.err.println("Location discovery failed for " + location + ": " + err.getMessage());
+                return Future.succeededFuture((Void) null);
+            });
+    }
+    
+    /**
+     * Discover how a status is represented in the actual data
+     */
+    private Future<Void> discoverStatusMapping(String status, JsonObject discoveries) {
+        // Check enumeration tables for status values
+        String enumQuery = "SELECT * FROM order_status_enum";
+        
+        return oracleManager.executeQuery(enumQuery)
+            .compose(enumData -> {
+                if (!enumData.isEmpty()) {
+                    // Find matching status
+                    for (int i = 0; i < enumData.size(); i++) {
+                        JsonObject row = enumData.getJsonObject(i);
+                        String statusCode = row.getString("STATUS_CODE", "");
+                        if (statusCode.equalsIgnoreCase(status)) {
+                            discoveries.put("status_" + status, new JsonObject()
+                                .put("table", "order_status_enum")
+                                .put("column", "status_code")
+                                .put("value", statusCode)
+                                .put("id", row.getInteger("STATUS_ID")));
+                            break;
+                        }
+                    }
+                }
+                return Future.succeededFuture((Void) null);
+            })
+            .recover(err -> {
+                System.err.println("Status discovery failed: " + err.getMessage());
+                return Future.succeededFuture((Void) null);
+            });
+    }
+    
+    /**
+     * Generate SQL intelligently using LLM with full schema context and discovered data
      */
     private Future<String> generateIntelligentSqlWithLLM(ConversationContext context) {
         if (!llmService.isInitialized()) {
@@ -350,120 +484,131 @@ public class OracleAgentLoop extends AbstractVerticle {
             return generateSimpleSql(context);
         }
         
-        // Build comprehensive schema context
-        StringBuilder schemaContext = new StringBuilder();
-        schemaContext.append("Database Schema Information:\n\n");
-        
-        // Add matched tables
-        if (context.schemaMatches != null && context.schemaMatches.tableMatches != null) {
-            schemaContext.append("Relevant Tables:\n");
-            for (SchemaMatcher.TableMatch match : context.schemaMatches.tableMatches) {
-                schemaContext.append("- ").append(match.tableName);
-                if (match.rowCount > 0) {
-                    schemaContext.append(" (rows: ").append(match.rowCount).append(")");
-                }
-                schemaContext.append("\n");
-            }
-            schemaContext.append("\n");
-        }
-        
-        // Add column information
-        if (context.tableMetadata != null && !context.tableMetadata.isEmpty()) {
-            schemaContext.append("Table Columns:\n");
-            for (Map.Entry<String, JsonObject> entry : context.tableMetadata.entrySet()) {
-                schemaContext.append("Table ").append(entry.getKey()).append(":\n");
-                JsonObject metadata = entry.getValue();
-                JsonArray columns = metadata.getJsonArray("columns");
-                if (columns != null) {
-                    for (int i = 0; i < columns.size(); i++) {
-                        JsonObject col = columns.getJsonObject(i);
-                        if (col != null) {
-                            String colName = col.getString("name", "unknown");
-                            String colType = col.getString("type", "unknown");
-                            schemaContext.append("  - ").append(colName);
-                            schemaContext.append(" (").append(colType).append(")\n");
+        // First, discover how data values are represented
+        return discoverDataValues(context)
+            .compose(discoveries -> {
+                // Build comprehensive schema context with discoveries
+                StringBuilder schemaContext = new StringBuilder();
+                schemaContext.append("Database Schema Information:\n\n");
+                
+                // Add matched tables with sample data
+                if (context.schemaMatches != null && context.schemaMatches.tableMatches != null) {
+                    schemaContext.append("Relevant Tables:\n");
+                    for (SchemaMatcher.TableMatch match : context.schemaMatches.tableMatches) {
+                        schemaContext.append("- ").append(match.tableName);
+                        if (match.rowCount > 0) {
+                            schemaContext.append(" (rows: ").append(match.rowCount).append(")");
                         }
+                        schemaContext.append("\n");
                     }
-                }
-            }
-            schemaContext.append("\n");
-        }
-        
-        // Create enhanced SQL generation prompt with comprehensive guidance
-        String sqlPrompt = "Generate an optimized Oracle SQL query for this business request:\n\n" +
-                          "User Query: \"" + context.originalQuery + "\"\n\n" +
-                          "Query Intent Analysis:\n" + 
-                          (context.nluResult != null ? "- Intent: " + context.nluResult.getString("intent", "unknown") + "\n" +
-                           "- Entities: " + context.nluResult.getJsonArray("entities", new JsonArray()).encode() + "\n" : "") +
-                          "\n" + schemaContext.toString() +
-                          "\nSQL Generation Rules:\n" +
-                          "1. Use ONLY tables and columns from the schema above\n" +
-                          "2. Join tables using the foreign key relationships provided\n" +
-                          "3. Handle case-insensitive comparisons with UPPER() for text fields\n" +
-                          "4. Use Oracle 12c+ syntax (FETCH FIRST N ROWS ONLY for limits)\n" +
-                          "5. Apply business logic:\n" +
-                          "   - 'California' means WHERE UPPER(state) IN ('CA', 'CALIFORNIA')\n" +
-                          "   - 'pending' means WHERE UPPER(status) = 'PENDING'\n" +
-                          "   - 'how many' means SELECT COUNT(*)\n" +
-                          "   - Date ranges should use BETWEEN or >= and <=\n" +
-                          "6. Include meaningful aliases for computed columns\n" +
-                          "7. Order results logically (dates DESC, names ASC)\n" +
-                          "8. Default limit is 100 rows for listing queries\n" +
-                          "9. For counts/aggregations, don't add row limits\n" +
-                          "10. Handle NULLs appropriately with NVL() or IS NULL checks\n" +
-                          "\nReturn ONLY the SQL query. No explanations or comments.\n";
-        
-        JsonArray messages = new JsonArray()
-            .add(new JsonObject()
-                .put("role", "system")
-                .put("content", "You are an Oracle SQL expert. Generate precise SQL queries based on schema information."))
-            .add(new JsonObject()
-                .put("role", "user")
-                .put("content", sqlPrompt));
-        
-        return llmService.chatCompletion(messages)
-            .map(response -> {
-                // Extract SQL from LLM response
-                JsonArray choices = response.getJsonArray("choices");
-                if (choices != null && !choices.isEmpty()) {
-                    JsonObject firstChoice = choices.getJsonObject(0);
-                    if (firstChoice == null) {
-                        return generateFallbackSql(context.originalQuery);
-                    }
-                    JsonObject message = firstChoice.getJsonObject("message");
-                    if (message == null) {
-                        return generateFallbackSql(context.originalQuery);
-                    }
-                    String sql = message.getString("content");
-                    if (sql == null || sql.trim().isEmpty()) {
-                        return generateFallbackSql(context.originalQuery);
-                    }
-                    
-                    // Clean up the SQL
-                    sql = sql.trim();
-                    
-                    // Remove markdown code blocks if present
-                    if (sql.startsWith("```sql")) {
-                        sql = sql.substring(6);
-                    }
-                    if (sql.startsWith("```")) {
-                        sql = sql.substring(3);
-                    }
-                    if (sql.endsWith("```")) {
-                        sql = sql.substring(0, sql.length() - 3);
-                    }
-                    sql = sql.trim();
-                    
-                    System.out.println("LLM Generated SQL: " + sql);
-                    return sql;
+                    schemaContext.append("\n");
                 }
                 
-                // Fallback if no response
-                return generateFallbackSql(context.originalQuery);
-            })
-            .recover(err -> {
-                System.err.println("LLM SQL generation failed: " + err.getMessage());
-                return Future.succeededFuture(generateFallbackSql(context.originalQuery));
+                // Add column information with explicit note about what exists
+                if (context.tableMetadata != null && !context.tableMetadata.isEmpty()) {
+                    schemaContext.append("Table Columns (THESE ARE THE ONLY COLUMNS THAT EXIST):\n");
+                    for (Map.Entry<String, JsonObject> entry : context.tableMetadata.entrySet()) {
+                        schemaContext.append("Table ").append(entry.getKey()).append(":\n");
+                        JsonObject metadata = entry.getValue();
+                        JsonArray columns = metadata.getJsonArray("columns");
+                        if (columns != null) {
+                            for (int i = 0; i < columns.size(); i++) {
+                                JsonObject col = columns.getJsonObject(i);
+                                if (col != null) {
+                                    String colName = col.getString("name", "unknown");
+                                    String colType = col.getString("type", "unknown");
+                                    schemaContext.append("  - ").append(colName);
+                                    schemaContext.append(" (").append(colType).append(")\n");
+                                }
+                            }
+                        }
+                    }
+                    schemaContext.append("\n");
+                }
+                
+                // Add discovered data mappings
+                if (context.dataDiscoveries != null && !context.dataDiscoveries.isEmpty()) {
+                    schemaContext.append("Discovered Data Mappings:\n");
+                    for (String key : context.dataDiscoveries.fieldNames()) {
+                        JsonObject mapping = context.dataDiscoveries.getJsonObject(key);
+                        schemaContext.append("- ").append(key).append(": ");
+                        schemaContext.append(mapping.encode()).append("\n");
+                    }
+                    schemaContext.append("\n");
+                }
+                
+                // Create SQL generation prompt WITHOUT hardcoded assumptions
+                String sqlPrompt = "Generate an Oracle SQL query for this request:\n\n" +
+                                  "User Query: \"" + context.originalQuery + "\"\n\n" +
+                                  "Query Intent Analysis:\n" + 
+                                  (context.nluResult != null ? "- Intent: " + context.nluResult.getString("intent", "unknown") + "\n" +
+                                   "- Entities: " + context.nluResult.getJsonArray("entities", new JsonArray()).encode() + "\n" : "") +
+                                  "\n" + schemaContext.toString() +
+                                  "\nIMPORTANT SQL Generation Rules:\n" +
+                                  "1. Use ONLY columns that actually exist in the schema above - DO NOT assume columns like 'state' exist\n" +
+                                  "2. Use the Discovered Data Mappings to understand how to filter for locations and statuses\n" +
+                                  "3. If a location was discovered in certain cities, use city IN (...) not a non-existent state column\n" +
+                                  "4. Join tables using actual foreign key relationships (e.g., customer_id, status_id)\n" +
+                                  "5. For 'pending' status, check the discovered mapping for the correct status_id or status_code\n" +
+                                  "6. Use Oracle 12c+ syntax (FETCH FIRST N ROWS ONLY for limits)\n" +
+                                  "7. Handle case-insensitive comparisons with UPPER() for text fields\n" +
+                                  "8. For 'how many' or count queries, use SELECT COUNT(*)\n" +
+                                  "9. Default limit is 100 rows for listing queries\n" +
+                                  "10. Include proper JOIN conditions when querying across tables\n" +
+                                  "\nReturn ONLY the SQL query. No explanations or comments.\n";
+        
+                JsonArray messages = new JsonArray()
+                    .add(new JsonObject()
+                        .put("role", "system")
+                        .put("content", "You are an Oracle SQL expert. Generate precise SQL queries based on schema information."))
+                    .add(new JsonObject()
+                        .put("role", "user")
+                        .put("content", sqlPrompt));
+                
+                return llmService.chatCompletion(messages)
+                    .map(response -> {
+                        // Extract SQL from LLM response
+                        JsonArray choices = response.getJsonArray("choices");
+                        if (choices != null && !choices.isEmpty()) {
+                            JsonObject firstChoice = choices.getJsonObject(0);
+                            if (firstChoice == null) {
+                                return generateFallbackSql(context.originalQuery);
+                            }
+                            JsonObject message = firstChoice.getJsonObject("message");
+                            if (message == null) {
+                                return generateFallbackSql(context.originalQuery);
+                            }
+                            String sql = message.getString("content");
+                            if (sql == null || sql.trim().isEmpty()) {
+                                return generateFallbackSql(context.originalQuery);
+                            }
+                            
+                            // Clean up the SQL
+                            sql = sql.trim();
+                            
+                            // Remove markdown code blocks if present
+                            if (sql.startsWith("```sql")) {
+                                sql = sql.substring(6);
+                            }
+                            if (sql.startsWith("```")) {
+                                sql = sql.substring(3);
+                            }
+                            if (sql.endsWith("```")) {
+                                sql = sql.substring(0, sql.length() - 3);
+                            }
+                            sql = sql.trim();
+                            
+                            System.out.println("LLM Generated SQL: " + sql);
+                            return sql;
+                        }
+                        
+                        // Fallback if no response
+                        return generateFallbackSql(context.originalQuery);
+                    })
+                    .recover(err -> {
+                        System.err.println("LLM SQL generation failed: " + err.getMessage());
+                        return Future.succeededFuture(generateFallbackSql(context.originalQuery));
+                    });
             });
     }
     
@@ -660,7 +805,7 @@ public class OracleAgentLoop extends AbstractVerticle {
     }
     
     /**
-     * Execute the SQL query
+     * Execute the SQL query with intelligent retry on failure
      */
     private Future<JsonArray> executeQuery(String sql) {
         System.out.println("[DEBUG] Executing SQL query: " + sql);
@@ -671,24 +816,192 @@ public class OracleAgentLoop extends AbstractVerticle {
             return Future.failedFuture("Invalid SQL query");
         }
         
-        // Use OracleConnectionManager directly for better reliability
+        // Execute with error handling and potential retry
         return oracleManager.executeQuery(sql)
             .onSuccess(results -> {
                 System.out.println("[DEBUG] Query executed successfully, returned " + 
                                  results.size() + " rows");
             })
-            .onFailure(err -> {
+            .recover(err -> {
                 System.err.println("[ERROR] Query execution failed: " + err.getMessage());
                 
-                // Try to provide helpful error context
-                if (err.getMessage().contains("ORA-00942")) {
-                    System.err.println("[HINT] Table or view does not exist. Check table names.");
-                } else if (err.getMessage().contains("ORA-00904")) {
-                    System.err.println("[HINT] Invalid column name. Check column names.");
+                // Intelligent error recovery using LLM
+                if (err.getMessage().contains("ORA-00904")) {
+                    // Invalid column - need to fix the SQL
+                    return handleInvalidColumnError(sql, err.getMessage());
+                } else if (err.getMessage().contains("ORA-00942")) {
+                    // Table doesn't exist
+                    return handleTableNotFoundError(sql, err.getMessage());
                 } else if (err.getMessage().contains("ORA-00936")) {
-                    System.err.println("[HINT] Missing expression in SQL.");
+                    // Missing expression
+                    return handleMissingExpressionError(sql, err.getMessage());
                 }
+                
+                // For other errors, return empty results with error info
+                return Future.succeededFuture(new JsonArray()
+                    .add(new JsonObject()
+                        .put("error", true)
+                        .put("message", err.getMessage())
+                        .put("sql", sql)));
             });
+    }
+    
+    /**
+     * Handle invalid column error by discovering correct columns and retrying
+     */
+    private Future<JsonArray> handleInvalidColumnError(String sql, String errorMsg) {
+        System.out.println("[RECOVERY] Attempting to fix invalid column error");
+        
+        if (!llmService.isInitialized()) {
+            return Future.failedFuture("Column not found and LLM not available for recovery");
+        }
+        
+        // Extract the invalid column name from error message
+        String invalidColumn = extractColumnFromError(errorMsg);
+        
+        // Get actual schema to show LLM what columns exist
+        return getActualSchemaForTables(sql)
+            .compose(actualSchema -> {
+                String prompt = "The following SQL query failed with error: " + errorMsg + "\n\n" +
+                              "Failed SQL:\n" + sql + "\n\n" +
+                              "Actual database schema:\n" + actualSchema + "\n\n" +
+                              "The column '" + invalidColumn + "' does not exist.\n" +
+                              "Please rewrite this SQL using ONLY columns that actually exist in the schema.\n" +
+                              "If you need to filter by location (like California), use the city column with appropriate city names.\n" +
+                              "Return ONLY the corrected SQL query.";
+                
+                JsonArray messages = new JsonArray()
+                    .add(new JsonObject()
+                        .put("role", "system")
+                        .put("content", "You are an Oracle SQL expert fixing queries to match actual schema."))
+                    .add(new JsonObject()
+                        .put("role", "user")
+                        .put("content", prompt));
+                
+                return llmService.chatCompletion(messages);
+            })
+            .compose(response -> {
+                // Extract corrected SQL
+                JsonArray choices = response.getJsonArray("choices");
+                if (choices != null && !choices.isEmpty()) {
+                    String correctedSql = choices.getJsonObject(0)
+                        .getJsonObject("message")
+                        .getString("content", "");
+                    
+                    // Clean up SQL
+                    correctedSql = correctedSql.replaceAll("```sql", "")
+                                              .replaceAll("```", "")
+                                              .trim();
+                    
+                    System.out.println("[RECOVERY] Retrying with corrected SQL: " + correctedSql);
+                    
+                    // Retry with corrected SQL
+                    return oracleManager.executeQuery(correctedSql);
+                }
+                
+                return Future.failedFuture("Could not generate corrected SQL");
+            })
+            .recover(retryErr -> {
+                // If retry also fails, return informative error
+                return Future.succeededFuture(new JsonArray()
+                    .add(new JsonObject()
+                        .put("error", true)
+                        .put("message", "Column '" + invalidColumn + "' does not exist. Available columns need to be checked.")
+                        .put("original_error", errorMsg)
+                        .put("suggestion", "Try querying by city instead of state, or check available columns")));
+            });
+    }
+    
+    /**
+     * Extract column name from Oracle error message
+     */
+    private String extractColumnFromError(String errorMsg) {
+        // ORA-00904: "STATE": invalid identifier
+        if (errorMsg.contains("\"")) {
+            int start = errorMsg.indexOf("\"") + 1;
+            int end = errorMsg.indexOf("\"", start);
+            if (end > start) {
+                return errorMsg.substring(start, end);
+            }
+        }
+        return "unknown";
+    }
+    
+    /**
+     * Get actual schema for tables mentioned in SQL
+     */
+    private Future<String> getActualSchemaForTables(String sql) {
+        // Extract table names from SQL (simplified - just look for FROM and JOIN)
+        Set<String> tableNames = new HashSet<>();
+        String upperSql = sql.toUpperCase();
+        
+        // Find tables after FROM
+        if (upperSql.contains("FROM")) {
+            int fromIndex = upperSql.indexOf("FROM") + 5;
+            int whereIndex = upperSql.indexOf("WHERE", fromIndex);
+            if (whereIndex == -1) whereIndex = upperSql.length();
+            
+            String fromClause = sql.substring(fromIndex, whereIndex);
+            // Extract table names (simplified parsing)
+            String[] parts = fromClause.split("\\s+|,");
+            for (String part : parts) {
+                if (!part.trim().isEmpty() && !part.equalsIgnoreCase("JOIN") && 
+                    !part.equalsIgnoreCase("ON") && !part.contains("=")) {
+                    tableNames.add(part.trim().toUpperCase());
+                }
+            }
+        }
+        
+        // Get metadata for these tables
+        List<Future<String>> metadataFutures = new ArrayList<>();
+        for (String table : tableNames) {
+            metadataFutures.add(oracleManager.getTableMetadata(table)
+                .map(metadata -> {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("Table ").append(table).append(":\n");
+                    JsonArray columns = metadata.getJsonArray("columns");
+                    if (columns != null) {
+                        for (int i = 0; i < columns.size(); i++) {
+                            JsonObject col = columns.getJsonObject(i);
+                            sb.append("  - ").append(col.getString("name"));
+                            sb.append(" (").append(col.getString("type")).append(")\n");
+                        }
+                    }
+                    return sb.toString();
+                })
+                .recover(err -> Future.succeededFuture("Table " + table + ": metadata unavailable\n")));
+        }
+        
+        return Future.all(metadataFutures)
+            .map(composite -> {
+                StringBuilder result = new StringBuilder();
+                for (Future<String> future : metadataFutures) {
+                    result.append(future.result());
+                }
+                return result.toString();
+            });
+    }
+    
+    /**
+     * Handle table not found error
+     */
+    private Future<JsonArray> handleTableNotFoundError(String sql, String errorMsg) {
+        return Future.succeededFuture(new JsonArray()
+            .add(new JsonObject()
+                .put("error", true)
+                .put("message", "Table not found: " + errorMsg)
+                .put("suggestion", "Check table names in the database")));
+    }
+    
+    /**
+     * Handle missing expression error
+     */
+    private Future<JsonArray> handleMissingExpressionError(String sql, String errorMsg) {
+        return Future.succeededFuture(new JsonArray()
+            .add(new JsonObject()
+                .put("error", true)
+                .put("message", "SQL syntax error: " + errorMsg)
+                .put("sql", sql)));
     }
     
     /**
@@ -866,7 +1179,7 @@ public class OracleAgentLoop extends AbstractVerticle {
     }
     
     /**
-     * Format results using LLM for natural language response
+     * Format results using LLM for natural language response with explanations
      */
     private Future<String> formatResultsWithLLM(ConversationContext context, JsonArray results) {
         if (!llmService.isInitialized()) {
@@ -874,11 +1187,25 @@ public class OracleAgentLoop extends AbstractVerticle {
             return formatResultsSimple(context, results);
         }
         
+        // Check if results contain error information
+        boolean hasError = false;
+        String errorMsg = null;
+        if (results != null && results.size() == 1) {
+            JsonObject firstRow = results.getJsonObject(0);
+            if (firstRow != null && firstRow.getBoolean("error", false)) {
+                hasError = true;
+                errorMsg = firstRow.getString("message", "Unknown error");
+            }
+        }
+        
         // Build result summary for LLM
         StringBuilder resultSummary = new StringBuilder();
         resultSummary.append("Query Results:\n\n");
         
-        if (results == null || results.isEmpty()) {
+        if (hasError) {
+            resultSummary.append("ERROR: ").append(errorMsg).append("\n");
+            resultSummary.append("The query could not be executed successfully.\n");
+        } else if (results == null || results.isEmpty()) {
             resultSummary.append("No records found.");
         } else {
             resultSummary.append("Number of records: ").append(results.size()).append("\n\n");
@@ -896,15 +1223,25 @@ public class OracleAgentLoop extends AbstractVerticle {
             }
         }
         
-        // Create formatting prompt
+        // Add discovery information for context
+        String discoveryInfo = "";
+        if (context.dataDiscoveries != null && !context.dataDiscoveries.isEmpty()) {
+            discoveryInfo = "\n\nData Discovery Notes:\n" + context.dataDiscoveries.encodePrettily() + "\n";
+        }
+        
+        // Create formatting prompt with explanation request
         String formatPrompt = "Convert the following database query results into a natural, friendly response:\n\n" +
                              "Original User Query: \"" + context.originalQuery + "\"\n\n" +
-                             "SQL Executed: " + context.finalSql + "\n\n" +
-                             resultSummary.toString() + "\n\n" +
-                             "Please provide a clear, conversational answer to the user's question based on these results.\n" +
-                             "If the query was asking for a count, provide the number clearly.\n" +
-                             "If it was asking for a list, summarize the key information.\n" +
-                             "Be concise but complete.";
+                             "SQL Executed: " + (context.finalSql != null ? context.finalSql : "No SQL generated") + "\n\n" +
+                             resultSummary.toString() + discoveryInfo + "\n\n" +
+                             "Instructions:\n" +
+                             "1. Provide a clear, conversational answer to the user's question\n" +
+                             "2. If no results were found, explain why (e.g., 'No orders were found matching California because the database doesn't have state information, only city names')\n" +
+                             "3. If there was an error, explain it in user-friendly terms\n" +
+                             "4. If the query succeeded, summarize the key findings\n" +
+                             "5. Be helpful - if the user asked about California but we only have city data, explain that\n" +
+                             "6. For count queries, state the number clearly\n" +
+                             "7. Be concise but complete";
         
         JsonArray messages = new JsonArray()
             .add(new JsonObject()
@@ -1497,6 +1834,7 @@ public class OracleAgentLoop extends AbstractVerticle {
         Map<String, JsonObject> tableMetadata;
         JsonObject relationships;
         JsonObject nluResult;  // NLU analysis result from LLM
+        JsonObject dataDiscoveries;  // Discovered data mappings from LLM
         String generatedSQL;
         String generatedSql;  // Alias for compatibility
         String finalSql;

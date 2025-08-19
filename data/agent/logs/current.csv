@@ -1,1 +1,11 @@
 Message,Level,Class,Category,Character,SequenceReceived,EpochTimeMillis
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,1,1755619658819
+Oracle Metadata Server started,1,OracleMetadata,StartUp,MCP,2,1755619658880
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,3,1755619664900
+Oracle MCP Server started,1,OracleServer,StartUp,MCP,4,1755619664906
+OracleClient ready with 7 tools,1,OracleClient,StartUp,MCP,5,1755619667155
+MCP infrastructure ready,1,McpHostManager,StartUp,MCP,6,1755619667155
+MCP Host Manager deployed,3,Driver,StartUp,MCP,7,1755619667156
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,8,1755619671766
+Oracle Agent Loop deployed,3,Driver,StartUp,Oracle,9,1755619671768
+ZAK-Agent startup complete,0,Driver,StartUp,System,10,1755619671768

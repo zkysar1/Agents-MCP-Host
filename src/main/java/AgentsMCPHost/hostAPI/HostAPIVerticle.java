@@ -82,7 +82,6 @@ public class HostAPIVerticle extends AbstractVerticle {
       .requestHandler(mainRouter)
       .listen(ar -> {
         if (ar.succeeded()) {
-          Driver.isCompletedHostAPIVerticle = true;
           System.out.println("*** Host API server successfully started on HTTP port " + API_PORT + " ***");
           System.out.println();
           System.out.println("=== Available API Endpoints ===");
