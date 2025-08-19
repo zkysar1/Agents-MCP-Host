@@ -80,7 +80,7 @@ public class LlmAPIService {
    * @return true if service is ready to use
    */
   public boolean isInitialized() {
-    return webClient == null || apiKey == null;
+    return webClient != null && apiKey != null;
   }
   
   /**
@@ -91,7 +91,7 @@ public class LlmAPIService {
   public Future<JsonObject> chatCompletion(JsonArray messages) {
     Promise<JsonObject> promise = Promise.promise();
     
-    if (isInitialized()) {
+    if (!isInitialized()) {
       promise.fail("LlmAPIService not properly initialized - check OPENAI_API_KEY");
       return promise.future();
     }

@@ -5,14 +5,17 @@
 [![Vert.x](https://img.shields.io/badge/Vert.x-4.5.7-purple.svg)](https://vertx.io/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 🎯 What's New (January 2025)
+## 🎯 What's New (August 2025)
 
+- **🔧 Fixed Oracle Client Deployment** - Corrected configuration check for proper Oracle tool registration
 - **🚀 Stdio Transport Support** - Run local MCP servers as separate processes
 - **🏷️ Tool Name Prefixing** - Clear `serverName__toolName` pattern for all tools
 - **⚙️ Configuration-Driven Architecture** - Flexible JSON-based server configuration
 - **🔌 Local Server Support** - Spawn and manage local MCP servers via stdio
 - **🎨 Enhanced Tool Routing** - Smart routing with prefixed and unprefixed name support
 - **📡 SSE Streaming** - Real-time tool call notifications via Server-Sent Events
+- **🗄️ Oracle Cloud Integration** - Enterprise-grade Oracle SQL agent with enumeration support
+- **🤖 Natural Language SQL** - Convert business questions to optimized Oracle queries
 
 ## 🚀 Quick Start for New Developers
 
@@ -30,6 +33,9 @@ cd ~/Agents-MCP-Host/
 - **Java 21+** - Check: `java --version`
 - **Gradle 8.8** - Included via wrapper (`./gradlew`)
 - **OpenAI API Key** (optional) - For LLM responses when tools aren't needed
+- **Oracle Cloud Database** (optional) - For Oracle SQL agent features
+  - Password is hardcoded in test scripts: `ADmin12345--`
+  - Configure TLS authentication (not mTLS) in Oracle Cloud Console
 
 ### Build & Run (30 seconds)
 ```bash
@@ -43,7 +49,7 @@ java -jar build/libs/Agents-MCP-Host-1.0.0-fat.jar
 ./gradlew run
 ```
 
-### Test the Full MCP System
+### Quick Validation
 ```bash
 # Run comprehensive MCP tests
 ./test-mcp-full.sh
@@ -107,8 +113,40 @@ This system implements the complete Model Context Protocol (MCP) specification w
 - **Vert.x 4.5.7** - Reactive framework with event bus
 - **MCP SDK 0.11.0** - Official Model Context Protocol SDK
 - **OpenAI API** - LLM integration for non-tool queries
+- **Oracle JDBC 23.3** - Oracle database connectivity with UCP pooling
 - **HTTP/SSE** - Streamable HTTP transport with Server-Sent Events
 - **Gradle 8.8** - Build system
+
+## 🗄️ Oracle SQL Agent
+
+The system includes a sophisticated Oracle SQL agent that replaces the placeholder MCP servers with enterprise-grade database intelligence.
+
+### Oracle Features
+- **Natural Language Queries** - Convert business questions to SQL
+- **Enumeration Support** - Automatic translation between codes and descriptions
+- **Metadata Discovery** - Navigate complex database schemas
+- **Query Optimization** - Explain plans and performance analysis
+- **Business Analytics** - Aggregations, time series, and comparisons
+
+### Oracle Setup
+```bash
+# Set Oracle password (Windows WSL)
+export ORACLE_TESTING_DATABASE_PASSWORD=$(cmd.exe /c "echo %ORACLE_TESTING_DATABASE_PASSWORD%" 2>/dev/null | tr -d '\r\n')
+
+# Test Oracle connection
+java -cp ".:build/libs/Agents-MCP-Host-1.0.0-fat.jar" TestOracleConnection
+
+# Setup schema and data
+bash setup-oracle-schema.sh
+bash populate-oracle-data.sh
+
+# Check database status
+java -cp ".:build/libs/Agents-MCP-Host-1.0.0-fat.jar" CheckOracleData
+```
+
+### Oracle MCP Servers
+- **OracleMetadataServer** (8081) - Schema navigation and enumeration detection
+- **OracleServerVerticle** (8085) - Unified Oracle operations with list_tables, describe_table, and execute_query tools
 
 ## ⚙️ Configuration
 
@@ -118,10 +156,12 @@ The system now uses a flexible configuration file at `src/main/resources/mcp-con
 {
   "mcpServers": {
     "httpServers": {
-      "calculator": { "enabled": true, "port": 8081 },
-      "weather": { "enabled": true, "port": 8082 },
-      "database": { "enabled": true, "port": 8083 },
-      "filesystem": { "enabled": true, "port": 8084 }
+      "calculator": { "enabled": false, "port": 8086 },
+      "weather": { "enabled": false, "port": 8087 },
+      "database": { "enabled": false, "port": 8088 },
+      "filesystem": { "enabled": false, "port": 8089 },
+      "oracle": { "enabled": true, "port": 8085 },
+      "oracle_metadata": { "enabled": true, "port": 8081 }
     },
     "localServers": {
       "example-stdio": {
@@ -131,6 +171,12 @@ The system now uses a flexible configuration file at `src/main/resources/mcp-con
         "environment": { "PYTHONPATH": "./lib" }
       }
     }
+  },
+  "clientConfigurations": {
+    "oracle": { "enabled": true, "connects": ["oracle", "oracle_metadata"] },
+    "dual": { "enabled": false },
+    "single-db": { "enabled": false },
+    "filesystem": { "enabled": false }
   },
   "toolNaming": {
     "usePrefixing": true,
@@ -285,21 +331,42 @@ echo 'export OPENAI_API_KEY=sk-your-key-here' >> ~/.bashrc
 
 ### Automated Testing
 
-**Note:** The unified endpoint intelligently routes requests:
-- Messages with tool keywords → MCP mock tools (no API key needed)
-- Other messages → OpenAI API (requires OPENAI_API_KEY)
-- No API key → Fallback response
+**IMPORTANT:** All tests have been consolidated into organized scripts for consistency.
 
+#### Quick Test Commands
 ```bash
-# Test with OpenAI API key (full functionality)
-OPENAI_API_KEY=your-key ./test-openai.sh
+# Run ALL tests (recommended for validation)
+./test-all.sh
 
-# Test without API key (mock tools still work)
-./test-mcp-endpoints.sh
+# Run specific test suites
+./test-mcp.sh        # All MCP infrastructure tests
+./test-oracle.sh     # Oracle database tests (password hardcoded)
+./test-openai.sh     # OpenAI integration (needs API key)
+./test-sse.sh        # SSE streaming tests
 
-# Run unit tests
+# Java unit tests
 ./gradlew test
 ```
+
+#### Test Suite Features
+- **Automatic server management** - Tests start/stop server as needed
+- **Consolidated scripts** - All tests organized into 5 core files
+- **Hardcoded Oracle password** - No environment variable issues
+- **Comprehensive coverage** - Tests all 14+ tools and endpoints
+- **Smart routing validation** - Verifies tool detection logic
+
+#### Oracle Database Setup
+```bash
+# Setup Oracle schema and data (if needed)
+./setup-oracle-schema.sh     # Creates tables
+./populate-oracle-data.sh    # Adds sample data
+./test-oracle.sh             # Run Oracle tests
+```
+
+**Note:** The unified endpoint intelligently routes requests:
+- Messages with tool keywords → MCP tools (no API key needed)
+- Other messages → OpenAI API (requires OPENAI_API_KEY)
+- No API key → Fallback response
 
 ### Manual Testing
 ```bash

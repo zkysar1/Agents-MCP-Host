@@ -31,9 +31,7 @@ public class StatusVerticle extends AbstractVerticle {
         .put("version", "1.0.0")
         .put("timestamp", System.currentTimeMillis())
         .put("uptime", System.currentTimeMillis() - startTime)
-        .put("zakAgentKey", Driver.zakAgentKey != null ? "configured" : "not configured")
         .put("instanceId", Driver.instanceId)
-        .put("publicIpAddress", Driver.publicIpAddress)
         .put("awsRegion", Driver.awsRegion);
       
       ctx.response()

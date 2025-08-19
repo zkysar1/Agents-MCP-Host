@@ -2,7 +2,7 @@
 
 ## 🎯 Project Overview
 
-**Agents-MCP-Host** is a Java 21 Vert.x-based REST API server that implements the complete Model Context Protocol (MCP) specification with full server/client/host architecture. The system runs 4 MCP servers on separate ports, 3 different client configurations, and provides comprehensive tool orchestration with 13 available tools.
+**Agents-MCP-Host** is a Java 21 Vert.x-based REST API server that implements the complete Model Context Protocol (MCP) specification with full server/client/host architecture. The system includes an enterprise-grade Oracle SQL agent with natural language processing, replacing placeholder servers with sophisticated database intelligence capabilities.
 
 ## 🏁 Getting Started Quickly
 
@@ -58,6 +58,10 @@ java -jar build/libs/Agents-MCP-Host-1.0.0-fat.jar
 - ✅ LocalServerClientVerticle for process management
 - ✅ McpConfigLoader for flexible configuration
 - ✅ **Server-Sent Events (SSE) streaming for tool call transparency**
+- ✅ **Oracle Cloud Database integration with TLS**
+- ✅ **OracleConnectionManager with UCP pooling**
+- ✅ **Enumeration table support for business translations**
+- ✅ **Fixed Oracle client deployment** (Aug 2025) - Corrected configuration check in McpHostManagerVerticle
 
 🚧 **Future Enhancements**:
 - Elicitation workflow (partially implemented)
@@ -187,6 +191,72 @@ When adding new features:
 4. **Test thoroughly** - All endpoints should work
 5. **Prepare for MCP SDK** - Structure allows future integration
 
+## 🗄️ Oracle Integration
+
+### Oracle Environment Setup
+```bash
+# Password is now hardcoded in test scripts for consistency
+# The password is: ARmy0320-- milk
+# This is set automatically in test-common.sh
+```
+
+### Oracle Connection Details
+- **Host**: adb.us-ashburn-1.oraclecloud.com
+- **Port**: 1522 (TLS)
+- **Service**: gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com
+- **User**: ADMIN
+- **Auth**: TLS (not mTLS) - must be configured in Oracle Cloud Console
+
+### Oracle Troubleshooting
+- **ORA-12506**: ACL filtering - Enable TLS auth in Oracle Cloud Console
+- **Connection timeout**: Check firewall allows port 1522 outbound
+- **No tables found**: Run `bash setup-oracle-schema.sh`
+- **No data**: Run `bash populate-oracle-data.sh`
+
+## 🧪 Testing Guidelines
+
+### IMPORTANT: Test File Organization
+
+**DO NOT CREATE NEW TEST FILES** unless absolutely necessary. We have consolidated all tests into these core files:
+
+1. **test-common.sh** - Shared utilities (colors, functions, server management)
+2. **test-mcp.sh** - All MCP infrastructure tests (servers, clients, tools)
+3. **test-oracle.sh** - All Oracle database tests (connection, metadata, queries)
+4. **test-openai.sh** - OpenAI/LLM integration tests
+5. **test-sse.sh** - Server-Sent Events streaming tests
+6. **test-all.sh** - Master runner that executes all test suites
+
+### When Testing:
+
+```bash
+# Quick test after changes
+./test-mcp.sh          # Test MCP functionality
+
+# Full validation
+./test-all.sh          # Run complete test suite
+
+# Oracle-specific testing
+./setup-oracle-schema.sh     # Create tables (if needed)
+./populate-oracle-data.sh    # Add sample data
+./test-oracle.sh             # Test Oracle features
+```
+
+### Test Script Features:
+
+- **Automatic server management** - Scripts start/stop server as needed
+- **Hardcoded Oracle password** - No environment variable issues
+- **Color-coded output** - Green=success, Red=error, Blue=info
+- **Comprehensive coverage** - All tools and endpoints tested
+- **Smart detection** - Skips tests if prerequisites missing
+
+### Adding New Tests:
+
+If you must add a test:
+1. First check if it belongs in an existing test file
+2. Use functions from test-common.sh
+3. Follow the pattern of existing tests
+4. Update test-all.sh if it's a new category
+
 ## 💡 Useful Commands Reference
 
 ```bash
@@ -196,9 +266,12 @@ When adding new features:
 ./gradlew shadowJar             # Build fat JAR
 ./gradlew run                   # Run directly
 
-# Testing
-./test-mcp-endpoints.sh         # Test all endpoints
-./test-sse.sh                   # Test SSE streaming
+# Testing - IMPORTANT: Use these consolidated scripts
+./test-all.sh                   # Run ALL test suites (recommended)
+./test-mcp.sh                   # Comprehensive MCP testing
+./test-oracle.sh                # Complete Oracle testing  
+./test-openai.sh                # OpenAI integration tests
+./test-sse.sh                   # SSE streaming tests
 curl http://localhost:8080/health  # Quick health check
 
 # Test SSE streaming

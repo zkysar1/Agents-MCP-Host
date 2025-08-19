@@ -1,6 +1,6 @@
 === ZAK-Agent Starting ===
 Java version: 21.0.8
-Working directory: /mnt/c/Users/zkysa/OneDrive/Zak/SmartNPCs/MCPThink/ZAK-Agent
+Working directory: /mnt/c/Users/zkysa/OneDrive/Zak/SmartNPCs/MCPThink/Agents-MCP-Host
 Data path: ./data
 ZAK Agent path: ./data/agent
 HostAPIVerticle starting...
@@ -8,6 +8,7 @@ Creating HTTP server on port 8080...
 LlmAPIService initialized with OpenAI API
 OpenAI API service initialized successfully
 Deploying MCP infrastructure...
+Deploying Oracle Agent Loop...
 *** Host API server successfully started on HTTP port 8080 ***
 
 === Available API Endpoints ===
@@ -39,140 +40,161 @@ Deploying MCP infrastructure...
 ================================
 Loaded MCP configuration from: src/main/resources/mcp-config.json
 Loaded MCP configuration
-Created sandbox directory: /tmp/mcp-sandbox
-Database MCP Server started on port 8083
-FileSystem MCP Server started on port 8084
-Weather MCP Server started on port 8082
-Calculator MCP Server started on port 8081
-[LOG] Database MCP Server started,1,DatabaseServer,StartUp,MCP
-[LOG] FileSystem MCP Server started,1,FileSystemServer,StartUp,MCP
-Server ready: filesystem on port 8084
-Server ready: database on port 8083
-Deployed DatabaseServer [c2715b77-de1c-42d0-b9fd-b1676f931ec5]
-Deployed FileSystemServer [b00c164c-1fa9-409b-b89f-faf93f8b874e]
-[LOG] Weather MCP Server started,1,WeatherServer,StartUp,MCP
-Server ready: weather on port 8082
-Deployed WeatherServer [1b28c4c7-7cc1-4afa-be12-da9a31b7d700]
-[LOG] Calculator MCP Server started,1,CalculatorServer,StartUp,MCP
-Server ready: calculator on port 8081
-Deployed CalculatorServer [05285814-9de4-4c0f-8c18-dad5e570981b]
-Updated allowed roots: [/tmp/mcp-sandbox, /tmp]
-Initialized connection to calculator server
-Initialized connection to weather server
-Initialized connection to database server
-Initialized connection to filesystem server with 2 roots
-Client dual discovered 4 tools from calculator
-DualServerClient connected to Calculator and Weather servers
-Deployed DualServerClient [e679a8ed-77ec-45cd-aed7-843c0e7e3348]
-Client filesystem discovered 4 tools from filesystem
-Client single-db discovered 4 tools from database
-SingleServerClient connected to Database server
-Deployed SingleServerClient [38c8e255-fe41-484f-8587-b9999ef839cf]
-Client dual discovered 2 tools from weather
-Client ready: dual with 6 tools
-[LOG] DualServerClient ready with 6 tools,1,DualServerClient,StartUp,MCP
-Client filesystem discovered 4 tools from filesystem
-Client single-db discovered 4 tools from database
-Client ready: single-db with 4 tools
-[LOG] SingleServerClient ready with 4 tools,1,SingleServerClient,StartUp,MCP
-Updated resources list: 0 resources
-FileSystemClient connected to FileSystem server
-Deployed FileSystemClient [c8135bf8-e09b-465d-93d6-fcc7e3de2f12]
-=== MCP Host Manager Ready ===
-Servers: 4
-Clients: 2
-Total tools: 14
-MCP Host Manager deployed successfully
-Client ready: filesystem with 4 tools
-[LOG] FileSystemClient ready with 4 tools,1,FileSystemClient,StartUp,MCP
-[LOG] MCP infrastructure ready,1,McpHostManager,StartUp,MCP
-MCP tools enabled for conversation endpoint: 14 tools available
-[LOG] MCP Host Manager deployed,3,Driver,StartUp,MCP
 === ZAK-Agent Started ===
-MCP Infrastructure: READY
+MCP Infrastructure: FAILED
+Oracle Agent Loop: FAILED
 [LOG] ZAK-Agent startup complete,0,Driver,StartUp,System
+[LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database
+OracleAgentLoop: Schema matcher and database initialized
+OracleAgentLoop started - ready for intelligent SQL generation
+Oracle Agent Loop deployed successfully
+[LOG] Oracle Agent Loop deployed,3,Driver,StartUp,Oracle
+[LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database
+Oracle MCP Server: Database connection initialized
+Oracle MCP Server started on port 8085
+Deployed OracleServer [15f8e6bc-717a-4890-9acc-aa66d7b361d5]
+[LOG] Oracle MCP Server started,1,OracleServer,StartUp,MCP
+Server ready: oracle on port 8085
+[LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database
+Oracle Metadata Server: Database connection initialized
+Oracle Metadata MCP Server started on port 8081
+Deployed OracleMetadataServer [24509865-a714-473e-8fde-4a2d7bbcaf50]
+[LOG] Oracle Metadata Server started,1,OracleMetadata,StartUp,MCP
+Server ready: oracle_metadata on port 8081
+[DEBUG] Oracle client enabled: true
+[DEBUG] Deploying OracleClient...
+Initialized connection to oracle server
+  - oracle__list_tables: List all Oracle database tables
+  - oracle__describe_table: Get detailed information about an Oracle table
+  - oracle__execute_query: Execute a SELECT query on Oracle database
+  - oracle__explain_plan: Get the execution plan for an SQL query
+  - oracle__gather_statistics: Gather statistics for a table to improve query performance
+  - oracle__analyze_query: Analyze a query for performance issues and get recommendations
+  - oracle__validate_sql: Validate SQL syntax without executing the query
+[DEBUG] OracleClient.publishToolsDiscovered - Client oracle discovered 7 tools from oracle
+[DEBUG]   Publishing tool: list_tables - List all Oracle database tables
+[DEBUG]   Publishing tool: describe_table - Get detailed information about an Oracle table
+[DEBUG]   Publishing tool: execute_query - Execute a SELECT query on Oracle database
+[DEBUG]   Publishing tool: explain_plan - Get the execution plan for an SQL query
+[DEBUG]   Publishing tool: gather_statistics - Gather statistics for a table to improve query performance
+[DEBUG]   Publishing tool: analyze_query - Analyze a query for performance issues and get recommendations
+[DEBUG]   Publishing tool: validate_sql - Validate SQL syntax without executing the query
+[DEBUG] Publishing to event bus: mcp.tools.discovered
+Client ready: oracle with 7 tools
+OracleClient connected to Oracle server
+Deployed OracleClient [a1e44e31-3bf3-4d26-8fde-9c9acafba8dc]
+=== MCP Host Manager Ready ===
+Servers: 2
+Clients: 0
+Total tools: 0
+MCP Host Manager deployed successfully
+[DEBUG] McpHostManager.handleToolsDiscovered - Client oracle discovered 7 tools from oracle
+[DEBUG]   Added tool: oracle__list_tables (original: list_tables)
+[DEBUG]   Added tool: oracle__describe_table (original: describe_table)
+[DEBUG]   Added tool: oracle__execute_query (original: execute_query)
+[DEBUG]   Added tool: oracle__explain_plan (original: explain_plan)
+[DEBUG]   Added tool: oracle__gather_statistics (original: gather_statistics)
+[DEBUG]   Added tool: oracle__analyze_query (original: analyze_query)
+[DEBUG]   Added tool: oracle__validate_sql (original: validate_sql)
+[DEBUG] Total tools now registered: 7
+Client ready: oracle with 7 tools
+[LOG] OracleClient ready with 7 tools,1,OracleClient,StartUp,MCP
+[LOG] MCP infrastructure ready,1,McpHostManager,StartUp,MCP
+[DEBUG] ConversationVerticle - MCP system ready with 0 tools
+[LOG] MCP Host Manager deployed,3,Driver,StartUp,MCP
+[DEBUG] ConversationVerticle - Tool count updated: 7 tools available
+MCP tools enabled for conversation endpoint: 7 tools available
+[DEBUG] Verifying tools were registered...
+[DEBUG] Host reports 7 total tools
+[PIPELINE] Starting for query: Execute query: SELECT * FROM customers; DROP TABLE customers; --
 [DEBUG] Sending request to OpenAI: {
   "model" : "gpt-4o-mini-2024-07-18",
   "messages" : [ {
+    "role" : "system",
+    "content" : "You are an expert database query analyzer specializing in business intelligence. Extract comprehensive intents, entities, and query requirements from natural language. Consider business context, implied joins, and common query patterns. Always think about what tables might need to be joined based on the query."
+  }, {
     "role" : "user",
-    "content" : "What is 100 minus 45?"
+    "content" : "Analyze this business database query and extract comprehensive intent and entities:\n\nQuery: \"Execute query: SELECT * FROM customers; DROP TABLE customers; --\"\n\nProvide a detailed JSON response with:\n1. intent: Primary action (count, list, aggregate, compare, trend, filter, join)\n2. entities: Business entities mentioned (orders, customers, products, etc.)\n3. filters: Filter conditions with operators\n4. aggregations: Aggregation functions needed (sum, count, avg, min, max)\n5. grouping: Fields to group by\n6. time_period: Time constraints or ranges\n7. locations: Geographic filters (states, cities, regions)\n8. status_values: Status or state values (pending, shipped, active)\n9. join_hints: Potential tables that need joining\n10. output_columns: Specific fields user wants to see\n\nBe thorough - extract ALL relevant information.\n\nExample for 'Show me pending orders from California last month':\n{\"intent\":\"list\",\"entities\":[\"orders\"],\"filters\":[{\"field\":\"status\",\"operator\":\"=\",\"value\":\"pending\"},{\"field\":\"state\",\"operator\":\"=\",\"value\":\"California\"}],\"time_period\":{\"range\":\"last_month\"},\"locations\":[\"California\"],\"status_values\":[\"pending\"],\"join_hints\":[\"customers\"],\"output_columns\":[\"order_id\",\"order_date\",\"customer_name\"]}"
   } ],
   "temperature" : 0.7,
   "max_tokens" : 2000
 }
+[LOG] Starting Oracle Agent pipeline for: Execute query: SELECT * FROM customers; DROP TABLE customers; --,1,OracleAgentLoop,Pipeline,Oracle
+[DEBUG] OpenAI response status: 200
+[PIPELINE] Step 1 complete - NLU extracted tokens: [drop, --, query:, *, customers, drop_table, execute, table]
+[PIPELINE] Step 2 - Starting schema matching...
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+[PIPELINE] Step 2 complete - Found 1 table matches, 1 column matches
+[PIPELINE] Step 3 - Generating SQL...
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "system",
+    "content" : "You are an Oracle SQL expert. Generate precise SQL queries based on schema information."
+  }, {
+    "role" : "user",
+    "content" : "Generate an optimized Oracle SQL query for this business request:\n\nUser Query: \"Execute query: SELECT * FROM customers; DROP TABLE customers; --\"\n\nQuery Intent Analysis:\n\nDatabase Schema Information:\n\nRelevant Tables:\n- CUSTOMERS (rows: 100)\n\n\nSQL Generation Rules:\n1. Use ONLY tables and columns from the schema above\n2. Join tables using the foreign key relationships provided\n3. Handle case-insensitive comparisons with UPPER() for text fields\n4. Use Oracle 12c+ syntax (FETCH FIRST N ROWS ONLY for limits)\n5. Apply business logic:\n   - 'California' means WHERE UPPER(state) IN ('CA', 'CALIFORNIA')\n   - 'pending' means WHERE UPPER(status) = 'PENDING'\n   - 'how many' means SELECT COUNT(*)\n   - Date ranges should use BETWEEN or >= and <=\n6. Include meaningful aliases for computed columns\n7. Order results logically (dates DESC, names ASC)\n8. Default limit is 100 rows for listing queries\n9. For counts/aggregations, don't add row limits\n10. Handle NULLs appropriately with NVL() or IS NULL checks\n\nReturn ONLY the SQL query. No explanations or comments.\n"
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[DEBUG] OpenAI response status: 200
+LLM Generated SQL: SELECT * 
+FROM customers 
+WHERE UPPER(state) IN ('CA', 'CALIFORNIA')
+ORDER BY last_name ASC, first_name ASC
+FETCH FIRST 100 ROWS ONLY;
+[PIPELINE] Step 3 complete - Generated SQL: SELECT * 
+FROM customers 
+WHERE UPPER(state) IN ('CA', 'CALIFORNIA')
+ORDER BY last_name ASC, first_name ASC
+FETCH FIRST 100 ROWS ONLY;
+[PIPELINE] Step 4 - Optimizing query...
+[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
+PLAN_TABLE not found, skipping query optimization
+[PIPELINE] Step 4 complete - Final SQL: SELECT * 
+FROM customers 
+WHERE UPPER(state) IN ('CA', 'CALIFORNIA')
+ORDER BY last_name ASC, first_name ASC
+FETCH FIRST 100 ROWS ONLY;
+[PIPELINE] Step 5 - Executing query...
+[DEBUG] Executing SQL query: SELECT * 
+FROM customers 
+WHERE UPPER(state) IN ('CA', 'CALIFORNIA')
+ORDER BY last_name ASC, first_name ASC
+FETCH FIRST 100 ROWS ONLY;
+Oracle Agent Loop failed: Timed out after waiting 30000(ms) for a reply. address: __vertx.reply.2, repliedAddress: oracle.agent.process
+[ERROR] Query execution failed: Query execution failed: ORA-00933: SQL command not properly ended
+
+https://docs.oracle.com/error-help/db/ora-00933/
+[PIPELINE] Query execution failed: Query execution failed: ORA-00933: SQL command not properly ended
+
+https://docs.oracle.com/error-help/db/ora-00933/
+[PIPELINE] Step 5 complete - Got 0 results
+[PIPELINE] Step 6 - Analyzing results...
+[PIPELINE] Step 7 - Formatting results...
+[DEBUG] Sending request to OpenAI: {
+  "model" : "gpt-4o-mini-2024-07-18",
+  "messages" : [ {
+    "role" : "system",
+    "content" : "You are a helpful assistant that explains database query results in natural language."
+  }, {
+    "role" : "user",
+    "content" : "Convert the following database query results into a natural, friendly response:\n\nOriginal User Query: \"Execute query: SELECT * FROM customers; DROP TABLE customers; --\"\n\nSQL Executed: SELECT * \nFROM customers \nWHERE UPPER(state) IN ('CA', 'CALIFORNIA')\nORDER BY last_name ASC, first_name ASC\nFETCH FIRST 100 ROWS ONLY;\n\nQuery Results:\n\nNo records found.\n\nPlease provide a clear, conversational answer to the user's question based on these results.\nIf the query was asking for a count, provide the number clearly.\nIf it was asking for a list, summarize the key information.\nBe concise but complete."
+  } ],
+  "temperature" : 0.7,
+  "max_tokens" : 2000
+}
+[LOG] Query execution failed: Query execution failed: ORA-00933: SQL command not properly ended
+
+https://docs.oracle.com/error-help/db/ora-00933/,0,OracleAgentLoop,Execute,Oracle
 [DEBUG] OpenAI response status: 200
 [LOG] OpenAI API call successful,2,LlmAPIService,API,Success
 [DEBUG] Sending request to OpenAI: {
   "model" : "gpt-4o-mini-2024-07-18",
   "messages" : [ {
     "role" : "user",
-    "content" : "Update records in the products table"
-  } ],
-  "temperature" : 0.7,
-  "max_tokens" : 2000
-}
-[DEBUG] OpenAI response status: 200
-[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
-[DEBUG] Sending request to OpenAI: {
-  "model" : "gpt-4o-mini-2024-07-18",
-  "messages" : [ {
-    "role" : "user",
-    "content" : "Hello, how are you?"
-  } ],
-  "temperature" : 0.7,
-  "max_tokens" : 2000
-}
-[DEBUG] OpenAI response status: 200
-[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
-[DEBUG] Sending request to OpenAI: {
-  "model" : "gpt-4o-mini-2024-07-18",
-  "messages" : [ {
-    "role" : "user",
-    "content" : "What is artificial intelligence?"
-  } ],
-  "temperature" : 0.7,
-  "max_tokens" : 2000
-}
-[DEBUG] OpenAI response status: 200
-[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
-[DEBUG] Sending request to OpenAI: {
-  "model" : "gpt-4o-mini-2024-07-18",
-  "messages" : [ {
-    "role" : "user",
-    "content" : "Update records in the products table"
-  } ],
-  "temperature" : 0.7,
-  "max_tokens" : 2000
-}
-[DEBUG] OpenAI response status: 200
-[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
-[DEBUG] Sending request to OpenAI: {
-  "model" : "gpt-4o-mini-2024-07-18",
-  "messages" : [ {
-    "role" : "user",
-    "content" : "Update records in the products table"
-  } ],
-  "temperature" : 0.7,
-  "max_tokens" : 2000
-}
-[DEBUG] OpenAI response status: 200
-[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
-[DEBUG] Sending request to OpenAI: {
-  "model" : "gpt-4o-mini-2024-07-18",
-  "messages" : [ {
-    "role" : "user",
-    "content" : "Hello, how are you?"
-  } ],
-  "temperature" : 0.7,
-  "max_tokens" : 2000
-}
-[DEBUG] OpenAI response status: 200
-[LOG] OpenAI API call successful,2,LlmAPIService,API,Success
-[DEBUG] Sending request to OpenAI: {
-  "model" : "gpt-4o-mini-2024-07-18",
-  "messages" : [ {
-    "role" : "user",
-    "content" : "What is artificial intelligence?"
+    "content" : "What is 15 plus 25?"
   } ],
   "temperature" : 0.7,
   "max_tokens" : 2000

@@ -4,9 +4,11 @@ import AgentsMCPHost.mcp.servers.CalculatorServerVerticle;
 import AgentsMCPHost.mcp.servers.WeatherServerVerticle;
 import AgentsMCPHost.mcp.servers.DatabaseServerVerticle;
 import AgentsMCPHost.mcp.servers.FileSystemServerVerticle;
+import AgentsMCPHost.mcp.servers.OracleServerVerticle;
+import AgentsMCPHost.mcp.servers.OracleMetadataServerVerticle;
 import AgentsMCPHost.mcp.clients.DualServerClientVerticle;
 import AgentsMCPHost.mcp.clients.SingleServerClientVerticle;
-import AgentsMCPHost.mcp.clients.FileSystemClientVerticle;
+import AgentsMCPHost.mcp.clients.OracleClientVerticle;
 import AgentsMCPHost.mcp.clients.LocalServerClientVerticle;
 import AgentsMCPHost.mcp.config.McpConfigLoader;
 import io.vertx.core.AbstractVerticle;
@@ -119,11 +121,10 @@ public class McpHostManagerVerticle extends AbstractVerticle {
      * Deploy all MCP infrastructure components
      */
     private Future<Void> deployMcpInfrastructure() {
-        // Deployment options for worker verticles (servers)
-        DeploymentOptions workerOpts = new DeploymentOptions()
-            .setWorker(true)
-            .setWorkerPoolSize(2)
-            .setWorkerPoolName("mcp-servers");
+        // Deployment options for MCP servers - NOT workers since they create HTTP servers
+        // HTTP servers must run on event loop threads, not worker threads
+        DeploymentOptions serverOpts = new DeploymentOptions()
+            .setInstances(1);  // Single instance per server
         
         // Get server configuration
         JsonObject httpServers = mcpConfig
@@ -133,18 +134,26 @@ public class McpHostManagerVerticle extends AbstractVerticle {
         // Deploy servers as workers (they have blocking tool execution)
         List<Future<String>> serverDeployments = new ArrayList<>();
         
-        // Only deploy enabled servers
+        // Deploy standard MCP servers
         if (httpServers.getJsonObject("calculator", new JsonObject()).getBoolean("enabled", true)) {
-            serverDeployments.add(deployVerticle(new CalculatorServerVerticle(), workerOpts, "CalculatorServer"));
+            serverDeployments.add(deployVerticle(new CalculatorServerVerticle(), serverOpts, "CalculatorServer"));
         }
         if (httpServers.getJsonObject("weather", new JsonObject()).getBoolean("enabled", true)) {
-            serverDeployments.add(deployVerticle(new WeatherServerVerticle(), workerOpts, "WeatherServer"));
+            serverDeployments.add(deployVerticle(new WeatherServerVerticle(), serverOpts, "WeatherServer"));
         }
         if (httpServers.getJsonObject("database", new JsonObject()).getBoolean("enabled", true)) {
-            serverDeployments.add(deployVerticle(new DatabaseServerVerticle(), workerOpts, "DatabaseServer"));
+            serverDeployments.add(deployVerticle(new DatabaseServerVerticle(), serverOpts, "DatabaseServer"));
         }
         if (httpServers.getJsonObject("filesystem", new JsonObject()).getBoolean("enabled", true)) {
-            serverDeployments.add(deployVerticle(new FileSystemServerVerticle(), workerOpts, "FileSystemServer"));
+            serverDeployments.add(deployVerticle(new FileSystemServerVerticle(), serverOpts, "FileSystemServer"));
+        }
+        
+        // Deploy Oracle servers if enabled
+        if (httpServers.getJsonObject("oracle", new JsonObject()).getBoolean("enabled", false)) {
+            serverDeployments.add(deployVerticle(new OracleServerVerticle(), serverOpts, "OracleServer"));
+        }
+        if (httpServers.getJsonObject("oracle_metadata", new JsonObject()).getBoolean("enabled", false)) {
+            serverDeployments.add(deployVerticle(new OracleMetadataServerVerticle(), serverOpts, "OracleMetadataServer"));
         }
         
         // Wait for servers to be ready before deploying clients
@@ -170,8 +179,16 @@ public class McpHostManagerVerticle extends AbstractVerticle {
                 if (clientConfigs.getJsonObject("single-db", new JsonObject()).getBoolean("enabled", true)) {
                     clientDeployments.add(deployVerticle(new SingleServerClientVerticle(), null, "SingleServerClient"));
                 }
-                if (clientConfigs.getJsonObject("filesystem", new JsonObject()).getBoolean("enabled", true)) {
-                    clientDeployments.add(deployVerticle(new FileSystemClientVerticle(), null, "FileSystemClient"));
+                
+                // Deploy Oracle client if Oracle client is enabled in clientConfigs
+                JsonObject oracleConfig = clientConfigs.getJsonObject("oracle", new JsonObject());
+                boolean oracleEnabled = oracleConfig.getBoolean("enabled", false);
+                System.out.println("[DEBUG] Oracle client enabled: " + oracleEnabled);
+                if (oracleEnabled) {
+                    System.out.println("[DEBUG] Deploying OracleClient...");
+                    clientDeployments.add(deployVerticle(new OracleClientVerticle(), null, "OracleClient"));
+                } else {
+                    System.out.println("[DEBUG] Oracle client not enabled in config");
                 }
                 
                 // Check if local servers are configured and enabled
@@ -242,10 +259,11 @@ public class McpHostManagerVerticle extends AbstractVerticle {
         String serverName = discovery.getString("server");
         JsonArray tools = discovery.getJsonArray("tools");
         
-        System.out.println("Client " + clientId + " discovered " + tools.size() + 
-                         " tools from " + serverName);
+        System.out.println("[DEBUG] McpHostManager.handleToolsDiscovered - Client " + clientId + 
+                         " discovered " + tools.size() + " tools from " + serverName);
         
         // Aggregate tools with server prefixing (OpenCode pattern)
+        int toolsAdded = 0;
         for (int i = 0; i < tools.size(); i++) {
             JsonObject tool = tools.getJsonObject(i);
             String originalToolName = tool.getString("name");
@@ -265,10 +283,23 @@ public class McpHostManagerVerticle extends AbstractVerticle {
             
             // Also store by original name for backward compatibility
             toolToClient.put(originalToolName, clientId);
+            
+            System.out.println("[DEBUG]   Added tool: " + prefixedToolName + 
+                             " (original: " + originalToolName + ")");
+            toolsAdded++;
         }
+        
+        System.out.println("[DEBUG] Total tools now registered: " + allTools.size());
         
         // Update aggregated view
         publishAggregatedTools();
+        
+        // Publish confirmation
+        vertx.eventBus().publish("mcp.tools.registered", new JsonObject()
+            .put("client", clientId)
+            .put("server", serverName)
+            .put("toolsAdded", toolsAdded)
+            .put("totalTools", allTools.size()));
     }
     
     /**

@@ -112,16 +112,27 @@ public class StreamingConversationHandler {
     }
     
     /**
-     * Send an SSE event
+     * Send an SSE event safely with synchronization
      * @param response The HTTP response
      * @param eventType The event type
      * @param data The event data
      */
     private static void sendEvent(HttpServerResponse response, String eventType, JsonObject data) {
-        StringBuilder event = new StringBuilder();
-        event.append("event: ").append(eventType).append("\n");
-        event.append("data: ").append(data.encode()).append("\n\n");
-        response.write(event.toString());
+        // Synchronize on the response object to prevent concurrent writes
+        synchronized (response) {
+            // Check if response is still writable
+            if (!response.ended() && !response.closed()) {
+                try {
+                    StringBuilder event = new StringBuilder();
+                    event.append("event: ").append(eventType).append("\n");
+                    event.append("data: ").append(data.encode()).append("\n\n");
+                    response.write(event.toString());
+                } catch (Exception e) {
+                    // Response was closed during write, ignore
+                    System.err.println("SSE write failed (connection likely closed): " + e.getMessage());
+                }
+            }
+        }
     }
     
     /**

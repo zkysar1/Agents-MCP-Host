@@ -2,24 +2,34 @@
   "mcpServers": {
     "httpServers": {
       "calculator": {
-        "enabled": true,
-        "port": 8081,
+        "enabled": false,
+        "port": 8086,
         "description": "Mathematical operations server"
       },
       "weather": {
-        "enabled": true,
-        "port": 8082,
+        "enabled": false,
+        "port": 8087,
         "description": "Weather information server"
       },
       "database": {
-        "enabled": true,
-        "port": 8083,
+        "enabled": false,
+        "port": 8088,
         "description": "Database operations server with sampling support"
       },
       "filesystem": {
-        "enabled": true,
-        "port": 8084,
+        "enabled": false,
+        "port": 8089,
         "description": "File system operations with roots/resources"
+      },
+      "oracle_metadata": {
+        "enabled": true,
+        "port": 8081,
+        "description": "Oracle metadata and structure navigation"
+      },
+      "oracle": {
+        "enabled": true,
+        "port": 8085,
+        "description": "Oracle database operations with metadata and query tools"
       }
     },
     "localServers": {
@@ -45,19 +55,24 @@
   },
   "clientConfigurations": {
     "dual": {
-      "enabled": true,
+      "enabled": false,
       "connects": ["calculator", "weather"],
       "description": "Connects to Calculator and Weather servers"
     },
     "single-db": {
-      "enabled": true,
+      "enabled": false,
       "connects": ["database"],
       "description": "Connects only to Database server"
     },
     "filesystem": {
-      "enabled": true,
+      "enabled": false,
       "connects": ["filesystem"],
       "description": "Connects to FileSystem server with permissions"
+    },
+    "oracle": {
+      "enabled": true,
+      "connects": ["oracle", "oracle_metadata"],
+      "description": "Connects to Oracle servers"
     },
     "local": {
       "enabled": false,

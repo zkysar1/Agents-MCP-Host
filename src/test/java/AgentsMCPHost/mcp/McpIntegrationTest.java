@@ -1,10 +1,11 @@
 package AgentsMCPHost.mcp;
 
-import AgentsMCPHost.mcp.client.MultiServerClient;
-import AgentsMCPHost.mcp.server.calculator.CalculatorServer;
-import AgentsMCPHost.mcp.server.weather.WeatherServer;
-import AgentsMCPHost.mcp.server.filesystem.FileSystemServer;
-import AgentsMCPHost.mcp.server.database.DatabaseServer;
+// Commented out old imports - these classes were removed in the refactor
+// import AgentsMCPHost.mcp.client.MultiServerClient;
+// import AgentsMCPHost.mcp.server.calculator.CalculatorServer;
+// import AgentsMCPHost.mcp.server.weather.WeatherServer;
+// import AgentsMCPHost.mcp.server.filesystem.FileSystemServer;
+// import AgentsMCPHost.mcp.server.database.DatabaseServer;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;

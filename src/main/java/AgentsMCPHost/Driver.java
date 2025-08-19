@@ -2,6 +2,7 @@ package AgentsMCPHost;
 
 import AgentsMCPHost.hostAPI.*;
 import AgentsMCPHost.mcp.host.McpHostManagerVerticle;
+import AgentsMCPHost.mcp.orchestration.OracleAgentLoop;
 import AgentsMCPHost.services.LlmAPIService;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
@@ -14,7 +15,7 @@ public class Driver {
       .setEventLoopPoolSize(1)
   );
 
-  public static final String zakAgentKey = System.getenv("ZAK_AGENT_KEY");
+
   public static final String awsRegion = System.getenv("AWS_REGION") != null ?
     System.getenv("AWS_REGION") : "us-east-2";
   private static final String DATA_PATH = System.getenv("DATA_PATH") != null ?
@@ -23,7 +24,6 @@ public class Driver {
   public static final String zakAgentPath = DATA_PATH + "/agent";
 
   public static String instanceId = "local-instance";
-  public static String publicIpAddress = "127.0.0.1";
   
   // Completion flags for verticles
   public static Boolean isCompletedLoggerVerticle = false;
@@ -33,6 +33,7 @@ public class Driver {
   public static Boolean isCompletedConversationVerticle = false;
   public static Boolean isCompletedLlmAPIService = false;
   public static Boolean isCompletedMcpHostManager = false;
+  public static Boolean isCompletedOracleAgentLoop = false;
 
   public static void main(String[] args) {
     Driver me = new Driver();
@@ -60,10 +61,14 @@ public class Driver {
     // Deploy MCP infrastructure (manages servers and clients)
     setMcpHostManager();
     
+    // Deploy Oracle Agent Loop for interactive discovery
+    setOracleAgentLoop();
+    
     // Wait for startup (increased time for MCP infrastructure)
     vertx.setTimer(5000, id -> {
       System.out.println("=== ZAK-Agent Started ===");
       System.out.println("MCP Infrastructure: " + (isCompletedMcpHostManager ? "READY" : "FAILED"));
+      System.out.println("Oracle Agent Loop: " + (isCompletedOracleAgentLoop ? "READY" : "FAILED"));
       vertx.eventBus().publish("log", "ZAK-Agent startup complete,0,Driver,StartUp,System");
     });
   }
@@ -161,6 +166,22 @@ public class Driver {
       } else {
         System.err.println("MCP Host Manager deployment failed: " + res.cause().getMessage());
         System.err.println("MCP tools will not be available");
+      }
+    });
+  }
+  
+  private void setOracleAgentLoop() {
+    // Deploy Oracle Agent Loop for interactive SQL discovery
+    System.out.println("Deploying Oracle Agent Loop...");
+    
+    vertx.deployVerticle(new OracleAgentLoop(), res -> {
+      if (res.succeeded()) {
+        isCompletedOracleAgentLoop = true;
+        System.out.println("Oracle Agent Loop deployed successfully");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Oracle Agent Loop deployed,3,Driver,StartUp,Oracle");
+      } else {
+        System.err.println("Oracle Agent Loop deployment failed: " + res.cause().getMessage());
+        System.err.println("Interactive Oracle discovery will not be available");
       }
     });
   }

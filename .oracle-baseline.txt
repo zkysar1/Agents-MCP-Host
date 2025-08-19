@@ -1,0 +1,7 @@
+country_enum=3
+product_category_enum=3
+orders=25
+customers=10
+order_details=49
+order_status_enum=5
+products=20

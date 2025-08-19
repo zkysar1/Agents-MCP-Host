@@ -7,6 +7,7 @@ import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
+import io.vertx.core.eventbus.Message;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import java.util.UUID;
@@ -27,13 +28,31 @@ public class ConversationVerticle extends AbstractVerticle {
       JsonObject status = (JsonObject) msg.body();
       mcpEnabled = true;
       availableTools = status.getInteger("tools", 0);
-      System.out.println("MCP tools enabled for conversation endpoint: " + availableTools + " tools available");
+      System.out.println("[DEBUG] ConversationVerticle - MCP system ready with " + availableTools + " tools");
     });
     
     // Listen for aggregated tool updates
     vertx.eventBus().consumer("mcp.tools.aggregated", msg -> {
       JsonObject update = (JsonObject) msg.body();
-      availableTools = update.getInteger("totalTools", 0);
+      int newToolCount = update.getInteger("totalTools", 0);
+      if (newToolCount != availableTools) {
+        availableTools = newToolCount;
+        System.out.println("[DEBUG] ConversationVerticle - Tool count updated: " + availableTools + " tools available");
+        if (newToolCount > 0) {
+          mcpEnabled = true;  // Enable MCP if we have tools
+        }
+      }
+    });
+    
+    // Listen for tool registration events
+    vertx.eventBus().consumer("mcp.tools.registered", msg -> {
+      JsonObject update = (JsonObject) msg.body();
+      int totalTools = update.getInteger("totalTools", 0);
+      if (totalTools > 0) {
+        mcpEnabled = true;
+        availableTools = totalTools;
+        System.out.println("MCP tools enabled for conversation endpoint: " + availableTools + " tools available");
+      }
     });
     
     // Register streaming processor
@@ -111,13 +130,17 @@ public class ConversationVerticle extends AbstractVerticle {
         return;
       }
       
-      // Check if message needs MCP tools (non-streaming path)
+      // Check if message needs MCP tools first (simpler path)
       if (mcpEnabled && needsTools(lastUserMessage)) {
+        // Use direct tool calls for Oracle queries instead of Agent Loop
         handleWithTools(ctx, lastUserMessage, messages);
+      } else if (mcpEnabled && shouldUseOracleAgent(lastUserMessage)) {
+        // Only use Oracle Agent for complex interactive queries
+        handleWithOracleAgent(ctx, lastUserMessage, messages);
       } else {
         // Standard LLM processing
         LlmAPIService llmService = LlmAPIService.getInstance();
-        if (llmService.isInitialized()) {
+        if (!llmService.isInitialized()) {
           // Fall back to hardcoded response if service not initialized
           sendHardcodedResponse(ctx);
           return;
@@ -206,9 +229,18 @@ public class ConversationVerticle extends AbstractVerticle {
    * Handle conversation with MCP tools - routes through MCP host manager
    */
   private static void handleWithTools(RoutingContext ctx, String userMessage, JsonArray messages) {
+    // ALL Oracle/database queries should go through the Agent Loop
+    // This ensures proper schema discovery and LLM-based SQL generation
+    if (isOracleQuery(userMessage)) {
+      // Route to Oracle Agent Loop for ALL database queries
+      handleWithOracleAgent(ctx, userMessage, messages);
+      return;
+    }
+    
+    // For non-Oracle tools, use direct tool routing
     String tool = detectTool(userMessage);
     
-    if (tool != null) {
+    if (tool != null && !tool.startsWith("oracle__")) {
       JsonObject toolArguments = createToolArguments(userMessage, tool);
       
       // Route through MCP host manager for proper tool execution
@@ -234,12 +266,113 @@ public class ConversationVerticle extends AbstractVerticle {
   }
   
   /**
+   * Check if the query should be handled by Oracle Agent Loop
+   */
+  private static boolean isOracleQuery(String message) {
+    if (message == null) return false;
+    String lower = message.toLowerCase();
+    
+    // Check for Oracle/database related terms
+    return lower.contains("oracle") || lower.contains("database") || 
+           lower.contains("table") || lower.contains("sql") || 
+           lower.contains("query") || lower.contains("select") ||
+           // Business terms that likely need database queries
+           lower.contains("orders") || lower.contains("customers") || 
+           lower.contains("products") || lower.contains("deliveries") ||
+           lower.contains("pending") || lower.contains("shipped") || 
+           lower.contains("delivered") || lower.contains("status") ||
+           lower.contains("california") || lower.contains("revenue") ||
+           lower.contains("count") || lower.contains("total") ||
+           lower.contains("enumeration") || lower.contains("enum");
+  }
+  
+  /**
+   * Handle queries with Oracle Agent Loop for intelligent SQL generation
+   */
+  private static void handleWithOracleAgent(RoutingContext ctx, String userMessage, JsonArray messages) {
+    // Create request for Oracle Agent Loop
+    JsonObject agentRequest = new JsonObject()
+      .put("query", userMessage)
+      .put("messages", messages)
+      .put("sessionId", UUID.randomUUID().toString());
+    
+    // Send to Oracle Agent Loop via event bus
+    ctx.vertx().eventBus().request("oracle.agent.process", agentRequest)
+      .onSuccess(reply -> {
+        JsonObject result = (JsonObject) reply.body();
+        
+        // Check if agent produced a result
+        if (result.getBoolean("success", false)) {
+          String response = result.getString("result", "Query processed successfully");
+          
+          // Format as proper response
+          JsonObject chatResponse = new JsonObject()
+            .put("id", "msg-" + UUID.randomUUID().toString())
+            .put("object", "chat.completion")
+            .put("created", System.currentTimeMillis() / 1000)
+            .put("model", "oracle-agent-enhanced")
+            .put("choices", new JsonArray()
+              .add(new JsonObject()
+                .put("index", 0)
+                .put("message", new JsonObject()
+                  .put("role", "assistant")
+                  .put("content", response))
+                .put("finish_reason", "stop")));
+          
+          ctx.response()
+            .putHeader("Content-Type", "application/json")
+            .setStatusCode(200)
+            .end(chatResponse.encode());
+        } else {
+          // If agent fails, fall back to simple tool execution
+          fallbackToSimpleOracle(ctx, userMessage, messages);
+        }
+      })
+      .onFailure(err -> {
+        System.err.println("Oracle Agent Loop failed: " + err.getMessage());
+        // Fall back to simple tool execution
+        fallbackToSimpleOracle(ctx, userMessage, messages);
+      });
+  }
+  
+  /**
+   * Handle Oracle Agent failure with meaningful error response
+   */
+  private static void fallbackToSimpleOracle(RoutingContext ctx, String userMessage, JsonArray messages) {
+    // Instead of using simple SQL as fallback, provide helpful error message
+    // This ensures users know the system needs improvement rather than getting wrong results
+    
+    String errorResponse = "I encountered an issue processing your database query. " +
+                          "The query intelligence system is being enhanced. " +
+                          "Please try rephrasing your question or contact support if this persists.\n\n" +
+                          "Your query: \"" + userMessage + "\"";
+    
+    JsonObject chatResponse = new JsonObject()
+      .put("id", "msg-" + UUID.randomUUID().toString())
+      .put("object", "chat.completion")
+      .put("created", System.currentTimeMillis() / 1000)
+      .put("model", "oracle-agent-enhanced")
+      .put("choices", new JsonArray()
+        .add(new JsonObject()
+          .put("index", 0)
+          .put("message", new JsonObject()
+            .put("role", "assistant")
+            .put("content", errorResponse))
+          .put("finish_reason", "stop")));
+    
+    ctx.response()
+      .putHeader("Content-Type", "application/json")
+      .setStatusCode(200)
+      .end(chatResponse.encode());
+  }
+  
+  /**
    * Handle standard LLM processing
    */
   private static void handleStandardLLM(RoutingContext ctx, JsonArray messages) {
     LlmAPIService llmService = LlmAPIService.getInstance();
     
-    if (llmService.isInitialized()) {
+    if (!llmService.isInitialized()) {
       sendHardcodedResponse(ctx);
       return;
     }
@@ -262,12 +395,48 @@ public class ConversationVerticle extends AbstractVerticle {
   private static boolean needsTools(String message) {
     if (message == null) return false;
     String lower = message.toLowerCase();
-    return lower.contains("calculate") || lower.contains("add") || lower.contains("subtract") ||
-           lower.contains("multiply") || lower.contains("divide") ||
-           lower.contains("weather") || lower.contains("temperature") || lower.contains("forecast") ||
-           lower.contains("database") || lower.contains("query") || lower.contains("users") ||
-           lower.contains("file") || lower.contains("save") || lower.contains("list files");
+    
+    // Check for Oracle/database queries first (most common)
+    if (lower.contains("oracle") || lower.contains("table") || lower.contains("database") ||
+        lower.contains("sql") || lower.contains("query") || lower.contains("select") ||
+        lower.contains("orders") || lower.contains("customers") || lower.contains("products") ||
+        lower.contains("pending") || lower.contains("delivered") || lower.contains("shipped") ||
+        lower.contains("california") || lower.contains("deliveries") || lower.contains("status")) {
+      return true;
+    }
+    
+    // Check for file operations (if filesystem tools are enabled)
+    if (lower.contains("file") || lower.contains("save") || lower.contains("list files") ||
+        lower.contains("read file") || lower.contains("write file")) {
+      return true;
+    }
+    
+    // Note: Calculator and weather tools are disabled in config, so we don't check for them
+    return false;
   }
+  
+  /**
+   * Check if message should use Oracle Agent Loop for interactive discovery
+   * This catches any query that looks like it might be asking for data
+   */
+  private static boolean shouldUseOracleAgent(String message) {
+    if (message == null) return false;
+    String lower = message.toLowerCase();
+    
+    // Look for data query indicators (no hardcoded table names!)
+    return lower.contains("show") || lower.contains("find") || lower.contains("list") ||
+           lower.contains("get") || lower.contains("search") || lower.contains("query") ||
+           lower.contains("select") || lower.contains("from") || lower.contains("where") ||
+           lower.contains("table") || lower.contains("database") || lower.contains("sql") ||
+           lower.contains("data") || lower.contains("records") || lower.contains("rows") ||
+           lower.contains("column") || lower.contains("field") || lower.contains("value") ||
+           lower.contains("count") || lower.contains("sum") || lower.contains("average") ||
+           lower.contains("total") || lower.contains("pending") || lower.contains("status") ||
+           // Business-like queries without specific keywords
+           (lower.contains("all") && lower.contains("from")) ||
+           (lower.contains("how many") || lower.contains("how much"));
+  }
+  
   
   /**
    * Detect which tool to use - matches MCP server tool names
@@ -275,64 +444,25 @@ public class ConversationVerticle extends AbstractVerticle {
   private static String detectTool(String message) {
     String lower = message.toLowerCase();
     
-    // Calculator tools - use prefixed names for consistency
-    if (lower.contains("add") || lower.contains("plus") || lower.contains("sum")) {
-      return "calculator__add";
+    // Oracle operations - Primary focus now
+    if (lower.contains("list") && (lower.contains("table") || lower.contains("oracle"))) {
+      return "oracle__list_tables";
     }
-    if (lower.contains("subtract") || lower.contains("minus") || lower.contains("difference")) {
-      return "calculator__subtract";
+    if (lower.contains("describe") && lower.contains("table")) {
+      return "oracle__describe_table";
     }
-    if (lower.contains("multiply") || lower.contains("times") || lower.contains("product")) {
-      return "calculator__multiply";
-    }
-    if (lower.contains("divide") || lower.contains("quotient") || lower.contains("division")) {
-      return "calculator__divide";
-    }
-    if (lower.contains("calculate")) {
-      // Generic calculate defaults to add
-      return "calculator__add";
+    if (lower.contains("execute") && (lower.contains("query") || lower.contains("sql"))) {
+      return "oracle__execute_query";
     }
     
-    // Weather tools
-    if (lower.contains("forecast")) {
-      return "weather__forecast";
-    }
-    if (lower.contains("weather") || lower.contains("temperature")) {
-      return "weather__weather";
-    }
-    
-    // Database operations - detect specific operations
-    if (lower.contains("insert") && (lower.contains("database") || lower.contains("table") || lower.contains("user"))) {
-      return "database__insert";
-    }
-    if (lower.contains("update") && (lower.contains("database") || lower.contains("table") || lower.contains("record"))) {
-      return "database__update";
-    }
-    if (lower.contains("delete") && (lower.contains("database") || lower.contains("table") || lower.contains("record"))) {
-      return "database__delete";
-    }
-    if (lower.contains("query") || lower.contains("select") || 
-        (lower.contains("database") && !lower.contains("insert") && !lower.contains("update") && !lower.contains("delete"))) {
-      return "database__query";
+    // Default Oracle queries - look for business terms
+    if (lower.contains("orders") || lower.contains("deliveries") || lower.contains("pending") ||
+        lower.contains("shipped") || lower.contains("customers") || lower.contains("products") ||
+        lower.contains("california") || lower.contains("status")) {
+      // For business queries, use execute_query to run SQL
+      return "oracle__execute_query";
     }
     
-    // Filesystem operations - detect specific operations
-    if (lower.contains("read") && (lower.contains("file") || lower.contains(".txt") || lower.contains(".json"))) {
-      return "filesystem__read";
-    }
-    if (lower.contains("write") && (lower.contains("file") || lower.contains("save"))) {
-      return "filesystem__write";
-    }
-    if (lower.contains("delete") && lower.contains("file")) {
-      return "filesystem__delete";
-    }
-    if (lower.contains("list") && (lower.contains("file") || lower.contains("directory") || lower.contains("folder"))) {
-      return "filesystem__list";
-    }
-    // Additional filesystem detection patterns
-    if (lower.contains("files in") || lower.contains("ls ") || lower.contains("dir ")) {
-      return "filesystem__list";
-    }
     
     return null;
   }
@@ -343,80 +473,28 @@ public class ConversationVerticle extends AbstractVerticle {
   private static JsonObject createToolArguments(String message, String tool) {
     JsonObject arguments = new JsonObject();
     
-    // Handle calculator operations - extract numbers for ALL operations
-    if (tool.startsWith("calculator__")) {
-      double[] numbers = extractNumbers(message);
-      if (numbers.length >= 2) {
-        arguments.put("a", numbers[0])
-                .put("b", numbers[1]);
-      } else {
-        // Fallback defaults if no numbers found
-        arguments.put("a", 10)
-                .put("b", 5);
-      }
-      return arguments;
-    }
-    
-    // Handle weather operations
-    if (tool.startsWith("weather__")) {
-      double[] coords = extractNumbers(message);
-      if (coords.length >= 2) {
-        arguments.put("latitude", coords[0])
-                .put("longitude", coords[1]);
-      } else {
-        // Default to San Francisco
-        arguments.put("latitude", 37.7749)
-                .put("longitude", -122.4194);
-      }
-      if (tool.equals("weather__forecast")) {
-        // Extract days if specified
-        arguments.put("days", 3); // Default 3 days
-      }
-      return arguments;
-    }
-    
-    // Handle database operations
-    if (tool.startsWith("database__")) {
-      String tableName = extractTableName(message);
-      arguments.put("table", tableName);
+    // Handle Oracle operations
+    if (tool.startsWith("oracle__")) {
+      String lower = message.toLowerCase();
       
       switch (tool) {
-        case "database__insert":
-          arguments.put("data", new JsonObject()
-            .put("name", "Sample User")
-            .put("email", "user@example.com"));
+        case "oracle__list_tables":
+          // No arguments needed for list_tables
           break;
-        case "database__update":
-          arguments.put("filter", new JsonObject().put("id", 1))
-                  .put("data", new JsonObject().put("status", "active"));
+          
+        case "oracle__describe_table":
+          // Try to extract table name
+          String tableName = "ORDERS"; // Default
+          if (lower.contains("customers")) tableName = "CUSTOMERS";
+          else if (lower.contains("products")) tableName = "PRODUCTS";
+          else if (lower.contains("order_details")) tableName = "ORDER_DETAILS";
+          arguments.put("table_name", tableName);
           break;
-        case "database__delete":
-          arguments.put("filter", new JsonObject().put("id", 1));
-          break;
-        case "database__query":
-          arguments.put("limit", extractLimit(message));
-          break;
-      }
-      return arguments;
-    }
-    
-    // Handle filesystem operations
-    if (tool.startsWith("filesystem__")) {
-      String path = extractPath(message);
-      
-      switch (tool) {
-        case "filesystem__read":
-        case "filesystem__delete":
-          arguments.put("path", path);
-          break;
-        case "filesystem__write":
-          arguments.put("path", path)
-                  .put("content", extractContent(message))
-                  .put("append", false);
-          break;
-        case "filesystem__list":
-          arguments.put("path", path)
-                  .put("recursive", message.toLowerCase().contains("recursive"));
+          
+        case "oracle__execute_query":
+          // Generate SQL based on the query
+          String sql = generateSqlFromQuery(message);
+          arguments.put("sql", sql);
           break;
       }
       return arguments;
@@ -637,6 +715,58 @@ public class ConversationVerticle extends AbstractVerticle {
   }
   
   /**
+   * Generate SQL from natural language query
+   * This is a simple implementation - in production, use the Oracle Agent Loop for complex queries
+   */
+  private static String generateSqlFromQuery(String query) {
+    String lower = query.toLowerCase();
+    
+    // Handle common query patterns
+    if (lower.contains("pending") && (lower.contains("orders") || lower.contains("deliveries"))) {
+      // Query for pending orders
+      String sql = "SELECT o.order_number, c.company_name, c.city, os.status_code, o.order_date " +
+                   "FROM orders o " +
+                   "JOIN customers c ON o.customer_id = c.customer_id " +
+                   "JOIN order_status_enum os ON o.status_id = os.status_id " +
+                   "WHERE os.status_code = 'PENDING'";
+      
+      // Add location filter if specified
+      if (lower.contains("california")) {
+        // Match the actual case in the database
+        sql += " AND c.city IN ('San Francisco', 'Los Angeles', 'San Diego', 'Sacramento') ";
+      }
+      
+      sql += " ORDER BY o.order_date DESC FETCH FIRST 20 ROWS ONLY";
+      return sql;
+    }
+    
+    if (lower.contains("list") && lower.contains("tables")) {
+      return "SELECT table_name FROM user_tables ORDER BY table_name";
+    }
+    
+    if (lower.contains("count") && lower.contains("orders")) {
+      return "SELECT COUNT(*) AS total_orders FROM orders";
+    }
+    
+    if (lower.contains("customers")) {
+      if (lower.contains("california")) {
+        return "SELECT * FROM customers WHERE UPPER(city) IN ('SAN FRANCISCO', 'LOS ANGELES', 'SAN DIEGO') FETCH FIRST 10 ROWS ONLY";
+      }
+      return "SELECT * FROM customers FETCH FIRST 10 ROWS ONLY";
+    }
+    
+    if (lower.contains("products")) {
+      if (lower.contains("low stock")) {
+        return "SELECT * FROM products WHERE units_in_stock < reorder_level ORDER BY units_in_stock FETCH FIRST 10 ROWS ONLY";
+      }
+      return "SELECT * FROM products FETCH FIRST 10 ROWS ONLY";
+    }
+    
+    // Default query
+    return "SELECT table_name, num_rows FROM user_tables ORDER BY table_name";
+  }
+  
+  /**
    * Handle conversation with tools - streaming version
    */
   private static void handleWithToolsStreaming(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
@@ -687,7 +817,7 @@ public class ConversationVerticle extends AbstractVerticle {
   private static void handleStandardLLMStreaming(Vertx vertx, String streamId, JsonArray messages) {
     LlmAPIService llmService = LlmAPIService.getInstance();
     
-    if (llmService.isInitialized()) {
+    if (!llmService.isInitialized()) {
       // Send fallback message if not initialized
       vertx.eventBus().publish("conversation." + streamId + ".final", 
         new JsonObject().put("content", "I'm currently running without an AI backend. Please set the OPENAI_API_KEY environment variable to enable AI responses."));

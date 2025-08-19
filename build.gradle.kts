@@ -61,6 +61,16 @@ dependencies {
   implementation("com.fasterxml.jackson.core:jackson-databind:2.15.3")
   implementation("com.fasterxml.jackson.core:jackson-annotations:2.15.3")
   implementation("com.vladsch.flexmark:flexmark-all:0.64.8")
+  
+  // Oracle JDBC dependencies
+  implementation("com.oracle.database.jdbc:ojdbc11:23.3.0.23.09")
+  implementation("com.oracle.database.jdbc:ucp:23.3.0.23.09")
+  
+  // SQL parsing and manipulation
+  implementation("com.github.jsqlparser:jsqlparser:4.7")
+  
+  // Natural language processing
+  implementation("org.apache.opennlp:opennlp-tools:2.3.1")
 }
 
 java {
