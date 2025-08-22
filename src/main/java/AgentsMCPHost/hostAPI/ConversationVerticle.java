@@ -1,6 +1,7 @@
 package AgentsMCPHost.hostAPI;
 
 import AgentsMCPHost.services.LlmAPIService;
+import AgentsMCPHost.mcp.orchestration.ToolSelectionVerticle;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -13,16 +14,23 @@ import io.vertx.ext.web.RoutingContext;
 import java.util.UUID;
 
 /**
- * Unified conversation verticle with automatic MCP tool detection.
- * Provides OpenAI-compatible chat completions with optional tool support.
- * Now routes through the full MCP infrastructure via McpHostManager.
+ * Unified conversation verticle with intelligent tool selection.
+ * Uses the new ToolSelectionVerticle for all tool routing decisions,
+ * eliminating fragmented detection logic and providing LLM-powered selection.
  */
 public class ConversationVerticle extends AbstractVerticle {
   private static boolean mcpEnabled = false;
   private static int availableTools = 0;
+  private static boolean systemFullyReady = false;
   
   @Override
   public void start(Promise<Void> startPromise) throws Exception {
+    // Listen for complete system ready event
+    vertx.eventBus().consumer("system.fully.ready", msg -> {
+      systemFullyReady = true;
+      System.out.println("[ConversationVerticle] System fully ready - accepting requests");
+    });
+    
     // Listen for MCP system ready events
     vertx.eventBus().consumer("mcp.system.ready", msg -> {
       JsonObject status = (JsonObject) msg.body();
@@ -55,17 +63,18 @@ public class ConversationVerticle extends AbstractVerticle {
       }
     });
     
-    // Register streaming processor
+    // Register streaming processor - now uses unified tool selection
     vertx.eventBus().consumer("conversation.process.streaming", msg -> {
       JsonObject request = (JsonObject) msg.body();
       String streamId = request.getString("streamId");
       JsonArray streamMessages = request.getJsonArray("messages");
       String userMsg = request.getString("userMessage");
       
-      if (mcpEnabled && needsTools(userMsg)) {
-        handleWithToolsStreaming(vertx, streamId, userMsg, streamMessages);
+      // Use unified tool selection if MCP is enabled
+      if (mcpEnabled && availableTools > 0) {
+        handleWithUnifiedSelection(vertx, streamId, userMsg, streamMessages);
       } else {
-        handleStandardLLMStreaming(vertx, streamId, streamMessages);
+        handleStandardLLM(vertx, streamId, streamMessages);
       }
     });
     
@@ -82,15 +91,18 @@ public class ConversationVerticle extends AbstractVerticle {
   }
   
   /**
-   * Handle conversation requests (supports both regular JSON and SSE streaming)
+   * Handle conversation requests (always uses SSE streaming)
    * @param ctx The routing context
    */
   private static void handleConversation(RoutingContext ctx) {
+    // Check if system is ready
+    if (!systemFullyReady) {
+      sendError(ctx, 503, "System is starting up. Please try again in a few seconds.");
+      System.out.println("[ConversationVerticle] Request rejected - system not ready");
+      return;
+    }
+    
     try {
-      // Check if client wants SSE streaming
-      String acceptHeader = ctx.request().getHeader("Accept");
-      boolean wantsStreaming = "text/event-stream".equals(acceptHeader);
-      
       // Parse the request body
       JsonObject requestBody = ctx.body().asJsonObject();
       
@@ -120,56 +132,8 @@ public class ConversationVerticle extends AbstractVerticle {
         sendError(ctx, 400, "No user message found in conversation");
         return;
       }
-      
-      // Extract last user message for tool detection
-      String lastUserMessage = extractLastUserMessage(messages);
-      
-      // If streaming is requested, handle with SSE
-      if (wantsStreaming) {
-        StreamingConversationHandler.handle(ctx, messages, ctx.vertx());
-        return;
-      }
-      
-      // Check if message needs MCP tools first (simpler path)
-      if (mcpEnabled && needsTools(lastUserMessage)) {
-        // Use direct tool calls for Oracle queries instead of Agent Loop
-        handleWithTools(ctx, lastUserMessage, messages);
-      } else if (mcpEnabled && shouldUseOracleAgent(lastUserMessage)) {
-        // Only use Oracle Agent for complex interactive queries
-        handleWithOracleAgent(ctx, lastUserMessage, messages);
-      } else {
-        // Standard LLM processing
-        LlmAPIService llmService = LlmAPIService.getInstance();
-        if (!llmService.isInitialized()) {
-          // Fall back to hardcoded response if service not initialized
-          sendHardcodedResponse(ctx);
-          return;
-        }
-        
-        // Make async call to OpenAI
-        Future<JsonObject> llmFuture = llmService.chatCompletion(messages);
-        
-        llmFuture.onSuccess(openAiResponse -> {
-          // Forward the OpenAI response directly to the client
-          ctx.response()
-            .putHeader("Content-Type", "application/json")
-            .setStatusCode(200)
-            .end(openAiResponse.encode());
-        }).onFailure(error -> {
-          // Handle different types of errors
-          String errorMessage = error.getMessage();
-          
-          if (errorMessage.contains("Rate limit")) {
-            sendError(ctx, 429, "Rate limit exceeded. Please try again later.");
-          } else if (errorMessage.contains("timeout")) {
-            sendError(ctx, 504, "Request timeout. The AI service took too long to respond.");
-          } else if (errorMessage.contains("Invalid OpenAI API key")) {
-            sendError(ctx, 401, "AI service authentication failed.");
-          } else {
-            sendError(ctx, 503, "AI service temporarily unavailable: " + errorMessage);
-          }
-        });
-      }
+
+      StreamingConversationHandler.handle(ctx, messages, ctx.vertx());
         
     } catch (Exception e) {
       sendError(ctx, 500, "Internal server error: " + e.getMessage());
@@ -195,109 +159,278 @@ public class ConversationVerticle extends AbstractVerticle {
       .end(error.encode());
   }
   
+  
   /**
-   * Send a hardcoded response when LLM service is not available
-   * @param ctx The routing context
+   * Handle conversation with unified tool selection
    */
-  private static void sendHardcodedResponse(RoutingContext ctx) {
-    String conversationId = "conv-" + UUID.randomUUID().toString().substring(0, 8);
+  private static void handleWithUnifiedSelection(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
+    // Request tool selection analysis
+    JsonObject selectionRequest = new JsonObject()
+      .put("query", userMessage)
+      .put("history", messages)
+      .put("sessionId", streamId);
     
-    JsonObject response = new JsonObject()
-      .put("id", conversationId)
-      .put("object", "chat.completion")
-      .put("created", System.currentTimeMillis() / 1000)
-      .put("model", "fallback-v1")
-      .put("choices", new JsonArray()
-        .add(new JsonObject()
-          .put("index", 0)
-          .put("message", new JsonObject()
-            .put("role", "assistant")
-            .put("content", "I'm currently running without an AI backend. Please set the OPENAI_API_KEY environment variable to enable AI responses."))
-          .put("finish_reason", "stop")))
-      .put("usage", new JsonObject()
-        .put("prompt_tokens", 0)
-        .put("completion_tokens", 0)
-        .put("total_tokens", 0));
-    
-    ctx.response()
-      .putHeader("Content-Type", "application/json")
-      .setStatusCode(200)
-      .end(response.encode());
+    vertx.eventBus().<JsonObject>request("tool.selection.analyze", selectionRequest)
+      .onSuccess(reply -> {
+        JsonObject decision = reply.body();
+        String strategy = decision.getString("strategy");
+        
+        // Route based on unified decision - beautifully simple!
+        System.out.println("[Conversation] Tool selection decision: " + strategy);
+        
+        switch (ToolSelectionVerticle.ToolStrategy.valueOf(strategy)) {
+          case SINGLE_TOOL:
+            System.out.println("[Conversation] Routing to single tool: " + decision.getString("primaryTool"));
+            handleSingleTool(vertx, streamId, decision, userMessage);
+            break;
+            
+          case MULTIPLE_TOOLS:
+            System.out.println("[Conversation] Executing multiple tools in sequence");
+            handleMultipleTools(vertx, streamId, decision, userMessage);
+            break;
+            
+          case ORCHESTRATION:
+            String orchestrationName = decision.getString("orchestrationName");
+            System.out.println("[Conversation] Delegating to orchestration: " + orchestrationName);
+            handleOrchestration(vertx, streamId, orchestrationName, userMessage, messages);
+            break;
+            
+          case STANDARD_LLM:
+          default:
+            System.out.println("[Conversation] No tools needed - using standard LLM");
+            handleStandardLLM(vertx, streamId, messages);
+            break;
+        }
+      })
+      .onFailure(err -> {
+        System.err.println("Tool selection failed: " + err.getMessage());
+        // Fallback to standard LLM on selection failure
+        handleStandardLLM(vertx, streamId, messages);
+      });
   }
   
   /**
-   * Handle conversation with MCP tools - routes through MCP host manager
+   * Handle single tool execution - clean and simple
    */
-  private static void handleWithTools(RoutingContext ctx, String userMessage, JsonArray messages) {
-    // ALL Oracle/database queries should go through the Agent Loop
-    // This ensures proper schema discovery and LLM-based SQL generation
-    if (isOracleQuery(userMessage)) {
-      // Route to Oracle Agent Loop for ALL database queries
-      handleWithOracleAgent(ctx, userMessage, messages);
+  private static void handleSingleTool(Vertx vertx, String streamId, JsonObject decision, String userMessage) {
+    String tool = decision.getString("primaryTool");
+    
+    System.out.println("[Conversation] Executing single tool: " + tool);
+    
+    // Notify tool call start if streaming
+    if (streamId != null) {
+      vertx.eventBus().publish("conversation." + streamId + ".tool.start", 
+        new JsonObject().put("tool", tool));
+    }
+    
+    // Create tool arguments based on the tool and message
+    JsonObject toolArguments = createSimpleToolArguments(userMessage, tool);
+    
+    // Route through MCP host manager
+    JsonObject routeRequest = new JsonObject()
+      .put("tool", tool)
+      .put("arguments", toolArguments)
+      .put("userMessage", userMessage)
+      .put("streamId", streamId);
+    
+    vertx.eventBus().request("mcp.host.route", routeRequest, ar -> {
+      if (ar.succeeded()) {
+        JsonObject toolResult = (JsonObject) ar.result().body();
+        
+        System.out.println("[Conversation] Tool " + tool + " completed successfully");
+        
+        // Notify tool completion if streaming
+        if (streamId != null) {
+          vertx.eventBus().publish("conversation." + streamId + ".tool.complete", 
+            new JsonObject()
+              .put("tool", tool)
+              .put("result", toolResult));
+        }
+        
+        // Send final response
+        String response = formatMcpToolResponse(tool, toolResult);
+        if (streamId != null) {
+          vertx.eventBus().publish("conversation." + streamId + ".final", 
+            new JsonObject().put("content", response));
+        }
+      } else {
+        String error = "Tool execution failed: " + ar.cause().getMessage();
+        System.err.println("[Conversation] " + error);
+        
+        // Error handling
+        if (streamId != null) {
+          vertx.eventBus().publish("conversation." + streamId + ".error", 
+            new JsonObject()
+              .put("error", error)
+              .put("tool", tool)
+              .put("available_tools", getAvailableToolsList(vertx)));
+        }
+      }
+    });
+  }
+  
+  /**
+   * Handle multiple tools execution in sequence
+   */
+  private static void handleMultipleTools(Vertx vertx, String streamId, JsonObject decision, String userMessage) {
+    JsonArray tools = decision.getJsonArray("additionalTools", new JsonArray());
+    
+    if (decision.getString("primaryTool") != null) {
+      tools.add(0, decision.getString("primaryTool"));  // Add primary tool first
+    }
+    
+    System.out.println("[Conversation] Executing " + tools.size() + " tools in sequence");
+    
+    // For now, execute tools sequentially
+    // Future enhancement: parallel execution where possible
+    executeToolsSequentially(vertx, streamId, tools, userMessage, 0, new JsonObject());
+  }
+  
+  /**
+   * Execute tools sequentially with result passing
+   */
+  private static void executeToolsSequentially(Vertx vertx, String streamId, JsonArray tools, 
+                                              String userMessage, int index, JsonObject previousResults) {
+    if (index >= tools.size()) {
+      // All tools completed
+      String finalResponse = formatMultiToolResponse(previousResults);
+      if (streamId != null) {
+        vertx.eventBus().publish("conversation." + streamId + ".final",
+          new JsonObject().put("content", finalResponse));
+      }
       return;
     }
     
-    // For non-Oracle tools, use direct tool routing
-    String tool = detectTool(userMessage);
+    String tool = tools.getString(index);
+    JsonObject arguments = createSimpleToolArguments(userMessage, tool);
     
-    if (tool != null && !tool.startsWith("oracle__")) {
-      JsonObject toolArguments = createToolArguments(userMessage, tool);
-      
-      // Route through MCP host manager for proper tool execution
-      JsonObject routeRequest = new JsonObject()
-        .put("tool", tool)
-        .put("arguments", toolArguments)
-        .put("userMessage", userMessage);
-      
-      ctx.vertx().eventBus().request("mcp.host.route", routeRequest, ar -> {
-        if (ar.succeeded()) {
-          JsonObject toolResult = (JsonObject) ar.result().body();
-          String response = formatMcpToolResponse(tool, toolResult);
-          sendToolResponse(ctx, response);
-        } else {
-          // Fallback to standard LLM if tool fails
-          System.err.println("MCP tool execution failed: " + ar.cause().getMessage());
-          handleStandardLLM(ctx, messages);
-        }
-      });
-    } else {
-      handleStandardLLM(ctx, messages);
+    // Add previous results to arguments if available
+    if (!previousResults.isEmpty()) {
+      arguments.put("previous_results", previousResults);
     }
-  }
-  
-  /**
-   * Check if the query should be handled by Oracle Agent Loop
-   */
-  private static boolean isOracleQuery(String message) {
-    if (message == null) return false;
-    String lower = message.toLowerCase();
     
-    // Check for Oracle/database related terms
-    return lower.contains("oracle") || lower.contains("database") || 
-           lower.contains("table") || lower.contains("sql") || 
-           lower.contains("query") || lower.contains("select") ||
-           // Business terms that likely need database queries
-           lower.contains("orders") || lower.contains("customers") || 
-           lower.contains("products") || lower.contains("deliveries") ||
-           lower.contains("pending") || lower.contains("shipped") || 
-           lower.contains("delivered") || lower.contains("status") ||
-           lower.contains("california") || lower.contains("revenue") ||
-           lower.contains("count") || lower.contains("total") ||
-           lower.contains("enumeration") || lower.contains("enum");
+    JsonObject routeRequest = new JsonObject()
+      .put("tool", tool)
+      .put("arguments", arguments)
+      .put("streamId", streamId);
+    
+    vertx.eventBus().request("mcp.host.route", routeRequest, ar -> {
+      if (ar.succeeded()) {
+        JsonObject result = (JsonObject) ar.result().body();
+        previousResults.put(tool, result);
+        
+        // Continue to next tool
+        executeToolsSequentially(vertx, streamId, tools, userMessage, index + 1, previousResults);
+      } else {
+        // Handle error but try to continue
+        System.err.println("[Conversation] Tool " + tool + " failed: " + ar.cause().getMessage());
+        executeToolsSequentially(vertx, streamId, tools, userMessage, index + 1, previousResults);
+      }
+    });
   }
   
   /**
-   * Handle queries with Oracle Agent Loop for intelligent SQL generation
+   * Handle orchestration strategy execution
    */
-  private static void handleWithOracleAgent(RoutingContext ctx, String userMessage, JsonArray messages) {
-    // Create request for Oracle Agent Loop
+  private static void handleOrchestration(Vertx vertx, String streamId, String orchestrationName,
+                                         String userMessage, JsonArray messages) {
+    System.out.println("[Conversation] Starting orchestration: " + orchestrationName);
+    
+    // Build orchestration request
+    JsonObject orchestrationRequest = new JsonObject()
+      .put("query", userMessage)
+      .put("messages", messages)
+      .put("sessionId", UUID.randomUUID().toString())
+      .put("streamId", streamId);
+    
+    // Send to orchestration handler
+    vertx.eventBus().request("orchestration." + orchestrationName, orchestrationRequest, ar -> {
+      if (ar.succeeded()) {
+        JsonObject result = (JsonObject) ar.result().body();
+        
+        System.out.println("[Conversation] Orchestration completed: " + orchestrationName);
+        
+        // Extract the formatted response from MCP format or direct format
+        String response = extractContentFromResult(result);
+        
+        System.out.println("[Conversation] Extracted response: " + 
+            (response.length() > 200 ? response.substring(0, 200) + "..." : response));
+        
+        if (streamId != null) {
+          System.out.println("[Conversation] Publishing final response to stream: " + streamId);
+          JsonObject finalMessage = new JsonObject().put("content", response);
+          vertx.eventBus().publish("conversation." + streamId + ".final", finalMessage);
+          System.out.println("[Conversation] Final response published successfully");
+          
+          // Log to CSV
+          vertx.eventBus().publish("log",
+            "Conversation final response sent for " + streamId + ",2,Conversation,Response,SSE");
+        } else {
+          System.out.println("[Conversation] WARNING: No streamId for response delivery!");
+        }
+      } else {
+        String error = "Orchestration failed: " + ar.cause().getMessage();
+        System.err.println("[Conversation] " + error);
+        
+        if (streamId != null) {
+          vertx.eventBus().publish("conversation." + streamId + ".error",
+            new JsonObject()
+              .put("error", error)
+              .put("orchestration", orchestrationName));
+        }
+      }
+    });
+  }
+  
+  /**
+   * Create simple tool arguments (backward compatibility)
+   */
+  private static JsonObject createSimpleToolArguments(String message, String tool) {
+    JsonObject arguments = new JsonObject();
+    
+    // Basic argument creation for known tools
+    if (tool.contains("describe_table")) {
+      // Extract table name if mentioned
+      String lower = message.toLowerCase();
+      if (lower.contains("orders")) arguments.put("table_name", "ORDERS");
+      else if (lower.contains("customers")) arguments.put("table_name", "CUSTOMERS");
+      else if (lower.contains("products")) arguments.put("table_name", "PRODUCTS");
+    } else if (tool.contains("execute_query") && message.toUpperCase().contains("SELECT")) {
+      // If SQL is provided directly, use it
+      arguments.put("sql", message);
+    }
+    
+    return arguments;
+  }
+  
+  /**
+   * DEPRECATED: Handle conversation with MCP tools - replaced by unified selection
+   */
+  private static void handleWithTools_DEPRECATED(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
+    // This method is deprecated - kept for reference only
+    // All tool selection now goes through ToolSelectionVerticle
+    handleStandardLLM(vertx, streamId, messages);
+  }
+  
+  // REMOVED: isOracleQuery - now handled by ToolSelectionVerticle
+  
+  /**
+   * Handle queries with Oracle Agent Loop for intelligent SQL generation - streaming version
+   */
+  private static void handleWithOracleAgent(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
+    // Notify starting Oracle Agent
+    vertx.eventBus().publish("conversation." + streamId + ".tool.start", 
+      new JsonObject().put("tool", "oracle_agent").put("message", "Starting Oracle intelligent query processing..."));
+    
+    // Create request for Oracle Agent Loop with streamId
     JsonObject agentRequest = new JsonObject()
       .put("query", userMessage)
       .put("messages", messages)
-      .put("sessionId", UUID.randomUUID().toString());
+      .put("sessionId", UUID.randomUUID().toString())
+      .put("streamId", streamId);  // Pass streamId for progress events
     
     // Send to Oracle Agent Loop via event bus
-    ctx.vertx().eventBus().request("oracle.agent.process", agentRequest)
+    vertx.eventBus().request("oracle.agent.process", agentRequest)
       .onSuccess(reply -> {
         JsonObject result = (JsonObject) reply.body();
         
@@ -305,318 +438,122 @@ public class ConversationVerticle extends AbstractVerticle {
         if (result.getBoolean("success", false)) {
           String response = result.getString("result", "Query processed successfully");
           
-          // Format as proper response
-          JsonObject chatResponse = new JsonObject()
-            .put("id", "msg-" + UUID.randomUUID().toString())
-            .put("object", "chat.completion")
-            .put("created", System.currentTimeMillis() / 1000)
-            .put("model", "oracle-agent-enhanced")
-            .put("choices", new JsonArray()
-              .add(new JsonObject()
-                .put("index", 0)
-                .put("message", new JsonObject()
-                  .put("role", "assistant")
-                  .put("content", response))
-                .put("finish_reason", "stop")));
+          // Notify tool completion
+          vertx.eventBus().publish("conversation." + streamId + ".tool.complete", 
+            new JsonObject()
+              .put("tool", "oracle_agent")
+              .put("result", result));
           
-          ctx.response()
-            .putHeader("Content-Type", "application/json")
-            .setStatusCode(200)
-            .end(chatResponse.encode());
+          // Send final response
+          vertx.eventBus().publish("conversation." + streamId + ".final", 
+            new JsonObject().put("content", response));
         } else {
-          // If agent fails, fall back to simple tool execution
-          fallbackToSimpleOracle(ctx, userMessage, messages);
+          // If agent fails, send error message
+          String errorMsg = "Oracle Agent encountered an issue: " + result.getString("error", "Unknown error");
+          vertx.eventBus().publish("conversation." + streamId + ".error", 
+            new JsonObject().put("error", errorMsg));
         }
       })
       .onFailure(err -> {
         System.err.println("Oracle Agent Loop failed: " + err.getMessage());
-        // Fall back to simple tool execution
-        fallbackToSimpleOracle(ctx, userMessage, messages);
+        // Send error event
+        vertx.eventBus().publish("conversation." + streamId + ".error", 
+          new JsonObject().put("error", "Oracle Agent failed: " + err.getMessage()));
       });
   }
   
-  /**
-   * Handle Oracle Agent failure with meaningful error response
-   */
-  private static void fallbackToSimpleOracle(RoutingContext ctx, String userMessage, JsonArray messages) {
-    // Instead of using simple SQL as fallback, provide helpful error message
-    // This ensures users know the system needs improvement rather than getting wrong results
-    
-    String errorResponse = "I encountered an issue processing your database query. " +
-                          "The query intelligence system is being enhanced. " +
-                          "Please try rephrasing your question or contact support if this persists.\n\n" +
-                          "Your query: \"" + userMessage + "\"";
-    
-    JsonObject chatResponse = new JsonObject()
-      .put("id", "msg-" + UUID.randomUUID().toString())
-      .put("object", "chat.completion")
-      .put("created", System.currentTimeMillis() / 1000)
-      .put("model", "oracle-agent-enhanced")
-      .put("choices", new JsonArray()
-        .add(new JsonObject()
-          .put("index", 0)
-          .put("message", new JsonObject()
-            .put("role", "assistant")
-            .put("content", errorResponse))
-          .put("finish_reason", "stop")));
-    
-    ctx.response()
-      .putHeader("Content-Type", "application/json")
-      .setStatusCode(200)
-      .end(chatResponse.encode());
-  }
   
   /**
-   * Handle standard LLM processing
+   * Handle standard LLM processing - unified streaming version
    */
-  private static void handleStandardLLM(RoutingContext ctx, JsonArray messages) {
+  private static void handleStandardLLM(Vertx vertx, String streamId, JsonArray messages) {
     LlmAPIService llmService = LlmAPIService.getInstance();
     
     if (!llmService.isInitialized()) {
-      sendHardcodedResponse(ctx);
+      // Send fallback message if not initialized
+      vertx.eventBus().publish("conversation." + streamId + ".final", 
+        new JsonObject().put("content", "I'm currently running without an AI backend. Please set the OPENAI_API_KEY environment variable to enable AI responses."));
       return;
     }
     
     Future<JsonObject> llmFuture = llmService.chatCompletion(messages);
     
     llmFuture.onSuccess(response -> {
-      ctx.response()
-        .putHeader("Content-Type", "application/json")
-        .setStatusCode(200)
-        .end(response.encode());
+      // Extract content from OpenAI response
+      if (response.containsKey("choices") && response.getJsonArray("choices").size() > 0) {
+        String content = response.getJsonArray("choices")
+          .getJsonObject(0)
+          .getJsonObject("message")
+          .getString("content");
+        
+        vertx.eventBus().publish("conversation." + streamId + ".final", 
+          new JsonObject().put("content", content));
+      }
     }).onFailure(error -> {
-      sendError(ctx, 503, "LLM service error: " + error.getMessage());
+      vertx.eventBus().publish("conversation." + streamId + ".error", 
+        new JsonObject().put("error", "LLM service error: " + error.getMessage()));
     });
   }
   
-  /**
-   * Check if message needs MCP tools
-   */
-  private static boolean needsTools(String message) {
-    if (message == null) return false;
-    String lower = message.toLowerCase();
-    
-    // Check for Oracle/database queries first (most common)
-    if (lower.contains("oracle") || lower.contains("table") || lower.contains("database") ||
-        lower.contains("sql") || lower.contains("query") || lower.contains("select") ||
-        lower.contains("orders") || lower.contains("customers") || lower.contains("products") ||
-        lower.contains("pending") || lower.contains("delivered") || lower.contains("shipped") ||
-        lower.contains("california") || lower.contains("deliveries") || lower.contains("status")) {
-      return true;
-    }
-    
-    // Check for file operations (if filesystem tools are enabled)
-    if (lower.contains("file") || lower.contains("save") || lower.contains("list files") ||
-        lower.contains("read file") || lower.contains("write file")) {
-      return true;
-    }
-    
-    // Note: Calculator and weather tools are disabled in config, so we don't check for them
-    return false;
-  }
+  // REMOVED: needsTools - now handled by ToolSelectionVerticle
   
-  /**
-   * Check if message should use Oracle Agent Loop for interactive discovery
-   * This catches any query that looks like it might be asking for data
-   */
-  private static boolean shouldUseOracleAgent(String message) {
-    if (message == null) return false;
-    String lower = message.toLowerCase();
-    
-    // Look for data query indicators (no hardcoded table names!)
-    return lower.contains("show") || lower.contains("find") || lower.contains("list") ||
-           lower.contains("get") || lower.contains("search") || lower.contains("query") ||
-           lower.contains("select") || lower.contains("from") || lower.contains("where") ||
-           lower.contains("table") || lower.contains("database") || lower.contains("sql") ||
-           lower.contains("data") || lower.contains("records") || lower.contains("rows") ||
-           lower.contains("column") || lower.contains("field") || lower.contains("value") ||
-           lower.contains("count") || lower.contains("sum") || lower.contains("average") ||
-           lower.contains("total") || lower.contains("pending") || lower.contains("status") ||
-           // Business-like queries without specific keywords
-           (lower.contains("all") && lower.contains("from")) ||
-           (lower.contains("how many") || lower.contains("how much"));
-  }
+  // REMOVED: shouldUseOracleAgent - now handled by ToolSelectionVerticle
   
   
-  /**
-   * Detect which tool to use - matches MCP server tool names
-   */
-  private static String detectTool(String message) {
-    String lower = message.toLowerCase();
-    
-    // Oracle operations - Primary focus now
-    if (lower.contains("list") && (lower.contains("table") || lower.contains("oracle"))) {
-      return "oracle__list_tables";
-    }
-    if (lower.contains("describe") && lower.contains("table")) {
-      return "oracle__describe_table";
-    }
-    if (lower.contains("execute") && (lower.contains("query") || lower.contains("sql"))) {
-      return "oracle__execute_query";
-    }
-    
-    // Default Oracle queries - look for business terms
-    if (lower.contains("orders") || lower.contains("deliveries") || lower.contains("pending") ||
-        lower.contains("shipped") || lower.contains("customers") || lower.contains("products") ||
-        lower.contains("california") || lower.contains("status")) {
-      // For business queries, use execute_query to run SQL
-      return "oracle__execute_query";
-    }
-    
-    
-    return null;
-  }
+  // REMOVED: detectTool - now handled by ToolSelectionVerticle
+  
+  // REMOVED: createToolArguments - simplified version in createSimpleToolArguments
+  
+  // REMOVED: extractNumbers - no longer needed
+  
+  // REMOVED: extractTableName - handled by ToolSelectionVerticle
+  
+  // REMOVED: extractPath - no longer needed
+  
+  // REMOVED: extractContent - no longer needed
+  
+  // REMOVED: extractLimit - no longer needed
   
   /**
-   * Create tool arguments based on message and tool type
+   * Extract content from various result formats (MCP, direct, etc.)
    */
-  private static JsonObject createToolArguments(String message, String tool) {
-    JsonObject arguments = new JsonObject();
-    
-    // Handle Oracle operations
-    if (tool.startsWith("oracle__")) {
-      String lower = message.toLowerCase();
-      
-      switch (tool) {
-        case "oracle__list_tables":
-          // No arguments needed for list_tables
-          break;
-          
-        case "oracle__describe_table":
-          // Try to extract table name
-          String tableName = "ORDERS"; // Default
-          if (lower.contains("customers")) tableName = "CUSTOMERS";
-          else if (lower.contains("products")) tableName = "PRODUCTS";
-          else if (lower.contains("order_details")) tableName = "ORDER_DETAILS";
-          arguments.put("table_name", tableName);
-          break;
-          
-        case "oracle__execute_query":
-          // Generate SQL based on the query
-          String sql = generateSqlFromQuery(message);
-          arguments.put("sql", sql);
-          break;
-      }
-      return arguments;
+  private static String extractContentFromResult(JsonObject result) {
+    // Check for formatted field first (from formatResults tool)
+    if (result.containsKey("formatted")) {
+      return result.getString("formatted");
     }
     
-    return arguments;
-  }
-  
-  /**
-   * Extract numbers from a message string
-   */
-  private static double[] extractNumbers(String message) {
-    // Use regex to find all numbers (including decimals and negatives)
-    java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("-?\\d+\\.?\\d*");
-    java.util.regex.Matcher matcher = pattern.matcher(message);
-    
-    java.util.List<Double> numbers = new java.util.ArrayList<>();
-    while (matcher.find()) {
-      try {
-        numbers.add(Double.parseDouble(matcher.group()));
-      } catch (NumberFormatException e) {
-        // Skip invalid numbers
+    // Check for result field
+    if (result.containsKey("result")) {
+      Object resultObj = result.getValue("result");
+      if (resultObj instanceof String) {
+        return (String) resultObj;
+      } else if (resultObj instanceof JsonObject) {
+        return ((JsonObject) resultObj).encodePrettily();
       }
     }
     
-    return numbers.stream().mapToDouble(Double::doubleValue).toArray();
-  }
-  
-  /**
-   * Extract table name from database message
-   */
-  private static String extractTableName(String message) {
-    String lower = message.toLowerCase();
-    
-    // Common table names
-    if (lower.contains("orders")) return "orders";
-    if (lower.contains("products")) return "products";
-    if (lower.contains("customers")) return "customers";
-    if (lower.contains("users")) return "users";
-    if (lower.contains("employees")) return "employees";
-    
-    // Try to extract "table_name table" pattern
-    java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(\\w+)\\s+table");
-    java.util.regex.Matcher matcher = pattern.matcher(lower);
-    if (matcher.find()) {
-      return matcher.group(1);
-    }
-    
-    // Default
-    return "users";
-  }
-  
-  /**
-   * Extract file path from filesystem message
-   */
-  private static String extractPath(String message) {
-    // Look for paths starting with /
-    java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(/[\\w\\-./]+)");
-    java.util.regex.Matcher matcher = pattern.matcher(message);
-    if (matcher.find()) {
-      return matcher.group(1);
-    }
-    
-    // Look for specific directories
-    if (message.contains("/tmp")) return "/tmp/mcp-sandbox";
-    if (message.contains("sandbox")) return "/tmp/mcp-sandbox";
-    
-    // Look for file extensions
-    pattern = java.util.regex.Pattern.compile("([\\w\\-]+\\.(txt|json|xml|csv|log))");
-    matcher = pattern.matcher(message);
-    if (matcher.find()) {
-      return "/tmp/mcp-sandbox/" + matcher.group(1);
-    }
-    
-    // Default
-    return "/tmp/mcp-sandbox";
-  }
-  
-  /**
-   * Extract content for file write operations
-   */
-  private static String extractContent(String message) {
-    // Look for quoted content
-    java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\"([^\"]+)\"|'([^']+)'");
-    java.util.regex.Matcher matcher = pattern.matcher(message);
-    if (matcher.find()) {
-      return matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
-    }
-    
-    // Common content patterns
-    if (message.toLowerCase().contains("hello world")) {
-      return "Hello World!";
-    }
-    
-    return "Sample content";
-  }
-  
-  /**
-   * Extract limit for database queries
-   */
-  private static int extractLimit(String message) {
-    // Look for "limit N" pattern
-    java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("limit\\s+(\\d+)");
-    java.util.regex.Matcher matcher = pattern.matcher(message.toLowerCase());
-    if (matcher.find()) {
-      try {
-        return Integer.parseInt(matcher.group(1));
-      } catch (NumberFormatException e) {
-        // Ignore
+    // Check if it's MCP format with content array
+    if (result.containsKey("content") && result.getValue("content") instanceof JsonArray) {
+      JsonArray content = result.getJsonArray("content");
+      if (!content.isEmpty()) {
+        JsonObject firstContent = content.getJsonObject(0);
+        if (firstContent != null && firstContent.containsKey("text")) {
+          return firstContent.getString("text");
+        }
       }
     }
     
-    // Look for numbers that might be limits
-    double[] numbers = extractNumbers(message);
-    for (double num : numbers) {
-      if (num > 10 && num <= 1000 && num == (int)num) {
-        return (int)num;
+    // Check for success field with message
+    if (result.containsKey("success")) {
+      boolean success = result.getBoolean("success", false);
+      if (!success && result.containsKey("error")) {
+        return "Error: " + result.getString("error");
       }
     }
     
-    // Default
-    return 100;
+    // Last resort - return the entire result as JSON
+    return result.encodePrettily();
   }
   
   /**
@@ -678,28 +615,6 @@ public class ConversationVerticle extends AbstractVerticle {
     return response.toString();
   }
   
-  /**
-   * Send tool response
-   */
-  private static void sendToolResponse(RoutingContext ctx, String content) {
-    JsonObject response = new JsonObject()
-      .put("id", "msg-" + UUID.randomUUID().toString())
-      .put("object", "chat.completion")
-      .put("created", System.currentTimeMillis() / 1000)
-      .put("model", "mcp-enhanced")
-      .put("choices", new JsonArray()
-        .add(new JsonObject()
-          .put("index", 0)
-          .put("message", new JsonObject()
-            .put("role", "assistant")
-            .put("content", content))
-          .put("finish_reason", "stop")));
-    
-    ctx.response()
-      .putHeader("Content-Type", "application/json")
-      .setStatusCode(200)
-      .end(response.encode());
-  }
   
   /**
    * Extract last user message from conversation
@@ -714,132 +629,52 @@ public class ConversationVerticle extends AbstractVerticle {
     return null;
   }
   
-  /**
-   * Generate SQL from natural language query
-   * This is a simple implementation - in production, use the Oracle Agent Loop for complex queries
-   */
-  private static String generateSqlFromQuery(String query) {
-    String lower = query.toLowerCase();
-    
-    // Handle common query patterns
-    if (lower.contains("pending") && (lower.contains("orders") || lower.contains("deliveries"))) {
-      // Query for pending orders
-      String sql = "SELECT o.order_number, c.company_name, c.city, os.status_code, o.order_date " +
-                   "FROM orders o " +
-                   "JOIN customers c ON o.customer_id = c.customer_id " +
-                   "JOIN order_status_enum os ON o.status_id = os.status_id " +
-                   "WHERE os.status_code = 'PENDING'";
-      
-      // Add location filter if specified
-      if (lower.contains("california")) {
-        // Match the actual case in the database
-        sql += " AND c.city IN ('San Francisco', 'Los Angeles', 'San Diego', 'Sacramento') ";
-      }
-      
-      sql += " ORDER BY o.order_date DESC FETCH FIRST 20 ROWS ONLY";
-      return sql;
-    }
-    
-    if (lower.contains("list") && lower.contains("tables")) {
-      return "SELECT table_name FROM user_tables ORDER BY table_name";
-    }
-    
-    if (lower.contains("count") && lower.contains("orders")) {
-      return "SELECT COUNT(*) AS total_orders FROM orders";
-    }
-    
-    if (lower.contains("customers")) {
-      if (lower.contains("california")) {
-        return "SELECT * FROM customers WHERE UPPER(city) IN ('SAN FRANCISCO', 'LOS ANGELES', 'SAN DIEGO') FETCH FIRST 10 ROWS ONLY";
-      }
-      return "SELECT * FROM customers FETCH FIRST 10 ROWS ONLY";
-    }
-    
-    if (lower.contains("products")) {
-      if (lower.contains("low stock")) {
-        return "SELECT * FROM products WHERE units_in_stock < reorder_level ORDER BY units_in_stock FETCH FIRST 10 ROWS ONLY";
-      }
-      return "SELECT * FROM products FETCH FIRST 10 ROWS ONLY";
-    }
-    
-    // Default query
-    return "SELECT table_name, num_rows FROM user_tables ORDER BY table_name";
-  }
+  // REMOVED: generateSqlFromQuery - now handled by Oracle Agent Loop
   
   /**
-   * Handle conversation with tools - streaming version
+   * Format response from multiple tools
    */
-  private static void handleWithToolsStreaming(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
-    String tool = detectTool(userMessage);
+  private static String formatMultiToolResponse(JsonObject results) {
+    StringBuilder response = new StringBuilder();
+    response.append("Executed ").append(results.size()).append(" tools:\n\n");
     
-    if (tool != null) {
-      // Notify tool call start
-      vertx.eventBus().publish("conversation." + streamId + ".tool.start", 
-        new JsonObject().put("tool", tool));
-      
-      JsonObject toolArguments = createToolArguments(userMessage, tool);
-      
-      // Route through MCP host manager for proper tool execution
-      JsonObject routeRequest = new JsonObject()
-        .put("tool", tool)
-        .put("arguments", toolArguments)
-        .put("userMessage", userMessage)
-        .put("streamId", streamId);
-      
-      vertx.eventBus().request("mcp.host.route", routeRequest, ar -> {
-        if (ar.succeeded()) {
-          JsonObject toolResult = (JsonObject) ar.result().body();
-          
-          // Notify tool completion
-          vertx.eventBus().publish("conversation." + streamId + ".tool.complete", 
-            new JsonObject()
-              .put("tool", tool)
-              .put("result", toolResult));
-          
-          // Send final response
-          String response = formatMcpToolResponse(tool, toolResult);
-          vertx.eventBus().publish("conversation." + streamId + ".final", 
-            new JsonObject().put("content", response));
-        } else {
-          // Handle error
-          vertx.eventBus().publish("conversation." + streamId + ".error", 
-            new JsonObject().put("error", "Tool execution failed: " + ar.cause().getMessage()));
-        }
-      });
-    } else {
-      handleStandardLLMStreaming(vertx, streamId, messages);
-    }
-  }
-  
-  /**
-   * Handle standard LLM processing - streaming version
-   */
-  private static void handleStandardLLMStreaming(Vertx vertx, String streamId, JsonArray messages) {
-    LlmAPIService llmService = LlmAPIService.getInstance();
-    
-    if (!llmService.isInitialized()) {
-      // Send fallback message if not initialized
-      vertx.eventBus().publish("conversation." + streamId + ".final", 
-        new JsonObject().put("content", "I'm currently running without an AI backend. Please set the OPENAI_API_KEY environment variable to enable AI responses."));
-      return;
-    }
-    
-    Future<JsonObject> llmFuture = llmService.chatCompletion(messages);
-    
-    llmFuture.onSuccess(response -> {
-      // Extract content from OpenAI response
-      if (response.containsKey("choices") && response.getJsonArray("choices").size() > 0) {
-        String content = response.getJsonArray("choices")
-          .getJsonObject(0)
-          .getJsonObject("message")
-          .getString("content");
-        
-        vertx.eventBus().publish("conversation." + streamId + ".final", 
-          new JsonObject().put("content", content));
+    results.forEach(entry -> {
+      response.append("**").append(entry.getKey()).append("**:\n");
+      Object value = entry.getValue();
+      if (value instanceof JsonObject) {
+        JsonObject toolResult = (JsonObject) value;
+        response.append(formatMcpToolResponse(entry.getKey(), toolResult));
+      } else {
+        response.append(value.toString());
       }
-    }).onFailure(error -> {
-      vertx.eventBus().publish("conversation." + streamId + ".error", 
-        new JsonObject().put("error", "LLM service error: " + error.getMessage()));
+      response.append("\n\n");
     });
+    
+    return response.toString();
   }
+  
+  /**
+   * Get list of available tools for error messages
+   */
+  private static JsonArray getAvailableToolsList(Vertx vertx) {
+    JsonArray tools = new JsonArray();
+    
+    // Request tool list from MCP host synchronously for error message
+    // In production, this should be cached
+    vertx.eventBus().<JsonObject>request("mcp.host.tools", new JsonObject(), ar -> {
+      if (ar.succeeded()) {
+        JsonObject response = ar.result().body();
+        JsonArray toolsList = response.getJsonArray("tools", new JsonArray());
+        toolsList.forEach(tool -> {
+          if (tool instanceof JsonObject) {
+            tools.add(((JsonObject) tool).getString("name"));
+          }
+        });
+      }
+    });
+    
+    // Return what we have (may be empty on first call)
+    return tools;
+  }
+  
 }

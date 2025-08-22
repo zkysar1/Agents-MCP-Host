@@ -55,18 +55,40 @@ public class SchemaMatcher {
             return Future.succeededFuture(new MatchResult());
         }
         
-        return oracleManager.listTables()
+        // Use Vert.x timer for timeout handling
+        Promise<MatchResult> promise = Promise.promise();
+        
+        // Set a timeout timer - will complete with partial results if exceeded
+        long timeoutTimer = vertx.setTimer(25000, id -> {
+            if (!promise.future().isComplete()) {
+                System.out.println("[SchemaMatcher] Timeout reached, returning partial results");
+                MatchResult partialResult = new MatchResult();
+                partialResult.timedOut = true;
+                promise.complete(partialResult);
+            }
+        });
+        
+        oracleManager.listTables()
             .compose(tables -> {
                 // Match tokens against tables
                 List<TableMatch> tableMatches = matchTables(tokens, tables);
                 
-                // Get metadata for matched tables
+                // Limit metadata fetching to top 5 matches to avoid timeout
                 List<Future<TableMetadata>> metadataFutures = new ArrayList<>();
-                for (TableMatch match : tableMatches) {
-                    metadataFutures.add(getTableMetadata(match.tableName));
+                int limit = Math.min(tableMatches.size(), 5);
+                for (int i = 0; i < limit; i++) {
+                    TableMatch match = tableMatches.get(i);
+                    // Add individual timeout for each metadata fetch
+                    Future<TableMetadata> metadataFuture = getTableMetadata(match.tableName)
+                        .onFailure(err -> {
+                            System.err.println("[SchemaMatcher] Failed to get metadata for " + 
+                                             match.tableName + ": " + err.getMessage());
+                        });
+                    metadataFutures.add(metadataFuture);
                 }
                 
-                return Future.all(metadataFutures)
+                // Use Future.join instead of Future.all to handle partial failures
+                return Future.join(metadataFutures)
                     .compose(compositeFuture -> {
                         // Now match against columns and enums
                         return matchColumnsAndEnums(tokens, metadataFutures);
@@ -80,7 +102,19 @@ public class SchemaMatcher {
                         result.calculateConfidence();
                         return result;
                     });
+            })
+            .onSuccess(result -> {
+                vertx.cancelTimer(timeoutTimer);
+                promise.complete(result);
+            })
+            .onFailure(err -> {
+                vertx.cancelTimer(timeoutTimer);
+                System.err.println("[SchemaMatcher] Error during matching: " + err.getMessage());
+                // Return empty result on failure
+                promise.complete(new MatchResult());
             });
+        
+        return promise.future();
     }
     
     /**
@@ -329,6 +363,7 @@ public class SchemaMatcher {
         public List<ColumnMatch> columnMatches = new ArrayList<>();
         public List<EnumMatch> enumMatches = new ArrayList<>();
         public double confidence = 0.0;
+        public boolean timedOut = false;  // Indicates if matching was incomplete due to timeout
         
         public void calculateConfidence() {
             double tableConf = tableMatches.isEmpty() ? 0.0 : 

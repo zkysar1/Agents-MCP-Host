@@ -31,8 +31,7 @@ public class StatusVerticle extends AbstractVerticle {
         .put("version", "1.0.0")
         .put("timestamp", System.currentTimeMillis())
         .put("uptime", System.currentTimeMillis() - startTime)
-        .put("instanceId", Driver.instanceId)
-        .put("awsRegion", Driver.awsRegion);
+        .put("environment", System.getProperty("os.name", "Unknown"));
       
       ctx.response()
         .putHeader("content-type", "application/json")

@@ -6,9 +6,11 @@ import AgentsMCPHost.mcp.servers.DatabaseServerVerticle;
 import AgentsMCPHost.mcp.servers.FileSystemServerVerticle;
 import AgentsMCPHost.mcp.servers.OracleServerVerticle;
 import AgentsMCPHost.mcp.servers.OracleMetadataServerVerticle;
+import AgentsMCPHost.mcp.servers.OracleToolsServerVerticle;
 import AgentsMCPHost.mcp.clients.DualServerClientVerticle;
 import AgentsMCPHost.mcp.clients.SingleServerClientVerticle;
 import AgentsMCPHost.mcp.clients.OracleClientVerticle;
+import AgentsMCPHost.mcp.clients.OracleToolsClientVerticle;
 import AgentsMCPHost.mcp.clients.LocalServerClientVerticle;
 import AgentsMCPHost.mcp.config.McpConfigLoader;
 import io.vertx.core.AbstractVerticle;
@@ -40,11 +42,18 @@ public class McpHostManagerVerticle extends AbstractVerticle {
     private final Map<String, JsonObject> clientStatus = new ConcurrentHashMap<>();
     private final Map<String, JsonObject> serverStatus = new ConcurrentHashMap<>();
     
+    // Track which servers/clients are actually ready (not just deployed)
+    private final Set<String> readyServers = new HashSet<>();
+    private final Set<String> readyClients = new HashSet<>();
+    private final Set<String> expectedServers = new HashSet<>();
+    private final Set<String> expectedClients = new HashSet<>();
+    
     // Deployment IDs for cleanup
     private final List<String> deploymentIds = new ArrayList<>();
     
     // System ready flag
     private boolean systemReady = false;
+    private boolean infrastructureDeployed = false;
     
     // Configuration loader
     private McpConfigLoader configLoader;
@@ -68,20 +77,13 @@ public class McpHostManagerVerticle extends AbstractVerticle {
                 return deployMcpInfrastructure();
             })
             .onSuccess(v -> {
-                systemReady = true;
-                System.out.println("=== MCP Host Manager Ready ===");
-                System.out.println("Servers: " + serverStatus.size());
-                System.out.println("Clients: " + clientStatus.size());
-                System.out.println("Total tools: " + allTools.size());
+                infrastructureDeployed = true;
+                System.out.println("[McpHostManager] Infrastructure deployed, waiting for components to be ready...");
+                System.out.println("[McpHostManager] Expected servers: " + expectedServers);
+                System.out.println("[McpHostManager] Expected clients: " + expectedClients);
                 
-                vertx.eventBus().publish("log", 
-                    "MCP infrastructure ready,1,McpHostManager,StartUp,MCP");
-                
-                // Notify system ready
-                vertx.eventBus().publish("mcp.system.ready", new JsonObject()
-                    .put("servers", serverStatus.size())
-                    .put("clients", clientStatus.size())
-                    .put("tools", allTools.size()));
+                // Check if everything is already ready (unlikely but possible)
+                checkIfSystemReady();
                 
                 startPromise.complete();
             })
@@ -95,11 +97,16 @@ public class McpHostManagerVerticle extends AbstractVerticle {
      * Register all event bus consumers
      */
     private void registerEventBusConsumers() {
+        // Add logging to confirm consumers are registered
+        System.out.println("[McpHostManager] Registering event bus consumers...");
+        
         // Listen for tool discoveries from clients
         vertx.eventBus().consumer("mcp.tools.discovered", this::handleToolsDiscovered);
+        System.out.println("[McpHostManager] Registered consumer for: mcp.tools.discovered");
         
         // Listen for client ready events
         vertx.eventBus().consumer("mcp.client.ready", this::handleClientReady);
+        System.out.println("[McpHostManager] Registered consumer for: mcp.client.ready");
         
         // Listen for server ready events
         vertx.eventBus().consumer("mcp.server.ready", this::handleServerReady);
@@ -136,24 +143,34 @@ public class McpHostManagerVerticle extends AbstractVerticle {
         
         // Deploy standard MCP servers
         if (httpServers.getJsonObject("calculator", new JsonObject()).getBoolean("enabled", true)) {
+            expectedServers.add("calculator");
             serverDeployments.add(deployVerticle(new CalculatorServerVerticle(), serverOpts, "CalculatorServer"));
         }
         if (httpServers.getJsonObject("weather", new JsonObject()).getBoolean("enabled", true)) {
+            expectedServers.add("weather");
             serverDeployments.add(deployVerticle(new WeatherServerVerticle(), serverOpts, "WeatherServer"));
         }
         if (httpServers.getJsonObject("database", new JsonObject()).getBoolean("enabled", true)) {
+            expectedServers.add("database");
             serverDeployments.add(deployVerticle(new DatabaseServerVerticle(), serverOpts, "DatabaseServer"));
         }
         if (httpServers.getJsonObject("filesystem", new JsonObject()).getBoolean("enabled", true)) {
+            expectedServers.add("filesystem");
             serverDeployments.add(deployVerticle(new FileSystemServerVerticle(), serverOpts, "FileSystemServer"));
         }
         
         // Deploy Oracle servers if enabled
         if (httpServers.getJsonObject("oracle", new JsonObject()).getBoolean("enabled", false)) {
+            expectedServers.add("oracle");
             serverDeployments.add(deployVerticle(new OracleServerVerticle(), serverOpts, "OracleServer"));
         }
         if (httpServers.getJsonObject("oracle_metadata", new JsonObject()).getBoolean("enabled", false)) {
+            expectedServers.add("oracle_metadata");
             serverDeployments.add(deployVerticle(new OracleMetadataServerVerticle(), serverOpts, "OracleMetadataServer"));
+        }
+        if (httpServers.getJsonObject("oracle-tools", new JsonObject()).getBoolean("enabled", false)) {
+            expectedServers.add("oracle-tools");
+            serverDeployments.add(deployVerticle(new OracleToolsServerVerticle(), serverOpts, "OracleToolsServer"));
         }
         
         // Wait for servers to be ready before deploying clients
@@ -174,9 +191,11 @@ public class McpHostManagerVerticle extends AbstractVerticle {
                 
                 // Deploy enabled clients
                 if (clientConfigs.getJsonObject("dual", new JsonObject()).getBoolean("enabled", true)) {
+                    expectedClients.add("dual");
                     clientDeployments.add(deployVerticle(new DualServerClientVerticle(), null, "DualServerClient"));
                 }
                 if (clientConfigs.getJsonObject("single-db", new JsonObject()).getBoolean("enabled", true)) {
+                    expectedClients.add("single-db");
                     clientDeployments.add(deployVerticle(new SingleServerClientVerticle(), null, "SingleServerClient"));
                 }
                 
@@ -186,9 +205,22 @@ public class McpHostManagerVerticle extends AbstractVerticle {
                 System.out.println("[DEBUG] Oracle client enabled: " + oracleEnabled);
                 if (oracleEnabled) {
                     System.out.println("[DEBUG] Deploying OracleClient...");
+                    expectedClients.add("oracle");
                     clientDeployments.add(deployVerticle(new OracleClientVerticle(), null, "OracleClient"));
                 } else {
                     System.out.println("[DEBUG] Oracle client not enabled in config");
+                }
+                
+                // Deploy Oracle Tools client if enabled
+                JsonObject oracleToolsConfig = clientConfigs.getJsonObject("oracle-tools", new JsonObject());
+                boolean oracleToolsEnabled = oracleToolsConfig.getBoolean("enabled", false);
+                System.out.println("[DEBUG] Oracle Tools client enabled: " + oracleToolsEnabled);
+                if (oracleToolsEnabled) {
+                    System.out.println("[DEBUG] Deploying OracleToolsClient...");
+                    expectedClients.add("oracle-tools");
+                    clientDeployments.add(deployVerticle(new OracleToolsClientVerticle(), null, "OracleToolsClient"));
+                } else {
+                    System.out.println("[DEBUG] Oracle Tools client not enabled in config");
                 }
                 
                 // Check if local servers are configured and enabled
@@ -259,6 +291,17 @@ public class McpHostManagerVerticle extends AbstractVerticle {
         String serverName = discovery.getString("server");
         JsonArray tools = discovery.getJsonArray("tools");
         
+        // Add extensive logging
+        System.out.println("[McpHostManager] RECEIVED tools.discovered event:");
+        System.out.println("[McpHostManager]   client: " + clientId);
+        System.out.println("[McpHostManager]   server: " + serverName);
+        System.out.println("[McpHostManager]   tools count: " + (tools != null ? tools.size() : "null"));
+        
+        // Log to CSV
+        vertx.eventBus().publish("log",
+            "McpHostManager received tools.discovered from " + clientId + " with " + 
+            (tools != null ? tools.size() : 0) + " tools,2,McpHostManager,Discovery,MCP");
+        
         System.out.println("[DEBUG] McpHostManager.handleToolsDiscovered - Client " + clientId + 
                          " discovered " + tools.size() + " tools from " + serverName);
         
@@ -308,11 +351,28 @@ public class McpHostManagerVerticle extends AbstractVerticle {
     private void handleClientReady(Message<JsonObject> msg) {
         JsonObject status = msg.body();
         String clientId = status.getString("clientId");
+        Integer toolCount = status.getInteger("toolCount", 0);
+        
+        // Add extensive logging
+        System.out.println("[McpHostManager] RECEIVED client.ready event:");
+        System.out.println("[McpHostManager]   clientId: " + clientId);
+        System.out.println("[McpHostManager]   toolCount: " + toolCount);
+        System.out.println("[McpHostManager]   type: " + status.getString("type", "unknown"));
+        
+        // Log to CSV
+        vertx.eventBus().publish("log",
+            "McpHostManager received client.ready from " + clientId + " with " + 
+            toolCount + " tools,2,McpHostManager,Registration,MCP");
         
         clientStatus.put(clientId, status);
+        readyClients.add(clientId);
         
         System.out.println("Client ready: " + clientId + 
-                         " with " + status.getInteger("toolCount") + " tools");
+                         " with " + toolCount + " tools");
+        System.out.println("[McpHostManager] Ready clients: " + readyClients.size() + "/" + expectedClients.size());
+        
+        // Check if all expected components are ready
+        checkIfSystemReady();
     }
     
     /**
@@ -323,9 +383,14 @@ public class McpHostManagerVerticle extends AbstractVerticle {
         String serverName = status.getString("server");
         
         serverStatus.put(serverName, status);
+        readyServers.add(serverName);
         
-        System.out.println("Server ready: " + serverName + 
+        System.out.println("[McpHostManager] Server ready: " + serverName + 
                          " on port " + status.getInteger("port"));
+        System.out.println("[McpHostManager] Ready servers: " + readyServers.size() + "/" + expectedServers.size());
+        
+        // Check if all expected components are ready
+        checkIfSystemReady();
     }
     
     /**
@@ -479,6 +544,64 @@ public class McpHostManagerVerticle extends AbstractVerticle {
             .put("clients", clientStatus.size())
             .put("servers", serverStatus.size())
             .put("timestamp", System.currentTimeMillis()));
+    }
+    
+    /**
+     * Check if all expected components are ready and publish system ready event
+     */
+    private void checkIfSystemReady() {
+        // Only check if infrastructure has been deployed
+        if (!infrastructureDeployed) {
+            return;
+        }
+        
+        // Check if we're already ready
+        if (systemReady) {
+            return;
+        }
+        
+        // Check if all expected servers are ready
+        boolean allServersReady = expectedServers.isEmpty() || 
+            readyServers.containsAll(expectedServers);
+        
+        // Check if all expected clients are ready
+        boolean allClientsReady = expectedClients.isEmpty() || 
+            readyClients.containsAll(expectedClients);
+        
+        if (allServersReady && allClientsReady) {
+            systemReady = true;
+            
+            System.out.println("=== MCP Host Manager Ready ===");
+            System.out.println("Servers ready: " + readyServers.size() + "/" + expectedServers.size());
+            System.out.println("Clients ready: " + readyClients.size() + "/" + expectedClients.size());
+            System.out.println("Total tools: " + allTools.size());
+            
+            vertx.eventBus().publish("log", 
+                "MCP infrastructure ready,1,McpHostManager,StartUp,MCP");
+            
+            // Notify that MCP system is ready
+            vertx.eventBus().publish("mcp.system.ready", new JsonObject()
+                .put("servers", readyServers.size())
+                .put("clients", readyClients.size())
+                .put("tools", allTools.size())
+                .put("timestamp", System.currentTimeMillis()));
+            
+            System.out.println("MCP System Ready - Servers: " + readyServers.size() + 
+                             ", Clients: " + readyClients.size() + 
+                             ", Tools: " + allTools.size());
+        } else {
+            System.out.println("[McpHostManager] Waiting for components:");
+            if (!allServersReady) {
+                Set<String> missingServers = new HashSet<>(expectedServers);
+                missingServers.removeAll(readyServers);
+                System.out.println("  Missing servers: " + missingServers);
+            }
+            if (!allClientsReady) {
+                Set<String> missingClients = new HashSet<>(expectedClients);
+                missingClients.removeAll(readyClients);
+                System.out.println("  Missing clients: " + missingClients);
+            }
+        }
     }
     
     /**

@@ -33,7 +33,7 @@ public class LoggerVerticle extends AbstractVerticle {
 
   /* ---------- configuration ---------- */
 
-  private static final long FLUSH_INTERVAL_MS  = 30_000;     // 30 s
+  private static final long FLUSH_INTERVAL_MS  = 20_000;     // 20 s - updated for better debugging
   private static final long ROTATE_INTERVAL_MS = 86_400_000L;  // 24 hour
   private static final int  MAX_HISTORIC_FILES = 12;  // keep last 12 days or a few days if restarting
   private static final String HEADER = "Message,Level,Class,Category,Character,SequenceReceived,EpochTimeMillis\n";

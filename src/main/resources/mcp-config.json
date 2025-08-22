@@ -30,6 +30,11 @@
         "enabled": true,
         "port": 8085,
         "description": "Oracle database operations with metadata and query tools"
+      },
+      "oracle-tools": {
+        "enabled": true,
+        "port": 8086,
+        "description": "Oracle tools exposed as individual MCP capabilities for orchestration"
       }
     },
     "localServers": {
@@ -73,6 +78,11 @@
       "enabled": true,
       "connects": ["oracle", "oracle_metadata"],
       "description": "Connects to Oracle servers"
+    },
+    "oracle-tools": {
+      "enabled": true,
+      "connects": ["oracle-tools"],
+      "description": "Client bridge for oracle-tools server exposing 11 capabilities"
     },
     "local": {
       "enabled": false,

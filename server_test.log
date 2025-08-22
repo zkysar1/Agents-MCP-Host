@@ -9,27 +9,7 @@ Creating HTTP server on port 8080...
 LlmAPIService initialized with OpenAI API
 OpenAI API service initialized successfully
 Deploying MCP infrastructure...
-Deploying Oracle Tools Server...
-Deploying Oracle Tools Client...
 Deploying Oracle Orchestration Strategy...
-Health Verticle initialized successfully
-Status Verticle initialized successfully
-Conversation Verticle initialized successfully
-LlmAPIService initialized with OpenAI API
-[OracleToolsClient] Publishing client ready event:
-[OracleToolsClient]   clientId: oracle-tools
-[OracleToolsClient]   toolCount: 11
-[OracleToolsClient] Registered with McpHostManager as: oracle-tools
-[OracleToolsClient] Publishing tools.discovered event:
-[OracleToolsClient]   client: oracle-tools
-[OracleToolsClient]   server: oracle-tools
-[OracleToolsClient]   tools: 11
-[OracleToolsClient] Published tool discovery: 11 tools
-[OracleToolsClient] Started as MCP client for oracle-tools
-[OracleToolsClient] Bridging 11 tools to MCP infrastructure
-Oracle Tools Client deployed - bridging to MCP infrastructure
-[OracleOrchestration] Initialized - coordinating tool calls only
-[OracleOrchestration] No business logic here - all in tools!
 *** Host API server successfully started on HTTP port 8080 ***
 
 === Available API Endpoints ===
@@ -60,15 +40,27 @@ Oracle Tools Client deployed - bridging to MCP infrastructure
 
 ================================
 HostAPI Verticle initialized successfully
+Health Verticle initialized successfully
+Status Verticle initialized successfully
+Conversation Verticle initialized successfully
+[OracleOrchestration] Initialized - coordinating tool calls only
+[OracleOrchestration] No business logic here - all in tools!
 Loaded tool registry with 8 tool definitions
 ToolSelectionVerticle started - unified tool selection ready
 Tool Selection Verticle initialized successfully
 Unified tool selection with LLM validation enabled
+[Orchestration] oracle_full_pipeline strategy initialized
+[Orchestration] Steps: 7
+Oracle Orchestration deployed - pure coordination, no hidden logic
 Loaded MCP configuration from: src/main/resources/mcp-config.json
 Loaded MCP configuration
 [McpHostManager] Registering event bus consumers...
 [McpHostManager] Registered consumer for: mcp.tools.discovered
 [McpHostManager] Registered consumer for: mcp.client.ready
+Oracle Orchestration Strategy Ready
+[LOG] Oracle Orchestration deployed,3,Driver,StartUp,Orchestration
+LlmAPIService initialized with OpenAI API
+[LOG] LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System
 Oracle Tools MCP Server started on port 8086
 Exposing 11 Oracle tools for composition
 [OracleTools] Registering event bus handlers for 11 tools
@@ -84,11 +76,7 @@ Exposing 11 Oracle tools for composition
 [OracleTools] Registered handler for: oracle-tools__format_results
 [OracleTools] Registered handler for: oracle-tools__summarize_data
 [OracleTools] Publishing tool discovery: 11 tools
-Oracle Tools Server deployed - all capabilities exposed as tools
-Oracle Orchestration Strategy Ready
-[Orchestration] oracle_full_pipeline strategy initialized
-[Orchestration] Steps: 7
-Oracle Orchestration deployed - pure coordination, no hidden logic
+Deployed OracleToolsServer [833fe4d3-4724-4328-962b-0fe2ea89d352]
 [McpHostManager] RECEIVED tools.discovered event:
 [McpHostManager]   client: oracle-tools
 [McpHostManager]   server: oracle-tools
@@ -109,8 +97,6 @@ Oracle Orchestration deployed - pure coordination, no hidden logic
 [DEBUG] ConversationVerticle - Tool count updated: 11 tools available
 Tool registry updated: 11 tools available
 Server ready: oracle-tools on port 8086
-[LOG] Oracle Tools Server deployed,3,Driver,StartUp,Oracle
-[LOG] Oracle Orchestration deployed,3,Driver,StartUp,Orchestration
 [LOG] McpHostManager received tools.discovered from oracle-tools with 11 tools,2,McpHostManager,Discovery,MCP
 Tool registry updated: 11 tools available
 MCP tools enabled for conversation endpoint: 11 tools available
@@ -147,7 +133,7 @@ MCP tools enabled for conversation endpoint: 11 tools available
   "primaryTool": "oracle_agent",
   "orchestrationName": "",
   "additionalTools": [],
-  "reasoning": "The oracle_agent is the optimal tool for this query as it specializes in intelligent SQL generation and can handle complex queries involving multiple tables. Given the need to count pending orders in a specific location, it is well-suited for this task.",
+  "reasoning": "The oracle_agent is capable of intelligent SQL generation and can handle the complexity of counting pending orders across multiple tables, while also being able to adapt to the schema of the database. Given the query's intent and the entities involved, this tool is well-suited to retrieve the required information efficiently.",
   "confidence": 0.9
 }
 [ToolSelection] Converting oracle_agent from SINGLE_TOOL to ORCHESTRATION
@@ -259,22 +245,128 @@ MCP tools enabled for conversation endpoint: 11 tools available
 [Conversation] Extracted response: {
   "strategy" : "oracle_full_pipeline",
   "success" : true,
-  "execution_time" : 119,
+  "execution_time" : 59,
   "steps_completed" : 7
 }
-[Conversation] Publishing final response to stream: stream-ab038e25-b5e9-4de5-b554-6227e68cac6d
+[Conversation] Publishing final response to stream: stream-0aaccbfd-a800-43ee-af35-9867d2357edb
 [Conversation] Final response published successfully
-[LOG] Conversation final response sent for stream-ab038e25-b5e9-4de5-b554-6227e68cac6d,2,Conversation,Response,SSE
+[LOG] Conversation final response sent for stream-0aaccbfd-a800-43ee-af35-9867d2357edb,2,Conversation,Response,SSE
+[LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database
 [LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database
 Oracle MCP Server: Database connection initialized
 Oracle MCP Server started on port 8085
-Deployed OracleServer [d3c82319-6494-4580-9d55-5e1e0cf59bdc]
+Deployed OracleServer [66021c3f-a362-42d0-8f6a-424462475e61]
 [LOG] Oracle MCP Server started,1,OracleServer,StartUp,MCP
 Server ready: oracle on port 8085
 [LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database
-[LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database
 Oracle Metadata Server: Database connection initialized
 Oracle Metadata MCP Server started on port 8081
-Deployed OracleMetadataServer [d432b1ad-819e-41d1-82b9-72df2c75b4ac]
+Deployed OracleMetadataServer [50c0c922-5803-4531-9138-fa930804b6fa]
 [LOG] Oracle Metadata Server started,1,OracleMetadata,StartUp,MCP
 Server ready: oracle_metadata on port 8081
+[DEBUG] Oracle client enabled: true
+[DEBUG] Deploying OracleClient...
+[DEBUG] Oracle Tools client enabled: true
+[DEBUG] Deploying OracleToolsClient...
+[OracleToolsClient] Publishing client ready event:
+[OracleToolsClient]   clientId: oracle-tools
+[OracleToolsClient]   toolCount: 11
+[OracleToolsClient] Registered with McpHostManager as: oracle-tools
+[OracleToolsClient] Publishing tools.discovered event:
+[OracleToolsClient]   client: oracle-tools
+[OracleToolsClient]   server: oracle-tools
+[OracleToolsClient]   tools: 11
+[OracleToolsClient] Published tool discovery: 11 tools
+[OracleToolsClient] Started as MCP client for oracle-tools
+[OracleToolsClient] Bridging 11 tools to MCP infrastructure
+Deployed OracleToolsClient [0101037b-cf2a-4abb-9a84-148d2808d344]
+[McpHostManager] RECEIVED client.ready event:
+[McpHostManager]   clientId: oracle-tools
+[McpHostManager]   toolCount: 11
+[McpHostManager]   type: local
+Client ready: oracle-tools with 11 tools
+[LOG] OracleToolsClient publishing client.ready with 11 tools,2,OracleToolsClient,Registration,MCP
+[McpHostManager] RECEIVED tools.discovered event:
+[McpHostManager]   client: oracle-tools
+[McpHostManager]   server: oracle-tools
+[McpHostManager]   tools count: 11
+[DEBUG] McpHostManager.handleToolsDiscovered - Client oracle-tools discovered 11 tools from oracle-tools
+[DEBUG]   Added tool: oracle-tools__analyze_query (original: analyze_query)
+[DEBUG]   Added tool: oracle-tools__match_schema (original: match_schema)
+[DEBUG]   Added tool: oracle-tools__discover_enums (original: discover_enums)
+[DEBUG]   Added tool: oracle-tools__discover_sample_data (original: discover_sample_data)
+[DEBUG]   Added tool: oracle-tools__generate_sql (original: generate_sql)
+[DEBUG]   Added tool: oracle-tools__optimize_sql (original: optimize_sql)
+[DEBUG]   Added tool: oracle-tools__validate_sql (original: validate_sql)
+[DEBUG]   Added tool: oracle-tools__execute_query (original: execute_query)
+[DEBUG]   Added tool: oracle-tools__explain_plan (original: explain_plan)
+[DEBUG]   Added tool: oracle-tools__format_results (original: format_results)
+[DEBUG]   Added tool: oracle-tools__summarize_data (original: summarize_data)
+[DEBUG] Total tools now registered: 11
+[LOG] OracleToolsClient published 11 tools,2,OracleToolsClient,Discovery,MCP
+[LOG] OracleToolsClient started as MCP client,1,OracleToolsClient,StartUp,MCP
+[LOG] McpHostManager received client.ready from oracle-tools with 11 tools,2,McpHostManager,Registration,MCP
+[LOG] McpHostManager received tools.discovered from oracle-tools with 11 tools,2,McpHostManager,Discovery,MCP
+Tool registry updated: 11 tools available
+MCP tools enabled for conversation endpoint: 11 tools available
+Initialized connection to oracle server
+  - oracle__list_tables: List all Oracle database tables
+  - oracle__describe_table: Get detailed information about an Oracle table
+  - oracle__execute_query: Execute a SELECT query on Oracle database
+  - oracle__explain_plan: Get the execution plan for an SQL query
+  - oracle__gather_statistics: Gather statistics for a table to improve query performance
+  - oracle__analyze_query: Analyze a query for performance issues and get recommendations
+  - oracle__validate_sql: Validate SQL syntax without executing the query
+[DEBUG] OracleClient.publishToolsDiscovered - Client oracle discovered 7 tools from oracle
+[DEBUG]   Publishing tool: list_tables - List all Oracle database tables
+[DEBUG]   Publishing tool: describe_table - Get detailed information about an Oracle table
+[DEBUG]   Publishing tool: execute_query - Execute a SELECT query on Oracle database
+[DEBUG]   Publishing tool: explain_plan - Get the execution plan for an SQL query
+[DEBUG]   Publishing tool: gather_statistics - Gather statistics for a table to improve query performance
+[DEBUG]   Publishing tool: analyze_query - Analyze a query for performance issues and get recommendations
+[DEBUG]   Publishing tool: validate_sql - Validate SQL syntax without executing the query
+[DEBUG] Publishing to event bus: mcp.tools.discovered
+Client ready: oracle with 7 tools
+OracleClient connected to Oracle server
+Deployed OracleClient [bc98e92f-0f0c-48be-acc6-d5f7c3bbaf9b]
+=== MCP Host Manager Ready ===
+Servers: 3
+Clients: 1
+Total tools: 11
+MCP Host Manager deployed successfully
+[McpHostManager] RECEIVED tools.discovered event:
+[McpHostManager]   client: oracle
+[McpHostManager]   server: oracle
+[McpHostManager]   tools count: 7
+[DEBUG] McpHostManager.handleToolsDiscovered - Client oracle discovered 7 tools from oracle
+[DEBUG]   Added tool: oracle__list_tables (original: list_tables)
+[DEBUG]   Added tool: oracle__describe_table (original: describe_table)
+[DEBUG]   Added tool: oracle__execute_query (original: execute_query)
+[DEBUG]   Added tool: oracle__explain_plan (original: explain_plan)
+[DEBUG]   Added tool: oracle__gather_statistics (original: gather_statistics)
+[DEBUG]   Added tool: oracle__analyze_query (original: analyze_query)
+[DEBUG]   Added tool: oracle__validate_sql (original: validate_sql)
+[DEBUG] Total tools now registered: 18
+[McpHostManager] RECEIVED client.ready event:
+[McpHostManager]   clientId: oracle
+[McpHostManager]   toolCount: 7
+[McpHostManager]   type: unknown
+Client ready: oracle with 7 tools
+[LOG] OracleClient ready with 7 tools,1,OracleClient,StartUp,MCP
+[LOG] MCP infrastructure ready,1,McpHostManager,StartUp,MCP
+MCP System Ready - Servers: 3, Clients: 1, Tools: 11
+=== ZAK-Agent Started ===
+MCP Infrastructure: READY
+Orchestration Strategies: READY
+Unified Tool Architecture: ACTIVE
+[DEBUG] ConversationVerticle - MCP system ready with 11 tools
+[LOG] MCP Host Manager deployed,3,Driver,StartUp,MCP
+[LOG] McpHostManager received tools.discovered from oracle with 7 tools,2,McpHostManager,Discovery,MCP
+[DEBUG] ConversationVerticle - Tool count updated: 18 tools available
+Tool registry updated: 18 tools available
+MCP tools enabled for conversation endpoint: 18 tools available
+[LOG] McpHostManager received client.ready from oracle with 7 tools,2,McpHostManager,Registration,MCP
+[LOG] ZAK-Agent startup complete,0,Driver,StartUp,System
+[DEBUG] Verifying tools were registered...
+[DEBUG] Host reports 18 total tools
+[LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database

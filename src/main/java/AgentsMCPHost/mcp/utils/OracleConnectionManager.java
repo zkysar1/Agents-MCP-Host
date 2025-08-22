@@ -164,9 +164,15 @@ public class OracleConnectionManager {
             return promise.future();
         }
         
+        // Clean SQL - remove trailing semicolons which Oracle JDBC doesn't like
+        String trimmedSql = sql.trim();
+        final String cleanSql = trimmedSql.endsWith(";") ? 
+            trimmedSql.substring(0, trimmedSql.length() - 1).trim() : 
+            trimmedSql;
+        
         vertx.executeBlocking(blockingPromise -> {
             try (Connection conn = getConnection();
-                 PreparedStatement stmt = conn.prepareStatement(sql)) {
+                 PreparedStatement stmt = conn.prepareStatement(cleanSql)) {
                 
                 // Set parameters
                 for (int i = 0; i < params.length; i++) {
@@ -204,9 +210,15 @@ public class OracleConnectionManager {
             return promise.future();
         }
         
+        // Clean SQL - remove trailing semicolons which Oracle JDBC doesn't like
+        String trimmedSql = sql.trim();
+        final String cleanSql = trimmedSql.endsWith(";") ? 
+            trimmedSql.substring(0, trimmedSql.length() - 1).trim() : 
+            trimmedSql;
+        
         vertx.executeBlocking(blockingPromise -> {
             try (Connection conn = getConnection();
-                 PreparedStatement stmt = conn.prepareStatement(sql)) {
+                 PreparedStatement stmt = conn.prepareStatement(cleanSql)) {
                 
                 // Set parameters
                 for (int i = 0; i < params.length; i++) {

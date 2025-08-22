@@ -19,14 +19,33 @@ import static AgentsMCPHost.Driver.logLevel;
 public class HostAPIVerticle extends AbstractVerticle {
   private static final int API_PORT = 8080;
   private HttpServer server;
+  private Router mainRouter;
+  private boolean systemReady = false;
   @Override
   public void start(Promise<Void> startPromise) throws Exception {
-    System.out.println("HostAPIVerticle starting...");
+    System.out.println("HostAPIVerticle starting (waiting for system ready)...");
     vertx.eventBus().publish("log", 
-      "Starting HostAPIVerticle,1,HostAPIVerticle,StartUp,System");
+      "HostAPIVerticle initialized - waiting for system ready,1,HostAPIVerticle,StartUp,System");
     
+    // Set up routes but don't start HTTP server yet
+    setupRoutes();
+    
+    // Listen for system ready event
+    vertx.eventBus().consumer("system.fully.ready", msg -> {
+      if (!systemReady) {
+        systemReady = true;
+        System.out.println("[HostAPI] System ready signal received, starting HTTP server...");
+        startHttpServer(startPromise);
+      }
+    });
+    
+    // Complete the deployment immediately (server will start later)
+    startPromise.complete();
+  }
+  
+  private void setupRoutes() {
     // Create the main router
-    Router mainRouter = Router.router(vertx);
+    mainRouter = Router.router(vertx);
     
     // Configure CORS - must be first
     mainRouter.route().handler(CorsHandler.create()
@@ -73,10 +92,12 @@ public class HostAPIVerticle extends AbstractVerticle {
         .end(response.encode());
     });
     
-    // Configure HTTP server options (no SSL for local development)
+  }
+  
+  private void startHttpServer(Promise<Void> originalStartPromise) {
+    // Configure HTTP server options
     HttpServerOptions options = new HttpServerOptions().setPort(API_PORT);
     
-    // For local development, we'll use HTTP instead of HTTPS
     System.out.println("Creating HTTP server on port " + API_PORT + "...");
     server = vertx.createHttpServer(options)
       .requestHandler(mainRouter)
@@ -117,7 +138,10 @@ public class HostAPIVerticle extends AbstractVerticle {
             " - Access at http://localhost:" + API_PORT + 
             ",0,HostAPIVerticle,StartUp,System");
           
-          startPromise.complete();
+          // Notify that HTTP server is now accepting requests
+          vertx.eventBus().publish("http.server.ready", new JsonObject()
+            .put("port", API_PORT)
+            .put("timestamp", System.currentTimeMillis()));
         } else {
           System.err.println("!!! Host API server FAILED to start !!!");
           System.err.println("Error: " + ar.cause().getMessage());
@@ -126,7 +150,9 @@ public class HostAPIVerticle extends AbstractVerticle {
             "Host API server failed to start: " + ar.cause().getMessage() + 
             ",0,HostAPIVerticle,StartUp,System");
           
-          startPromise.fail(ar.cause());
+          // Note: We don't fail the original promise since verticle is already deployed
+          vertx.eventBus().publish("http.server.failed", new JsonObject()
+            .put("error", ar.cause().getMessage()));
         }
       });
   }

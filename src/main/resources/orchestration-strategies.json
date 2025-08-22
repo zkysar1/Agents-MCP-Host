@@ -1,0 +1,173 @@
+{
+  "strategies": {
+    "oracle_full_pipeline": {
+      "name": "Oracle Full Pipeline",
+      "description": "Complete 7-step Oracle query pipeline with discovery and LLM generation",
+      "when_to_use": {
+        "complexity": "complex",
+        "needs_discovery": true,
+        "natural_language": true
+      },
+      "steps": [
+        {
+          "step": 1,
+          "name": "Analyze Query",
+          "tool": "oracle-tools__analyze_query",
+          "description": "Extract intent and entities from natural language",
+          "pass_to_next": ["analysis"]
+        },
+        {
+          "step": 2,
+          "name": "Match Schema",
+          "tool": "oracle-tools__match_schema",
+          "description": "Find relevant tables and columns",
+          "use_from_previous": ["analysis.entities"],
+          "pass_to_next": ["schema_matches"]
+        },
+        {
+          "step": 3,
+          "name": "Discover Data",
+          "tool": "oracle-tools__discover_sample_data",
+          "description": "Get sample data for context",
+          "use_from_previous": ["schema_matches.tables"],
+          "optional": true,
+          "pass_to_next": ["sample_data"]
+        },
+        {
+          "step": 4,
+          "name": "Generate SQL",
+          "tool": "oracle-tools__generate_sql",
+          "description": "Create SQL using LLM with schema context",
+          "use_from_previous": ["original_query", "schema_matches", "sample_data"],
+          "pass_to_next": ["generated_sql"]
+        },
+        {
+          "step": 5,
+          "name": "Optimize SQL",
+          "tool": "oracle-tools__optimize_sql",
+          "description": "Optimize the generated query",
+          "use_from_previous": ["generated_sql"],
+          "optional": true,
+          "pass_to_next": ["optimized_sql"]
+        },
+        {
+          "step": 6,
+          "name": "Execute Query",
+          "tool": "oracle-tools__execute_query",
+          "description": "Run the SQL query",
+          "use_from_previous": ["optimized_sql", "generated_sql"],
+          "pass_to_next": ["results"]
+        },
+        {
+          "step": 7,
+          "name": "Format Results",
+          "tool": "oracle-tools__format_results",
+          "description": "Convert to natural language response",
+          "use_from_previous": ["original_query", "results", "generated_sql"],
+          "final": true
+        }
+      ],
+      "timeout_ms": 30000,
+      "allow_partial_success": true
+    },
+    
+    "oracle_simple_query": {
+      "name": "Oracle Simple Query",
+      "description": "Direct SQL execution for simple or pre-written queries",
+      "when_to_use": {
+        "complexity": "simple",
+        "has_sql": true
+      },
+      "steps": [
+        {
+          "step": 1,
+          "name": "Validate SQL",
+          "tool": "oracle-tools__validate_sql",
+          "description": "Check SQL syntax",
+          "optional": true,
+          "pass_to_next": ["validation"]
+        },
+        {
+          "step": 2,
+          "name": "Execute Query",
+          "tool": "oracle-tools__execute_query",
+          "description": "Run the SQL query",
+          "pass_to_next": ["results"]
+        },
+        {
+          "step": 3,
+          "name": "Format Results",
+          "tool": "oracle-tools__format_results",
+          "description": "Convert to user-friendly format",
+          "use_from_previous": ["original_query", "results"],
+          "final": true
+        }
+      ],
+      "timeout_ms": 10000
+    },
+    
+    "oracle_discovery": {
+      "name": "Oracle Discovery",
+      "description": "Explore database schema and data",
+      "when_to_use": {
+        "intent": "explore",
+        "discovery_needed": true
+      },
+      "steps": [
+        {
+          "step": 1,
+          "name": "List Tables",
+          "tool": "oracle__list_tables",
+          "description": "Get all available tables",
+          "pass_to_next": ["tables"]
+        },
+        {
+          "step": 2,
+          "name": "Discover Enums",
+          "tool": "oracle-tools__discover_enums",
+          "description": "Find enumeration mappings",
+          "parallel": true,
+          "pass_to_next": ["enums"]
+        },
+        {
+          "step": 3,
+          "name": "Sample Data",
+          "tool": "oracle-tools__discover_sample_data",
+          "description": "Get sample data from key tables",
+          "use_from_previous": ["tables"],
+          "limit_tables": 5,
+          "final": true
+        }
+      ],
+      "timeout_ms": 15000
+    },
+    
+    "multi_tool_sequential": {
+      "name": "Sequential Tool Execution",
+      "description": "Execute multiple tools in sequence with data passing",
+      "when_to_use": {
+        "strategy": "MULTIPLE_TOOLS"
+      },
+      "steps": "dynamic",
+      "timeout_ms": 20000
+    }
+  },
+  
+  "selection_rules": {
+    "priority_order": [
+      "oracle_simple_query",
+      "oracle_discovery",
+      "oracle_full_pipeline"
+    ],
+    "default_strategy": "oracle_full_pipeline",
+    "fallback_on_error": true
+  },
+  
+  "configuration": {
+    "enable_progress_updates": true,
+    "progress_update_interval_ms": 5000,
+    "enable_partial_results": true,
+    "log_orchestration_decisions": true,
+    "max_parallel_tools": 3
+  }
+}

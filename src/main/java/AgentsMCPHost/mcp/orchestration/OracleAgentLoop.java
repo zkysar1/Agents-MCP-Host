@@ -31,6 +31,7 @@ public class OracleAgentLoop extends AbstractVerticle {
     // Configuration
     private static final int SCHEMA_MATCH_TIMEOUT_MS = Integer.parseInt(
         System.getenv().getOrDefault("ORACLE_SCHEMA_MATCH_TIMEOUT", "30000"));  // Increased to 30 seconds
+    private static final long PROGRESS_UPDATE_INTERVAL = 5000; // Send updates every 5 seconds
     
     // Components
     private SchemaMatcher schemaMatcher;
@@ -123,10 +124,12 @@ public class OracleAgentLoop extends AbstractVerticle {
             return;
         }
         String sessionId = request.getString("sessionId", UUID.randomUUID().toString());
+        String streamId = request.getString("streamId"); // Optional stream ID for progress updates
         
         // Create conversation context
         ConversationContext context = new ConversationContext();
         context.sessionId = sessionId;
+        context.streamId = streamId;
         context.originalQuery = query;
         context.currentState = State.INITIAL;
         context.startTime = System.currentTimeMillis();
@@ -160,6 +163,11 @@ public class OracleAgentLoop extends AbstractVerticle {
         System.out.println("[PIPELINE] Starting for query: " + context.originalQuery);
         log("Starting Oracle Agent pipeline for: " + context.originalQuery, 1, "Pipeline");
         
+        // Send progress updates if we have a streamId
+        if (context.streamId != null) {
+            sendProgressUpdate(context.streamId, "Step 1/7", "Analyzing your query...", context.startTime);
+        }
+        
         return performNaturalLanguageUnderstanding(context)
             .recover(err -> {
                 System.err.println("[PIPELINE] NLU failed, using fallback: " + err.getMessage());
@@ -174,6 +182,9 @@ public class OracleAgentLoop extends AbstractVerticle {
                 
                 // Step 2: Dynamic Metadata Retrieval with configurable timeout
                 System.out.println("[PIPELINE] Step 2 - Starting schema matching...");
+                if (context.streamId != null) {
+                    sendProgressUpdate(context.streamId, "Step 2/7", "Discovering database schema...", context.startTime);
+                }
                 return schemaMatcher.findMatches(context.extractedTokens.getAllSearchTerms())
                     .timeout(SCHEMA_MATCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                     .recover(err -> {
@@ -197,6 +208,9 @@ public class OracleAgentLoop extends AbstractVerticle {
                 
                 // Step 3: Query Planning and SQL Generation
                 System.out.println("[PIPELINE] Step 3 - Generating SQL...");
+                if (context.streamId != null) {
+                    sendProgressUpdate(context.streamId, "Step 3/7", "Generating SQL query...", context.startTime);
+                }
                 return generateIntelligentSqlWithLLM(context);
             })
             .recover(err -> {
@@ -212,6 +226,9 @@ public class OracleAgentLoop extends AbstractVerticle {
                 
                 // Step 4: Query Optimization (optional, don't fail pipeline if this fails)
                 System.out.println("[PIPELINE] Step 4 - Optimizing query...");
+                if (context.streamId != null) {
+                    sendProgressUpdate(context.streamId, "Step 4/7", "Optimizing query performance...", context.startTime);
+                }
                 return optimizeQuery(context, sql)
                     .recover(err -> {
                         System.err.println("[PIPELINE] Optimization failed, using original SQL: " + err.getMessage());
@@ -224,6 +241,9 @@ public class OracleAgentLoop extends AbstractVerticle {
                 
                 // Step 5: Execute Query
                 System.out.println("[PIPELINE] Step 5 - Executing query...");
+                if (context.streamId != null) {
+                    sendProgressUpdate(context.streamId, "Step 5/7", "Executing database query...", context.startTime);
+                }
                 return executeQuery(optimizedSql);
             })
             .recover(err -> {
@@ -238,6 +258,9 @@ public class OracleAgentLoop extends AbstractVerticle {
                 
                 // Step 6: Result Analysis (optional refinement)
                 System.out.println("[PIPELINE] Step 6 - Analyzing results...");
+                if (context.streamId != null) {
+                    sendProgressUpdate(context.streamId, "Step 6/7", "Analyzing results...", context.startTime);
+                }
                 return analyzeAndRefineResults(context, results)
                     .recover(err -> {
                         System.err.println("[PIPELINE] Refinement failed, using original results: " + err.getMessage());
@@ -246,6 +269,9 @@ public class OracleAgentLoop extends AbstractVerticle {
             })
             .compose(refinedResults -> {
                 System.out.println("[PIPELINE] Step 7 - Formatting results...");
+                if (context.streamId != null) {
+                    sendProgressUpdate(context.streamId, "Step 7/7", "Formatting response...", context.startTime);
+                }
                 // Step 7: Natural Language Formatting
                 return formatResultsWithLLM(context, refinedResults);
             })
@@ -1819,10 +1845,26 @@ public class OracleAgentLoop extends AbstractVerticle {
     }
     
     /**
+     * Send progress update via event bus for SSE streaming
+     */
+    private void sendProgressUpdate(String streamId, String step, String message, long startTime) {
+        if (streamId != null) {
+            long elapsed = System.currentTimeMillis() - startTime;
+            vertx.eventBus().publish("conversation." + streamId + ".progress", 
+                new JsonObject()
+                    .put("step", step)
+                    .put("message", message)
+                    .put("elapsed", elapsed)
+                    .put("timestamp", System.currentTimeMillis()));
+        }
+    }
+    
+    /**
      * Conversation context - tracks state for a single conversation
      */
     private static class ConversationContext {
         String sessionId;
+        String streamId;  // Optional stream ID for progress updates
         State currentState;
         String originalQuery;
         String userFeedback;

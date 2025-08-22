@@ -17,7 +17,7 @@ public class OracleConnectionTest {
         
         // Use hardcoded password for consistency
         String password = "ARmy0320-- milk";
-        System.out.println("✓ Using configured Oracle password");
+        System.out.println("[OK] Using configured Oracle password");
         System.out.println();
         
         // Create Vert.x instance
@@ -36,7 +36,7 @@ public class OracleConnectionTest {
         
         connManager.initialize(vertx)
             .onSuccess(v -> {
-                System.out.println("✓ Connection pool initialized successfully!");
+                System.out.println("[OK] Connection pool initialized successfully!");
                 System.out.println();
                 
                 // Test connection
@@ -44,7 +44,7 @@ public class OracleConnectionTest {
                 connManager.testConnection()
                     .onSuccess(isValid -> {
                         if (isValid) {
-                            System.out.println("✓ Database connection is valid!");
+                            System.out.println("[OK] Database connection is valid!");
                             System.out.println();
                             
                             // Get pool statistics
@@ -77,7 +77,7 @@ public class OracleConnectionTest {
                                     System.out.println("Testing simple query...");
                                     connManager.executeQuery("SELECT 1 AS test_value FROM dual")
                                         .onSuccess(results -> {
-                                            System.out.println("✓ Query executed successfully!");
+                                            System.out.println("[OK] Query executed successfully!");
                                             System.out.println("Result: " + results.encodePrettily());
                                             System.out.println();
                                             
@@ -99,10 +99,10 @@ public class OracleConnectionTest {
                                                 
                                                 // Final summary
                                                 System.out.println("=== Connection Test Summary ===");
-                                                System.out.println("✓ Oracle JDBC driver loaded");
-                                                System.out.println("✓ Connection pool initialized");
-                                                System.out.println("✓ Database connection valid");
-                                                System.out.println("✓ Query execution working");
+                                                System.out.println("[OK] Oracle JDBC driver loaded");
+                                                System.out.println("[OK] Connection pool initialized");
+                                                System.out.println("[OK] Database connection valid");
+                                                System.out.println("[OK] Query execution working");
                                                 
                                                 if (tables.isEmpty()) {
                                                     System.out.println();
