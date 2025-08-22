@@ -503,8 +503,8 @@ public class OracleToolsServerVerticle extends AbstractVerticle {
     private Future<JsonObject> discoverSampleData(JsonObject arguments) {
         JsonArray tableNames = arguments.getJsonArray("table_names");
         
-        // Null check and try alternatives
-        if (tableNames == null || tableNames.isEmpty()) {
+        // Distinguish between null (missing) and empty array
+        if (tableNames == null) {
             // Try to get tables from schema_matches
             JsonObject schemaMatches = arguments.getJsonObject("schema_matches");
             if (schemaMatches != null && schemaMatches.containsKey("tables")) {
@@ -528,13 +528,22 @@ public class OracleToolsServerVerticle extends AbstractVerticle {
                 }
             }
             
-            if (tableNames == null || tableNames.isEmpty()) {
+            // Only error if still null after trying alternatives
+            if (tableNames == null) {
                 String error = "Missing required argument: table_names";
                 vertx.eventBus().publish("log",
                     "discoverSampleData missing table_names,0,OracleTools,Error,Validation");
                 System.err.println("[OracleTools] discoverSampleData: " + error);
                 return Future.failedFuture(error);
             }
+        }
+        
+        // Handle empty array case gracefully
+        if (tableNames.isEmpty()) {
+            System.out.println("[OracleTools] discoverSampleData: Empty table list, returning empty result");
+            return Future.succeededFuture(new JsonObject()
+                .put("message", "No tables to sample")
+                .put("tables_sampled", 0));
         }
         
         int limit = arguments.getInteger("limit", 5);
@@ -602,9 +611,35 @@ public class OracleToolsServerVerticle extends AbstractVerticle {
         // Try both discovered_data and sample_data (orchestration passes sample_data)
         JsonObject discoveredData = arguments.getJsonObject("discovered_data");
         if (discoveredData == null || discoveredData.isEmpty()) {
-            discoveredData = arguments.getJsonObject("sample_data", new JsonObject());
-            if (!discoveredData.isEmpty()) {
-                System.out.println("[OracleTools] Using sample_data for SQL generation");
+            // Handle both JsonObject and String types for sample_data
+            Object sampleDataObj = arguments.getValue("sample_data");
+            if (sampleDataObj instanceof JsonObject) {
+                discoveredData = (JsonObject) sampleDataObj;
+                if (!discoveredData.isEmpty()) {
+                    System.out.println("[OracleTools] Using sample_data (JsonObject) for SQL generation");
+                }
+            } else if (sampleDataObj instanceof String) {
+                String sampleDataStr = (String) sampleDataObj;
+                System.out.println("[OracleTools] sample_data is String: " + sampleDataStr);
+                // If it's an error string, log it but use empty JsonObject
+                if (sampleDataStr.startsWith("Error:")) {
+                    System.out.println("[OracleTools] Ignoring error in sample_data: " + sampleDataStr);
+                    discoveredData = new JsonObject();
+                } else {
+                    // Try to parse as JSON if it's not an error
+                    try {
+                        discoveredData = new JsonObject(sampleDataStr);
+                        System.out.println("[OracleTools] Parsed sample_data from String to JsonObject");
+                    } catch (Exception e) {
+                        System.out.println("[OracleTools] Could not parse sample_data String as JSON: " + e.getMessage());
+                        discoveredData = new JsonObject();
+                    }
+                }
+            } else {
+                discoveredData = new JsonObject();
+                if (sampleDataObj != null) {
+                    System.out.println("[OracleTools] Unexpected type for sample_data: " + sampleDataObj.getClass().getName());
+                }
             }
         }
         
@@ -929,10 +964,17 @@ public class OracleToolsServerVerticle extends AbstractVerticle {
         prompt.append("Rules:\n");
         prompt.append("1. Use ONLY the tables and columns shown above\n");
         prompt.append("2. Table names are case-sensitive in Oracle (use uppercase as shown)\n");
-        prompt.append("3. For 'California', check if it's in a city, state, or country column\n");
-        prompt.append("4. For 'pending', check status-related columns or enumeration tables\n");
+        prompt.append("3. For location queries (like 'California', 'CA', 'Texas', 'TX'):\n");
+        prompt.append("   - If ORDERS has no state column, JOIN with CUSTOMERS table to use customer location\n");
+        prompt.append("   - California cities include: San Francisco, Los Angeles, San Diego, Sacramento\n");
+        prompt.append("   - Texas cities include: Houston, Dallas, Austin, San Antonio\n");
+        prompt.append("   - New York cities include: New York, Buffalo, Albany\n");
+        prompt.append("   - For state abbreviations: CA=California, TX=Texas, NY=New York, etc.\n");
+        prompt.append("   - Use IN clause with multiple city names when searching by state\n");
+        prompt.append("4. For 'pending', check ORDER_STATUS_ENUM where status_code = 'PENDING'\n");
         prompt.append("5. DO NOT add semicolons at the end of the SQL\n");
-        prompt.append("6. If you need to join with enumeration tables, use the proper foreign key relationships\n");
+        prompt.append("6. NEVER use columns that don't exist (e.g., don't use ORDERS.CITY if only ORDERS.SHIPPING_CITY exists)\n");
+        prompt.append("7. When joining enumeration tables, use the proper foreign key relationships\n");
         prompt.append("\nReturn only the SQL query, no explanation or markdown.");
         
         return prompt.toString();

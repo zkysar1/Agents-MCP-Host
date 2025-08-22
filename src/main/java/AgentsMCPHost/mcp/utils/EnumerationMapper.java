@@ -119,7 +119,7 @@ public class EnumerationMapper {
                         enumerations.add((JsonObject) result);
                     }
                 }
-                promise.complete(enumerations);
+                promise.tryComplete(enumerations);
             })
             .onFailure(promise::fail);
         
@@ -175,17 +175,17 @@ public class EnumerationMapper {
                                     .put("rowCount", rowCount)
                                     .put("isEnumeration", true);
                                 
-                                promise.complete(enumInfo);
+                                promise.tryComplete(enumInfo);
                             } else {
-                                promise.complete(null);
+                                promise.tryComplete(null);
                             }
                         })
-                        .onFailure(err -> promise.complete(null));
+                        .onFailure(err -> promise.tryComplete(null));
                 } else {
-                    promise.complete(null);
+                    promise.tryComplete(null);
                 }
             })
-            .onFailure(err -> promise.complete(null));
+            .onFailure(err -> promise.tryComplete(null));
         
         return promise.future();
     }
@@ -199,7 +199,7 @@ public class EnumerationMapper {
         // Check cache first
         EnumMapping cached = enumCache.get(tableName);
         if (cached != null && !cached.isExpired()) {
-            promise.complete(cached);
+            promise.tryComplete(cached);
             return promise.future();
         }
         
@@ -226,7 +226,7 @@ public class EnumerationMapper {
                 
                 // Cache the mapping
                 enumCache.put(tableName, mapping);
-                promise.complete(mapping);
+                promise.tryComplete(mapping);
             })
             .onFailure(promise::fail);
         
@@ -242,7 +242,7 @@ public class EnumerationMapper {
         EnumMapping mapping = enumCache.get(tableName);
         if (mapping != null && !mapping.isExpired()) {
             String desc = mapping.codeToDesc.get(code.toUpperCase());
-            promise.complete(desc != null ? desc : code);
+            promise.tryComplete(desc != null ? desc : code);
         } else {
             // Need to detect and load the enum
             detectEnumStructure(tableName)
@@ -256,9 +256,9 @@ public class EnumerationMapper {
                 })
                 .onSuccess(loaded -> {
                     String desc = loaded.codeToDesc.get(code.toUpperCase());
-                    promise.complete(desc != null ? desc : code);
+                    promise.tryComplete(desc != null ? desc : code);
                 })
-                .onFailure(err -> promise.complete(code)); // Return original code if translation fails
+                .onFailure(err -> promise.tryComplete(code)); // Return original code if translation fails
         }
         
         return promise.future();
@@ -273,7 +273,7 @@ public class EnumerationMapper {
         EnumMapping mapping = enumCache.get(tableName);
         if (mapping != null && !mapping.isExpired()) {
             String code = mapping.descToCode.get(description.toUpperCase());
-            promise.complete(code != null ? code : description);
+            promise.tryComplete(code != null ? code : description);
         } else {
             // Need to detect and load the enum
             detectEnumStructure(tableName)
@@ -287,9 +287,9 @@ public class EnumerationMapper {
                 })
                 .onSuccess(loaded -> {
                     String code = loaded.descToCode.get(description.toUpperCase());
-                    promise.complete(code != null ? code : description);
+                    promise.tryComplete(code != null ? code : description);
                 })
-                .onFailure(err -> promise.complete(description)); // Return original if translation fails
+                .onFailure(err -> promise.tryComplete(description)); // Return original if translation fails
         }
         
         return promise.future();
@@ -320,15 +320,15 @@ public class EnumerationMapper {
                         
                         // Check if referenced table is an enum
                         if (ENUM_TABLE_PATTERN.matcher(referencedTable).matches()) {
-                            promise.complete(true);
+                            promise.tryComplete(true);
                             return;
                         }
                     }
                 }
                 
-                promise.complete(false);
+                promise.tryComplete(false);
             })
-            .onFailure(err -> promise.complete(false));
+            .onFailure(err -> promise.tryComplete(false));
         
         return promise.future();
     }
@@ -340,7 +340,7 @@ public class EnumerationMapper {
         Promise<JsonArray> promise = Promise.promise();
         
         if (results == null || results.isEmpty()) {
-            promise.complete(results);
+            promise.tryComplete(results);
             return promise.future();
         }
         
@@ -392,7 +392,7 @@ public class EnumerationMapper {
                     .map(v -> translatedResults);
             })
             .onSuccess(promise::complete)
-            .onFailure(err -> promise.complete(results)); // Return original on error
+            .onFailure(err -> promise.tryComplete(results)); // Return original on error
         
         return promise.future();
     }

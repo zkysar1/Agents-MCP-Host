@@ -82,6 +82,35 @@ public class McpHostManagerVerticle extends AbstractVerticle {
                 System.out.println("[McpHostManager] Expected servers: " + expectedServers);
                 System.out.println("[McpHostManager] Expected clients: " + expectedClients);
                 
+                // Set up a startup timeout handler
+                vertx.setTimer(30000, id -> {
+                    if (!systemReady) {
+                        System.err.println("[McpHostManager] WARNING: Startup timeout after 30 seconds!");
+                        System.err.println("[McpHostManager] Missing components:");
+                        
+                        Set<String> missingServers = new HashSet<>(expectedServers);
+                        missingServers.removeAll(readyServers);
+                        if (!missingServers.isEmpty()) {
+                            System.err.println("  Missing servers: " + missingServers);
+                        }
+                        
+                        Set<String> missingClients = new HashSet<>(expectedClients);
+                        missingClients.removeAll(readyClients);
+                        if (!missingClients.isEmpty()) {
+                            System.err.println("  Missing clients: " + missingClients);
+                        }
+                        
+                        System.err.println("[McpHostManager] Ready servers: " + readyServers);
+                        System.err.println("[McpHostManager] Ready clients: " + readyClients);
+                        System.err.println("[McpHostManager] Total tools registered: " + allTools.size());
+                        
+                        // Log to CSV
+                        vertx.eventBus().publish("log",
+                            "Startup timeout - missing servers: " + missingServers + ", missing clients: " + missingClients + 
+                            ",0,McpHostManager,Error,Startup");
+                    }
+                });
+                
                 // Check if everything is already ready (unlikely but possible)
                 checkIfSystemReady();
                 
@@ -267,14 +296,27 @@ public class McpHostManagerVerticle extends AbstractVerticle {
             options = new DeploymentOptions();
         }
         
+        System.out.println("[McpHostManager] Attempting to deploy: " + name);
+        
         vertx.deployVerticle(verticle, options, ar -> {
             if (ar.succeeded()) {
                 String deploymentId = ar.result();
                 deploymentIds.add(deploymentId);
-                System.out.println("Deployed " + name + " [" + deploymentId + "]");
+                System.out.println("[McpHostManager] Successfully deployed " + name + " [" + deploymentId + "]");
+                
+                // Log to CSV
+                vertx.eventBus().publish("log",
+                    "Deployed " + name + ",2,McpHostManager,Deployment,MCP");
+                    
                 promise.complete(deploymentId);
             } else {
-                System.err.println("Failed to deploy " + name + ": " + ar.cause().getMessage());
+                System.err.println("[McpHostManager] FAILED to deploy " + name + ": " + ar.cause().getMessage());
+                ar.cause().printStackTrace();
+                
+                // Log failure to CSV
+                vertx.eventBus().publish("log",
+                    "Failed to deploy " + name + ": " + ar.cause().getMessage() + ",0,McpHostManager,Error,MCP");
+                    
                 promise.fail(ar.cause());
             }
         });
@@ -591,6 +633,8 @@ public class McpHostManagerVerticle extends AbstractVerticle {
                              ", Tools: " + allTools.size());
         } else {
             System.out.println("[McpHostManager] Waiting for components:");
+            System.out.println("  Ready servers: " + readyServers + " / Expected: " + expectedServers);
+            System.out.println("  Ready clients: " + readyClients + " / Expected: " + expectedClients);
             if (!allServersReady) {
                 Set<String> missingServers = new HashSet<>(expectedServers);
                 missingServers.removeAll(readyServers);

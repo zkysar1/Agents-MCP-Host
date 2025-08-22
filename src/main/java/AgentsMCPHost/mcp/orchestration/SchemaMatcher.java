@@ -64,7 +64,7 @@ public class SchemaMatcher {
                 System.out.println("[SchemaMatcher] Timeout reached, returning partial results");
                 MatchResult partialResult = new MatchResult();
                 partialResult.timedOut = true;
-                promise.complete(partialResult);
+                promise.tryComplete(partialResult);
             }
         });
         
@@ -105,13 +105,13 @@ public class SchemaMatcher {
             })
             .onSuccess(result -> {
                 vertx.cancelTimer(timeoutTimer);
-                promise.complete(result);
+                promise.tryComplete(result);
             })
             .onFailure(err -> {
                 vertx.cancelTimer(timeoutTimer);
                 System.err.println("[SchemaMatcher] Error during matching: " + err.getMessage());
                 // Return empty result on failure
-                promise.complete(new MatchResult());
+                promise.tryComplete(new MatchResult());
             });
         
         return promise.future();

@@ -402,8 +402,18 @@ public abstract class OrchestrationStrategyVerticle extends AbstractVerticle {
                 }
             } else if (context.dataToPass.containsKey(key)) {
                 Object value = context.dataToPass.get(key);
-                arguments.put(key, value);
-                System.out.println("[Orchestration] Added from dataToPass: " + key);
+                
+                // Validate and potentially convert the value type
+                if (value instanceof String && ((String)value).startsWith("Error:")) {
+                    // Skip error strings or convert to empty object for tools expecting objects
+                    System.out.println("[Orchestration] WARNING: Skipping error value for " + key + ": " + value);
+                    // Don't add error strings to arguments - let the tool handle missing data
+                } else {
+                    // Safe to add the value
+                    arguments.put(key, value);
+                    System.out.println("[Orchestration] Added from dataToPass: " + key + 
+                                     " (type: " + (value != null ? value.getClass().getSimpleName() : "null") + ")");
+                }
             } else {
                 // Try to extract from step results
                 boolean found = false;
@@ -585,7 +595,8 @@ public abstract class OrchestrationStrategyVerticle extends AbstractVerticle {
             
             vertx.eventBus().publish("conversation." + context.streamId + ".progress", progressUpdate);
             
-            System.out.println("[Orchestration] Progress update sent: " + stepName);
+            System.out.println("[Orchestration] Progress update sent: " + stepName + " to address: conversation." + context.streamId + ".progress");
+            System.out.println("[Orchestration]   Step: " + context.currentStep + "/" + totalSteps + ", Elapsed: " + (System.currentTimeMillis() - context.startTime) + "ms");
         }
     }
     

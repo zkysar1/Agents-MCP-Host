@@ -207,12 +207,17 @@ public class PopulateOracleData {
             int customerId = customerIds[rand.nextInt(50)];
             int statusId = statusIds[rand.nextInt(9)];
             
+            // Get customer's city and country for shipping
             String insert = String.format(
-                "INSERT INTO orders (order_number, customer_id, order_date, status_id, freight_cost, payment_method) " +
-                "VALUES ('ORD-2025-%06d', %d, SYSDATE - %d, %d, %.2f, '%s')",
+                "INSERT INTO orders (order_number, customer_id, order_date, status_id, " +
+                "shipping_city, shipping_country_id, freight_cost, payment_method) " +
+                "SELECT 'ORD-2025-%06d', %d, SYSDATE - %d, %d, " +
+                "city, country_id, %.2f, '%s' " +
+                "FROM customers WHERE customer_id = %d",
                 10000 + i, customerId, rand.nextInt(180), statusId,
                 5 + rand.nextDouble() * 45,
-                rand.nextInt(3) == 0 ? "Credit Card" : rand.nextInt(2) == 0 ? "PayPal" : "Bank Transfer"
+                rand.nextInt(3) == 0 ? "Credit Card" : rand.nextInt(2) == 0 ? "PayPal" : "Bank Transfer",
+                customerId
             );
             stmt.execute(insert);
         }

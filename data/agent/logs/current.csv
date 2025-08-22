@@ -1,9 +1,235 @@
 Message,Level,Class,Category,Character,SequenceReceived,EpochTimeMillis
-Tool Selection Verticle deployed,3,Driver,StartUp,System,1,1755838310272
-Oracle Orchestration deployed,3,Driver,StartUp,Orchestration,2,1755838310605
-LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System,3,1755838310606
-McpHostManager received tools.discovered from oracle-tools with 11 tools,2,McpHostManager,Discovery,MCP,4,1755838310708
-Failed to initialize Oracle connection: Connection validation failed,0,OracleConnectionManager,StartUp,Database,5,1755839531709
-Failed to initialize Oracle connection: Connection validation failed,0,OracleConnectionManager,StartUp,Database,6,1755839531728
-Failed to initialize Oracle connection: Connection validation failed,0,OracleConnectionManager,StartUp,Database,7,1755839531740
-Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,8,1755839546752
+Oracle Orchestration deployed,3,Driver,StartUp,Orchestration,1,1755876483268
+LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System,2,1755876483291
+Deployed OracleToolsServer,2,McpHostManager,Deployment,MCP,3,1755876483321
+McpHostManager received tools.discovered from oracle-tools with 11 tools,2,McpHostManager,Discovery,MCP,4,1755876483321
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,5,1755876505572
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,6,1755876505574
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,7,1755876505574
+Oracle MCP Server started,1,OracleServer,StartUp,MCP,8,1755876505679
+Deployed OracleServer,2,McpHostManager,Deployment,MCP,9,1755876505679
+Oracle Metadata Server started,1,OracleMetadata,StartUp,MCP,10,1755876505679
+Deployed OracleMetadataServer,2,McpHostManager,Deployment,MCP,11,1755876505679
+OracleToolsClient publishing client.ready with 11 tools,2,OracleToolsClient,Registration,MCP,12,1755876507783
+OracleToolsClient published 11 tools,2,OracleToolsClient,Discovery,MCP,13,1755876507787
+OracleToolsClient started as MCP client,1,OracleToolsClient,StartUp,MCP,14,1755876507787
+Deployed OracleToolsClient,2,McpHostManager,Deployment,MCP,15,1755876507787
+McpHostManager received client.ready from oracle-tools with 11 tools,2,McpHostManager,Registration,MCP,16,1755876507787
+McpHostManager received tools.discovered from oracle-tools with 11 tools,2,McpHostManager,Discovery,MCP,17,1755876507790
+OracleClient ready with 7 tools,1,OracleClient,StartUp,MCP,18,1755876508046
+Deployed OracleClient,2,McpHostManager,Deployment,MCP,19,1755876508046
+MCP Host Manager deployed,3,Driver,StartUp,MCP,20,1755876508046
+McpHostManager received tools.discovered from oracle with 7 tools,2,McpHostManager,Discovery,MCP,21,1755876508046
+McpHostManager received client.ready from oracle with 7 tools,2,McpHostManager,Registration,MCP,22,1755876508046
+MCP infrastructure ready,1,McpHostManager,StartUp,MCP,23,1755876508046
+ZAK-Agent startup complete,0,Driver,StartUp,System,24,1755876508048
+Host API server started on HTTP port 8080 - Access at http://localhost:8080,0,HostAPIVerticle,StartUp,System,25,1755876508051
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,26,1755876521145
+OpenAI API call successful,2,LlmAPIService,API,Success,27,1755876562226
+OpenAI API call successful,2,LlmAPIService,API,Success,28,1755876566497
+Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool,29,1755876566532
+Args for Analyze Query: {   "query" : "How many pending orders in California?" },3,OrchestrationStrategy,Arguments,Tool,30,1755876566533
+Orchestration routing oracle-tools__analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool,31,1755876566533
+OracleToolsClient routing analyze_query,3,OracleToolsClient,Routing,Tool,32,1755876566537
+OracleTools executing analyze_query,3,OracleTools,Execution,Tool,33,1755876566543
+OpenAI API call successful,2,LlmAPIService,API,Success,34,1755876570265
+Tool analyze_query completed,2,OracleTools,Success,Tool,35,1755876570266
+Tool analyze_query completed,2,OracleToolsClient,Success,Tool,36,1755876570266
+Tool oracle-tools__analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool,37,1755876570275
+Step Analyze Query passing analysis,3,OrchestrationStrategy,DataFlow,Tool,38,1755876570275
+Building args for Match Schema step,3,OrchestrationStrategy,Arguments,Tool,39,1755876570277
+Args for Match Schema: {   "tokens" : [ "orders" ] },3,OrchestrationStrategy,Arguments,Tool,40,1755876570278
+Orchestration routing oracle-tools__match_schema via MCP,3,OrchestrationStrategy,Routing,Tool,41,1755876570278
+OracleToolsClient routing match_schema,3,OracleToolsClient,Routing,Tool,42,1755876570279
+OracleTools executing match_schema,3,OracleTools,Execution,Tool,43,1755876570293
+Tool match_schema completed,2,OracleTools,Success,Tool,44,1755876589393
+Tool match_schema completed,2,OracleToolsClient,Success,Tool,45,1755876589393
+Tool oracle-tools__match_schema routed successfully,2,OrchestrationStrategy,Success,Tool,46,1755876589402
+Step Match Schema passing schema_matches,3,OrchestrationStrategy,DataFlow,Tool,47,1755876589402
+Building args for Discover Data step,3,OrchestrationStrategy,Arguments,Tool,48,1755876589404
+Args for Discover Data: {   "table_names" : [ "ORDERS", "ORDER_STATUS_ENUM" ] },3,OrchestrationStrategy,Arguments,Tool,49,1755876589404
+Orchestration routing oracle-tools__discover_sample_data via MCP,3,OrchestrationStrategy,Routing,Tool,50,1755876589404
+OracleToolsClient routing discover_sample_data,3,OracleToolsClient,Routing,Tool,51,1755876589405
+OracleTools executing discover_sample_data,3,OracleTools,Execution,Tool,52,1755876589405
+Tool discover_sample_data completed,2,OracleTools,Success,Tool,53,1755876590847
+Tool discover_sample_data completed,2,OracleToolsClient,Success,Tool,54,1755876590847
+Tool oracle-tools__discover_sample_data routed successfully,2,OrchestrationStrategy,Success,Tool,55,1755876590854
+Step Discover Data passing sample_data,3,OrchestrationStrategy,DataFlow,Tool,56,1755876590855
+Building args for Generate SQL step,3,OrchestrationStrategy,Arguments,Tool,57,1755876590856
+Args for Generate SQL: {   "query" : "How many pending orders in California?",   "schema_matches" : {     "tables" : [ {       "table" : "ORDERS",       "score" : 1.0,       "matched_token" : "orders"     }, {      ,3,OrchestrationStrategy,Arguments,Tool,58,1755876590856
+Orchestration routing oracle-tools__generate_sql via MCP,3,OrchestrationStrategy,Routing,Tool,59,1755876590856
+OracleToolsClient routing generate_sql,3,OracleToolsClient,Routing,Tool,60,1755876590857
+OracleTools executing generate_sql,3,OracleTools,Execution,Tool,61,1755876590865
+OpenAI API call successful,2,LlmAPIService,API,Success,62,1755876592935
+Tool generate_sql completed,2,OracleTools,Success,Tool,63,1755876592935
+Tool generate_sql completed,2,OracleToolsClient,Success,Tool,64,1755876592936
+Tool oracle-tools__generate_sql routed successfully,2,OrchestrationStrategy,Success,Tool,65,1755876592942
+Step Generate SQL passing generated_sql,3,OrchestrationStrategy,DataFlow,Tool,66,1755876592942
+Building args for Optimize SQL step,3,OrchestrationStrategy,Arguments,Tool,67,1755876592945
+Args for Optimize SQL: {   "generated_sql" : {     "sql" : "SELECT COUNT(*) \nFROM ORDERS O \nJOIN ORDER_STATUS_ENUM OS ON O.ORDER_ID = OS.ORDER_ID \nWHERE OS.STATUS_CODE = 'PENDING' \nAND O.ORDER_ID IN (\n    SELECT ORDE,3,OrchestrationStrategy,Arguments,Tool,68,1755876592945
+Orchestration routing oracle-tools__optimize_sql via MCP,3,OrchestrationStrategy,Routing,Tool,69,1755876592945
+OracleToolsClient routing optimize_sql,3,OracleToolsClient,Routing,Tool,70,1755876592948
+OracleTools executing optimize_sql,3,OracleTools,Execution,Tool,71,1755876592952
+Tool optimize_sql completed,2,OracleTools,Success,Tool,72,1755876594191
+Tool optimize_sql completed,2,OracleToolsClient,Success,Tool,73,1755876594192
+Tool oracle-tools__optimize_sql routed successfully,2,OrchestrationStrategy,Success,Tool,74,1755876594195
+Step Optimize SQL passing optimized_sql,3,OrchestrationStrategy,DataFlow,Tool,75,1755876594195
+Building args for Execute Query step,3,OrchestrationStrategy,Arguments,Tool,76,1755876594196
+Args for Execute Query: {   "optimized_sql" : "SELECT COUNT(*) \nFROM ORDERS O \nJOIN ORDER_STATUS_ENUM OS ON O.ORDER_ID = OS.ORDER_ID \nWHERE OS.STATUS_CODE = 'PENDING' \nAND O.ORDER_ID IN (\n    SELECT ORDER_ID \n    FROM,3,OrchestrationStrategy,Arguments,Tool,77,1755876594196
+Orchestration routing oracle-tools__execute_query via MCP,3,OrchestrationStrategy,Routing,Tool,78,1755876594196
+OracleToolsClient routing execute_query,3,OracleToolsClient,Routing,Tool,79,1755876594196
+OracleTools executing execute_query,3,OracleTools,Execution,Tool,80,1755876594198
+Tool execute_query failed: Query execution failed: ORA-00904: "OS"."ORDER_ID": invalid identifier
+
+https://docs.oracle.com/error-help/db/ora-00904/,0,OracleTools,Error,Tool,81,1755876595542
+Tool execute_query failed: Query execution failed: ORA-00904: "OS"."ORDER_ID": invalid identifier
+
+https://docs.oracle.com/error-help/db/ora-00904/,0,OracleToolsClient,Error,Tool,82,1755876595543
+Tool oracle-tools__execute_query routed successfully,2,OrchestrationStrategy,Success,Tool,83,1755876595547
+Step Execute Query passing results,3,OrchestrationStrategy,DataFlow,Tool,84,1755876595547
+Building args for Format Results step,3,OrchestrationStrategy,Arguments,Tool,85,1755876595548
+Args for Format Results: {   "query" : "How many pending orders in California?",   "generated_sql" : {     "sql" : "SELECT COUNT(*) \nFROM ORDERS O \nJOIN ORDER_STATUS_ENUM OS ON O.ORDER_ID = OS.ORDER_ID \nWHERE OS.STATUS_,3,OrchestrationStrategy,Arguments,Tool,86,1755876595548
+Orchestration routing oracle-tools__format_results via MCP,3,OrchestrationStrategy,Routing,Tool,87,1755876595548
+OracleToolsClient routing format_results,3,OracleToolsClient,Routing,Tool,88,1755876595549
+OracleTools executing format_results,3,OracleTools,Execution,Tool,89,1755876595553
+OpenAI API call successful,2,LlmAPIService,API,Success,90,1755876596362
+Tool format_results completed,2,OracleTools,Success,Tool,91,1755876596362
+Tool format_results completed,2,OracleToolsClient,Success,Tool,92,1755876596363
+Tool oracle-tools__format_results routed successfully,2,OrchestrationStrategy,Success,Tool,93,1755876596367
+Conversation final response sent for stream-b04c64a2-f498-4464-b770-49ee40ccb0be,2,Conversation,Response,SSE,94,1755876596371
+OpenAI API call successful,2,LlmAPIService,API,Success,95,1755876610549
+OpenAI API call successful,2,LlmAPIService,API,Success,96,1755876614200
+Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool,97,1755876614203
+Args for Analyze Query: {   "query" : "How many customers are there?" },3,OrchestrationStrategy,Arguments,Tool,98,1755876614204
+Orchestration routing oracle-tools__analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool,99,1755876614204
+OracleToolsClient routing analyze_query,3,OracleToolsClient,Routing,Tool,100,1755876614204
+OracleTools executing analyze_query,3,OracleTools,Execution,Tool,101,1755876614208
+OpenAI API call successful,2,LlmAPIService,API,Success,102,1755876616396
+Tool analyze_query completed,2,OracleTools,Success,Tool,103,1755876616396
+Tool analyze_query completed,2,OracleToolsClient,Success,Tool,104,1755876616396
+Tool oracle-tools__analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool,105,1755876616400
+Step Analyze Query passing analysis,3,OrchestrationStrategy,DataFlow,Tool,106,1755876616400
+Building args for Match Schema step,3,OrchestrationStrategy,Arguments,Tool,107,1755876616401
+Args for Match Schema: {   "tokens" : [ "customers" ] },3,OrchestrationStrategy,Arguments,Tool,108,1755876616401
+Orchestration routing oracle-tools__match_schema via MCP,3,OrchestrationStrategy,Routing,Tool,109,1755876616401
+OracleToolsClient routing match_schema,3,OracleToolsClient,Routing,Tool,110,1755876616402
+OracleTools executing match_schema,3,OracleTools,Execution,Tool,111,1755876616402
+Tool match_schema completed,2,OracleTools,Success,Tool,112,1755876624692
+Tool match_schema completed,2,OracleToolsClient,Success,Tool,113,1755876624693
+Tool oracle-tools__match_schema routed successfully,2,OrchestrationStrategy,Success,Tool,114,1755876624696
+Step Match Schema passing schema_matches,3,OrchestrationStrategy,DataFlow,Tool,115,1755876624696
+Building args for Discover Data step,3,OrchestrationStrategy,Arguments,Tool,116,1755876624697
+Args for Discover Data: {   "table_names" : [ "CUSTOMERS" ] },3,OrchestrationStrategy,Arguments,Tool,117,1755876624697
+Orchestration routing oracle-tools__discover_sample_data via MCP,3,OrchestrationStrategy,Routing,Tool,118,1755876624697
+OracleToolsClient routing discover_sample_data,3,OracleToolsClient,Routing,Tool,119,1755876624698
+OracleTools executing discover_sample_data,3,OracleTools,Execution,Tool,120,1755876624698
+Tool discover_sample_data completed,2,OracleTools,Success,Tool,121,1755876625291
+Tool discover_sample_data completed,2,OracleToolsClient,Success,Tool,122,1755876625292
+Tool oracle-tools__discover_sample_data routed successfully,2,OrchestrationStrategy,Success,Tool,123,1755876625296
+Step Discover Data passing sample_data,3,OrchestrationStrategy,DataFlow,Tool,124,1755876625296
+Building args for Generate SQL step,3,OrchestrationStrategy,Arguments,Tool,125,1755876625297
+Args for Generate SQL: {   "query" : "How many customers are there?",   "schema_matches" : {     "tables" : [ {       "table" : "CUSTOMERS",       "score" : 1.0,       "matched_token" : "customers"     } ],     "col,3,OrchestrationStrategy,Arguments,Tool,126,1755876625298
+Orchestration routing oracle-tools__generate_sql via MCP,3,OrchestrationStrategy,Routing,Tool,127,1755876625298
+OracleToolsClient routing generate_sql,3,OracleToolsClient,Routing,Tool,128,1755876625298
+OracleTools executing generate_sql,3,OracleTools,Execution,Tool,129,1755876625303
+OpenAI API call successful,2,LlmAPIService,API,Success,130,1755876626343
+Tool generate_sql completed,2,OracleTools,Success,Tool,131,1755876626343
+Tool generate_sql completed,2,OracleToolsClient,Success,Tool,132,1755876626343
+Tool oracle-tools__generate_sql routed successfully,2,OrchestrationStrategy,Success,Tool,133,1755876626352
+Step Generate SQL passing generated_sql,3,OrchestrationStrategy,DataFlow,Tool,134,1755876626352
+Building args for Optimize SQL step,3,OrchestrationStrategy,Arguments,Tool,135,1755876626356
+Args for Optimize SQL: {   "generated_sql" : {     "sql" : "SELECT COUNT(CUSTOMER_ID) AS CUSTOMER_COUNT FROM CUSTOMERS",     "confidence" : 0.8   } },3,OrchestrationStrategy,Arguments,Tool,136,1755876626356
+Orchestration routing oracle-tools__optimize_sql via MCP,3,OrchestrationStrategy,Routing,Tool,137,1755876626356
+OracleToolsClient routing optimize_sql,3,OracleToolsClient,Routing,Tool,138,1755876626356
+OracleTools executing optimize_sql,3,OracleTools,Execution,Tool,139,1755876626357
+Tool optimize_sql completed,2,OracleTools,Success,Tool,140,1755876627699
+Tool optimize_sql completed,2,OracleToolsClient,Success,Tool,141,1755876627699
+Tool oracle-tools__optimize_sql routed successfully,2,OrchestrationStrategy,Success,Tool,142,1755876627703
+Step Optimize SQL passing optimized_sql,3,OrchestrationStrategy,DataFlow,Tool,143,1755876627703
+Building args for Execute Query step,3,OrchestrationStrategy,Arguments,Tool,144,1755876627704
+Args for Execute Query: {   "optimized_sql" : "SELECT COUNT(CUSTOMER_ID) AS CUSTOMER_COUNT FROM CUSTOMERS",   "generated_sql" : {     "sql" : "SELECT COUNT(CUSTOMER_ID) AS CUSTOMER_COUNT FROM CUSTOMERS",     "confidence",3,OrchestrationStrategy,Arguments,Tool,145,1755876627704
+Orchestration routing oracle-tools__execute_query via MCP,3,OrchestrationStrategy,Routing,Tool,146,1755876627704
+OracleToolsClient routing execute_query,3,OracleToolsClient,Routing,Tool,147,1755876627705
+OracleTools executing execute_query,3,OracleTools,Execution,Tool,148,1755876627705
+Tool execute_query completed,2,OracleTools,Success,Tool,149,1755876628288
+Tool execute_query completed,2,OracleToolsClient,Success,Tool,150,1755876628288
+Tool oracle-tools__execute_query routed successfully,2,OrchestrationStrategy,Success,Tool,151,1755876628288
+Step Execute Query passing results,3,OrchestrationStrategy,DataFlow,Tool,152,1755876628288
+Building args for Format Results step,3,OrchestrationStrategy,Arguments,Tool,153,1755876628296
+Args for Format Results: {   "query" : "How many customers are there?",   "results" : [ {     "CUSTOMER_COUNT" : 0.0   } ],   "generated_sql" : {     "sql" : "SELECT COUNT(CUSTOMER_ID) AS CUSTOMER_COUNT FROM CUSTOMERS",,3,OrchestrationStrategy,Arguments,Tool,154,1755876628296
+Orchestration routing oracle-tools__format_results via MCP,3,OrchestrationStrategy,Routing,Tool,155,1755876628296
+OracleToolsClient routing format_results,3,OracleToolsClient,Routing,Tool,156,1755876628296
+OracleTools executing format_results,3,OracleTools,Execution,Tool,157,1755876628300
+OpenAI API call successful,2,LlmAPIService,API,Success,158,1755876629248
+Tool format_results completed,2,OracleTools,Success,Tool,159,1755876629248
+Tool format_results completed,2,OracleToolsClient,Success,Tool,160,1755876629249
+Tool oracle-tools__format_results routed successfully,2,OrchestrationStrategy,Success,Tool,161,1755876629250
+Conversation final response sent for stream-dd9fb023-38a7-4f5b-82c3-20cc82bc55f4,2,Conversation,Response,SSE,162,1755876629252
+OpenAI API call successful,2,LlmAPIService,API,Success,163,1755876641784
+OpenAI API call successful,2,LlmAPIService,API,Success,164,1755876645499
+Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool,165,1755876645501
+Args for Analyze Query: {   "query" : "How many orders are there?" },3,OrchestrationStrategy,Arguments,Tool,166,1755876645501
+Orchestration routing oracle-tools__analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool,167,1755876645501
+OracleToolsClient routing analyze_query,3,OracleToolsClient,Routing,Tool,168,1755876645502
+OracleTools executing analyze_query,3,OracleTools,Execution,Tool,169,1755876645504
+OpenAI API call successful,2,LlmAPIService,API,Success,170,1755876647575
+Tool analyze_query completed,2,OracleTools,Success,Tool,171,1755876647575
+Tool analyze_query completed,2,OracleToolsClient,Success,Tool,172,1755876647575
+Tool oracle-tools__analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool,173,1755876647575
+Step Analyze Query passing analysis,3,OrchestrationStrategy,DataFlow,Tool,174,1755876647575
+Building args for Match Schema step,3,OrchestrationStrategy,Arguments,Tool,175,1755876647581
+Args for Match Schema: {   "tokens" : [ "orders" ] },3,OrchestrationStrategy,Arguments,Tool,176,1755876647582
+Orchestration routing oracle-tools__match_schema via MCP,3,OrchestrationStrategy,Routing,Tool,177,1755876647582
+OracleToolsClient routing match_schema,3,OracleToolsClient,Routing,Tool,178,1755876647582
+OracleTools executing match_schema,3,OracleTools,Execution,Tool,179,1755876647582
+Tool match_schema completed,2,OracleTools,Success,Tool,180,1755876650584
+Tool match_schema completed,2,OracleToolsClient,Success,Tool,181,1755876650585
+Tool oracle-tools__match_schema routed successfully,2,OrchestrationStrategy,Success,Tool,182,1755876650587
+Step Match Schema passing schema_matches,3,OrchestrationStrategy,DataFlow,Tool,183,1755876650587
+Building args for Discover Data step,3,OrchestrationStrategy,Arguments,Tool,184,1755876650588
+Args for Discover Data: {   "table_names" : [ "ORDERS", "ORDER_STATUS_ENUM" ] },3,OrchestrationStrategy,Arguments,Tool,185,1755876650589
+Orchestration routing oracle-tools__discover_sample_data via MCP,3,OrchestrationStrategy,Routing,Tool,186,1755876650589
+OracleToolsClient routing discover_sample_data,3,OracleToolsClient,Routing,Tool,187,1755876650589
+OracleTools executing discover_sample_data,3,OracleTools,Execution,Tool,188,1755876650591
+Tool discover_sample_data completed,2,OracleTools,Success,Tool,189,1755876652062
+Tool discover_sample_data completed,2,OracleToolsClient,Success,Tool,190,1755876652063
+Tool oracle-tools__discover_sample_data routed successfully,2,OrchestrationStrategy,Success,Tool,191,1755876652071
+Step Discover Data passing sample_data,3,OrchestrationStrategy,DataFlow,Tool,192,1755876652071
+Building args for Generate SQL step,3,OrchestrationStrategy,Arguments,Tool,193,1755876652074
+Args for Generate SQL: {   "query" : "How many orders are there?",   "schema_matches" : {     "tables" : [ {       "table" : "ORDERS",       "score" : 1.0,       "matched_token" : "orders"     }, {       "table" : ",3,OrchestrationStrategy,Arguments,Tool,194,1755876652074
+Orchestration routing oracle-tools__generate_sql via MCP,3,OrchestrationStrategy,Routing,Tool,195,1755876652074
+OracleToolsClient routing generate_sql,3,OracleToolsClient,Routing,Tool,196,1755876652076
+OracleTools executing generate_sql,3,OracleTools,Execution,Tool,197,1755876652088
+OpenAI API call successful,2,LlmAPIService,API,Success,198,1755876653101
+Tool generate_sql completed,2,OracleTools,Success,Tool,199,1755876653101
+Tool generate_sql completed,2,OracleToolsClient,Success,Tool,200,1755876653101
+Tool oracle-tools__generate_sql routed successfully,2,OrchestrationStrategy,Success,Tool,201,1755876653104
+Step Generate SQL passing generated_sql,3,OrchestrationStrategy,DataFlow,Tool,202,1755876653104
+Building args for Optimize SQL step,3,OrchestrationStrategy,Arguments,Tool,203,1755876653105
+Args for Optimize SQL: {   "generated_sql" : {     "sql" : "SELECT COUNT(*) AS total_orders FROM ORDERS",     "confidence" : 0.8   } },3,OrchestrationStrategy,Arguments,Tool,204,1755876653105
+Orchestration routing oracle-tools__optimize_sql via MCP,3,OrchestrationStrategy,Routing,Tool,205,1755876653105
+OracleToolsClient routing optimize_sql,3,OracleToolsClient,Routing,Tool,206,1755876653106
+OracleTools executing optimize_sql,3,OracleTools,Execution,Tool,207,1755876653107
+Tool optimize_sql completed,2,OracleTools,Success,Tool,208,1755876654282
+Tool optimize_sql completed,2,OracleToolsClient,Success,Tool,209,1755876654282
+Tool oracle-tools__optimize_sql routed successfully,2,OrchestrationStrategy,Success,Tool,210,1755876654286
+Step Optimize SQL passing optimized_sql,3,OrchestrationStrategy,DataFlow,Tool,211,1755876654286
+Building args for Execute Query step,3,OrchestrationStrategy,Arguments,Tool,212,1755876654287
+Args for Execute Query: {   "optimized_sql" : "SELECT COUNT(*) AS total_orders FROM ORDERS",   "generated_sql" : {     "sql" : "SELECT COUNT(*) AS total_orders FROM ORDERS",     "confidence" : 0.8   } },3,OrchestrationStrategy,Arguments,Tool,213,1755876654287
+Orchestration routing oracle-tools__execute_query via MCP,3,OrchestrationStrategy,Routing,Tool,214,1755876654287
+OracleToolsClient routing execute_query,3,OracleToolsClient,Routing,Tool,215,1755876654289
+OracleTools executing execute_query,3,OracleTools,Execution,Tool,216,1755876654290
+Tool execute_query completed,2,OracleTools,Success,Tool,217,1755876654933
+Tool execute_query completed,2,OracleToolsClient,Success,Tool,218,1755876654933
+Tool oracle-tools__execute_query routed successfully,2,OrchestrationStrategy,Success,Tool,219,1755876654935
+Step Execute Query passing results,3,OrchestrationStrategy,DataFlow,Tool,220,1755876654935
+Building args for Format Results step,3,OrchestrationStrategy,Arguments,Tool,221,1755876654936
+Args for Format Results: {   "query" : "How many orders are there?",   "results" : [ {     "TOTAL_ORDERS" : 0.0   } ],   "generated_sql" : {     "sql" : "SELECT COUNT(*) AS total_orders FROM ORDERS",     "confidence" :,3,OrchestrationStrategy,Arguments,Tool,222,1755876654936
+Orchestration routing oracle-tools__format_results via MCP,3,OrchestrationStrategy,Routing,Tool,223,1755876654936
+OracleToolsClient routing format_results,3,OracleToolsClient,Routing,Tool,224,1755876654937
+OracleTools executing format_results,3,OracleTools,Execution,Tool,225,1755876654939
+OpenAI API call successful,2,LlmAPIService,API,Success,226,1755876656581
+Tool format_results completed,2,OracleTools,Success,Tool,227,1755876656581
+Tool format_results completed,2,OracleToolsClient,Success,Tool,228,1755876656581
+Tool oracle-tools__format_results routed successfully,2,OrchestrationStrategy,Success,Tool,229,1755876656582
+Conversation final response sent for stream-f48bae28-c9ad-4738-a9d5-08a27d01d2ad,2,Conversation,Response,SSE,230,1755876656584

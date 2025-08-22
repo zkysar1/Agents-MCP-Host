@@ -121,12 +121,16 @@ public class StreamingConversationHandler {
         // Add progress update consumer
         MessageConsumer<JsonObject> progressConsumer = eventBus.consumer("conversation." + streamId + ".progress", msg -> {
             String state = streamState.get(streamId);
+            System.out.println("[StreamingHandler] Received progress event for stream: " + streamId + ", state: " + state);
             if ("active".equals(state)) {
                 JsonObject data = msg.body();
+                System.out.println("[StreamingHandler] Sending progress to client: " + data.getString("step"));
                 sendEvent(response, "progress", new JsonObject()
                     .put("step", data.getString("step"))
                     .put("message", data.getString("message"))
                     .put("elapsed", data.getLong("elapsed", 0L)));
+            } else {
+                System.out.println("[StreamingHandler] Ignoring progress event - stream not active: " + state);
             }
         });
         consumers.add(progressConsumer);
@@ -217,7 +221,14 @@ public class StreamingConversationHandler {
         
         // Send to conversation processor with streaming context
         eventBus.request("conversation.process.streaming", request, ar -> {
-            if (ar.failed()) {
+            if (ar.succeeded()) {
+                // Request acknowledged - processing continues asynchronously
+                JsonObject reply = (JsonObject) ar.result().body();
+                System.out.println("[StreamingHandler] Conversation processor acknowledged: " + reply.getString("message"));
+                // Progress updates and final response will come via event bus
+            } else {
+                // Request failed - notify client
+                System.err.println("[StreamingHandler] Conversation processor failed: " + ar.cause().getMessage());
                 eventBus.publish("conversation." + streamId + ".error", 
                     new JsonObject().put("error", ar.cause().getMessage()));
             }

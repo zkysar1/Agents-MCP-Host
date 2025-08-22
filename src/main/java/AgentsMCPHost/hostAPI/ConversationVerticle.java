@@ -70,10 +70,22 @@ public class ConversationVerticle extends AbstractVerticle {
       JsonArray streamMessages = request.getJsonArray("messages");
       String userMsg = request.getString("userMessage");
       
-      // Use unified tool selection if MCP is enabled
+      // IMMEDIATELY REPLY to prevent timeout - this is critical!
+      // StreamingConversationHandler uses request() which expects a reply
+      msg.reply(new JsonObject()
+        .put("status", "processing")
+        .put("streamId", streamId)
+        .put("message", "Request acknowledged, processing asynchronously"));
+      
+      // Log that we're starting processing
+      System.out.println("[Conversation] Streaming request acknowledged for stream: " + streamId);
+      
+      // Then process asynchronously - results will be delivered via event bus
       if (mcpEnabled && availableTools > 0) {
+        System.out.println("[Conversation] Processing with unified tool selection (tools available: " + availableTools + ")");
         handleWithUnifiedSelection(vertx, streamId, userMsg, streamMessages);
       } else {
+        System.out.println("[Conversation] Processing with standard LLM (no tools available)");
         handleStandardLLM(vertx, streamId, streamMessages);
       }
     });

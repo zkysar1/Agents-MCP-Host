@@ -40,32 +40,25 @@ public class OracleToolsClientVerticle extends AbstractVerticle {
     
     @Override
     public void start(Promise<Void> startPromise) {
-        // Wait for the corresponding server to be ready
-        vertx.eventBus().consumer("mcp.server.ready", msg -> {
-            JsonObject serverInfo = (JsonObject) msg.body();
-            String serverName = serverInfo.getString("server");
-            
-            // Check if this is our server
-            if ("oracle-tools".equals(serverName)) {
-                System.out.println("[OracleToolsClient] Server oracle-tools is ready, initializing client...");
-                
-                // Register as MCP client
-                registerWithMcpHost();
-                
-                // Register handler for tool calls from McpHostManager
-                vertx.eventBus().consumer("mcp.client." + clientName + ".call", this::handleToolCall);
-                
-                // Publish tool discovery
-                publishToolDiscovery();
-                
-                // Log through event bus to LoggerVerticle
-                vertx.eventBus().publish("log", 
-                    "OracleToolsClient started as MCP client,1,OracleToolsClient,StartUp,MCP");
-                
-                System.out.println("[OracleToolsClient] Started as MCP client for oracle-tools");
-                System.out.println("[OracleToolsClient] Bridging " + toolNames.length + " tools to MCP infrastructure");
-            }
-        });
+        // Initialize immediately - server is guaranteed to be ready since McpHostManager
+        // deploys all servers before clients
+        System.out.println("[OracleToolsClient] Initializing client for oracle-tools server...");
+        
+        // Register as MCP client
+        registerWithMcpHost();
+        
+        // Register handler for tool calls from McpHostManager
+        vertx.eventBus().consumer("mcp.client." + clientName + ".call", this::handleToolCall);
+        
+        // Publish tool discovery
+        publishToolDiscovery();
+        
+        // Log through event bus to LoggerVerticle
+        vertx.eventBus().publish("log", 
+            "OracleToolsClient started as MCP client,1,OracleToolsClient,StartUp,MCP");
+        
+        System.out.println("[OracleToolsClient] Started as MCP client for oracle-tools");
+        System.out.println("[OracleToolsClient] Bridging " + toolNames.length + " tools to MCP infrastructure");
         
         startPromise.complete();
     }
