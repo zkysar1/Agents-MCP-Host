@@ -21,20 +21,10 @@
         "port": 8089,
         "description": "File system operations with roots/resources"
       },
-      "oracle_metadata": {
-        "enabled": true,
-        "port": 8081,
-        "description": "Oracle metadata and structure navigation"
-      },
       "oracle": {
         "enabled": true,
-        "port": 8085,
-        "description": "Oracle database operations with metadata and query tools"
-      },
-      "oracle-tools": {
-        "enabled": true,
         "port": 8086,
-        "description": "Oracle tools exposed as individual MCP capabilities for orchestration"
+        "description": "Unified Oracle MCP server with 24 comprehensive tools for database operations, metadata, and orchestration"
       }
     },
     "localServers": {
@@ -76,13 +66,8 @@
     },
     "oracle": {
       "enabled": true,
-      "connects": ["oracle", "oracle_metadata"],
-      "description": "Connects to Oracle servers"
-    },
-    "oracle-tools": {
-      "enabled": true,
-      "connects": ["oracle-tools"],
-      "description": "Client bridge for oracle-tools server exposing 11 capabilities"
+      "connects": ["oracle"],
+      "description": "MCP client for Oracle server - connects via HTTP to port 8086"
     },
     "local": {
       "enabled": false,

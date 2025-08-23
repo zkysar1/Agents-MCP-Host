@@ -1,11 +1,11 @@
 package AgentsMCPHost;
 
-import AgentsMCPHost.hostAPI.*;
-import AgentsMCPHost.mcp.host.McpHostManagerVerticle;
-import AgentsMCPHost.mcp.orchestration.OracleOrchestrationStrategy;
-import AgentsMCPHost.mcp.orchestration.ToolSelectionVerticle;
-import AgentsMCPHost.mcp.servers.OracleToolsServerVerticle;
-import AgentsMCPHost.services.LlmAPIService;
+import AgentsMCPHost.api.*;
+import AgentsMCPHost.mcp.core.McpHostManager;
+import AgentsMCPHost.mcp.servers.oracle.orchestration.OracleOrchestrationStrategy;
+import AgentsMCPHost.mcp.core.orchestration.ToolSelection;
+import AgentsMCPHost.llm.LlmAPIService;
+import AgentsMCPHost.logging.Logger;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.json.JsonObject;
@@ -40,15 +40,20 @@ public class Driver {
     // Set up event listeners for component readiness
     setupReadinessListeners();
     
+    // Deploy verticles directly - no pre-warming needed
+    deployVerticles();
+  }
+  
+  private void deployVerticles() {
     // Deploy core verticles
-    setLoggerVerticle();
-    setHostAPIVerticle();
-    setHealthVerticle();
-    setStatusVerticle();
-    setConversationVerticle();
+    setLogger();
+    setHostAPI();
+    setHealth();
+    setStatus();
+    setConversation();
     
     // Deploy unified tool selection (must be before conversation processing)
-    setToolSelectionVerticle();
+    setToolSelection();
     
     // Initialize services
     setLlmAPIService();
@@ -105,8 +110,8 @@ public class Driver {
     }
   }
 
-  private void setLoggerVerticle() {
-    vertx.deployVerticle(new LoggerVerticle(), res -> {
+  private void setLogger() {
+    vertx.deployVerticle(new Logger(), res -> {
       if (res.succeeded()) {
         System.out.println("Logger Verticle initialized successfully");
         if (logLevel >= 3) vertx.eventBus().publish("log", "Logger deployed,3,Driver,StartUp,System");
@@ -116,9 +121,9 @@ public class Driver {
     });
   }
 
-  private void setHostAPIVerticle() {
-    // Deploy the host API verticle
-    vertx.deployVerticle(new HostAPIVerticle(), res -> {
+  private void setHostAPI() {
+    // Deploy the host API
+    vertx.deployVerticle(new HostAPI(), res -> {
       if (res.succeeded()) {
         System.out.println("HostAPI Verticle initialized successfully");
         if (logLevel >= 3) vertx.eventBus().publish("log", "Host API verticle deployed,3,Driver,StartUp,System");
@@ -128,9 +133,9 @@ public class Driver {
     });
   }
   
-  private void setHealthVerticle() {
-    // Deploy the health endpoint verticle
-    vertx.deployVerticle(new HealthVerticle(), res -> {
+  private void setHealth() {
+    // Deploy the health endpoint
+    vertx.deployVerticle(new Health(), res -> {
       if (res.succeeded()) {
         System.out.println("Health Verticle initialized successfully");
         if (logLevel >= 3) vertx.eventBus().publish("log", "Health verticle deployed,3,Driver,StartUp,System");
@@ -140,9 +145,9 @@ public class Driver {
     });
   }
   
-  private void setStatusVerticle() {
-    // Deploy the status endpoint verticle
-    vertx.deployVerticle(new StatusVerticle(), res -> {
+  private void setStatus() {
+    // Deploy the status endpoint
+    vertx.deployVerticle(new Status(), res -> {
       if (res.succeeded()) {
         System.out.println("Status Verticle initialized successfully");
         if (logLevel >= 3) vertx.eventBus().publish("log", "Status verticle deployed,3,Driver,StartUp,System");
@@ -152,9 +157,9 @@ public class Driver {
     });
   }
   
-  private void setConversationVerticle() {
-    // Deploy the unified conversation API verticle with auto MCP tool detection
-    vertx.deployVerticle(new ConversationVerticle(), res -> {
+  private void setConversation() {
+    // Deploy the unified conversation API with auto MCP tool detection
+    vertx.deployVerticle(new Conversation(), res -> {
       if (res.succeeded()) {
         System.out.println("Conversation Verticle initialized successfully");
         if (logLevel >= 3) vertx.eventBus().publish("log", "Unified conversation verticle with MCP deployed,3,Driver,StartUp,System");
@@ -164,9 +169,9 @@ public class Driver {
     });
   }
   
-  private void setToolSelectionVerticle() {
-    // Deploy the unified tool selection verticle for intelligent tool routing
-    vertx.deployVerticle(new ToolSelectionVerticle(), res -> {
+  private void setToolSelection() {
+    // Deploy the unified tool selection for intelligent tool routing
+    vertx.deployVerticle(new ToolSelection(), res -> {
       if (res.succeeded()) {
         System.out.println("Tool Selection Verticle initialized successfully");
         System.out.println("Unified tool selection with LLM validation enabled");
@@ -195,43 +200,13 @@ public class Driver {
     // Deploy MCP Host Manager which orchestrates all MCP servers and clients
     System.out.println("Deploying MCP infrastructure...");
     
-    vertx.deployVerticle(new McpHostManagerVerticle(), res -> {
+    vertx.deployVerticle(new McpHostManager(), res -> {
       if (res.succeeded()) {
         System.out.println("MCP Host Manager deployed successfully");
         if (logLevel >= 3) vertx.eventBus().publish("log", "MCP Host Manager deployed,3,Driver,StartUp,MCP");
       } else {
         System.err.println("MCP Host Manager deployment failed: " + res.cause().getMessage());
         System.err.println("MCP tools will not be available");
-      }
-    });
-  }
-  
-  private void setOracleToolsServer() {
-    // Deploy Oracle Tools Server - exposes all capabilities as individual tools
-    System.out.println("Deploying Oracle Tools Server...");
-    
-    vertx.deployVerticle(new OracleToolsServerVerticle(), res -> {
-      if (res.succeeded()) {
-        System.out.println("Oracle Tools Server deployed - all capabilities exposed as tools");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Oracle Tools Server deployed,3,Driver,StartUp,Oracle");
-      } else {
-        System.err.println("Oracle Tools Server deployment failed: " + res.cause().getMessage());
-        System.err.println("Oracle tools will not be available");
-      }
-    });
-  }
-  
-  private void setOracleToolsClient() {
-    // Deploy Oracle Tools Client - bridges oracle-tools to MCP infrastructure
-    System.out.println("Deploying Oracle Tools Client...");
-    
-    vertx.deployVerticle(new AgentsMCPHost.mcp.clients.OracleToolsClientVerticle(), res -> {
-      if (res.succeeded()) {
-        System.out.println("Oracle Tools Client deployed - bridging to MCP infrastructure");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Oracle Tools Client deployed,3,Driver,StartUp,MCP");
-      } else {
-        System.err.println("Oracle Tools Client deployment failed: " + res.cause().getMessage());
-        System.err.println("Oracle tools will not be accessible via MCP");
       }
     });
   }

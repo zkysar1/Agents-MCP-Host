@@ -12,14 +12,14 @@
         {
           "step": 1,
           "name": "Analyze Query",
-          "tool": "oracle-tools__analyze_query",
+          "tool": "oracle__analyze_query",
           "description": "Extract intent and entities from natural language",
           "pass_to_next": ["analysis"]
         },
         {
           "step": 2,
           "name": "Match Schema",
-          "tool": "oracle-tools__match_schema",
+          "tool": "oracle__match_schema",
           "description": "Find relevant tables and columns",
           "use_from_previous": ["analysis.entities"],
           "pass_to_next": ["schema_matches"]
@@ -27,7 +27,7 @@
         {
           "step": 3,
           "name": "Discover Data",
-          "tool": "oracle-tools__discover_sample_data",
+          "tool": "oracle__discover_sample_data",
           "description": "Get sample data for context",
           "use_from_previous": ["schema_matches.tables"],
           "optional": true,
@@ -36,7 +36,7 @@
         {
           "step": 4,
           "name": "Generate SQL",
-          "tool": "oracle-tools__generate_sql",
+          "tool": "oracle__generate_sql",
           "description": "Create SQL using LLM with schema context",
           "use_from_previous": ["original_query", "schema_matches", "sample_data"],
           "pass_to_next": ["generated_sql"]
@@ -44,7 +44,7 @@
         {
           "step": 5,
           "name": "Optimize SQL",
-          "tool": "oracle-tools__optimize_sql",
+          "tool": "oracle__optimize_sql",
           "description": "Optimize the generated query",
           "use_from_previous": ["generated_sql"],
           "optional": true,
@@ -53,7 +53,7 @@
         {
           "step": 6,
           "name": "Execute Query",
-          "tool": "oracle-tools__execute_query",
+          "tool": "oracle__execute_query",
           "description": "Run the SQL query",
           "use_from_previous": ["optimized_sql", "generated_sql"],
           "pass_to_next": ["results"]
@@ -61,7 +61,7 @@
         {
           "step": 7,
           "name": "Format Results",
-          "tool": "oracle-tools__format_results",
+          "tool": "oracle__format_results",
           "description": "Convert to natural language response",
           "use_from_previous": ["original_query", "results", "generated_sql"],
           "final": true
@@ -82,7 +82,7 @@
         {
           "step": 1,
           "name": "Validate SQL",
-          "tool": "oracle-tools__validate_sql",
+          "tool": "oracle__validate_sql",
           "description": "Check SQL syntax",
           "optional": true,
           "pass_to_next": ["validation"]
@@ -90,14 +90,14 @@
         {
           "step": 2,
           "name": "Execute Query",
-          "tool": "oracle-tools__execute_query",
+          "tool": "oracle__execute_query",
           "description": "Run the SQL query",
           "pass_to_next": ["results"]
         },
         {
           "step": 3,
           "name": "Format Results",
-          "tool": "oracle-tools__format_results",
+          "tool": "oracle__format_results",
           "description": "Convert to user-friendly format",
           "use_from_previous": ["original_query", "results"],
           "final": true
@@ -124,7 +124,7 @@
         {
           "step": 2,
           "name": "Discover Enums",
-          "tool": "oracle-tools__discover_enums",
+          "tool": "oracle__discover_enums",
           "description": "Find enumeration mappings",
           "parallel": true,
           "pass_to_next": ["enums"]
@@ -132,7 +132,7 @@
         {
           "step": 3,
           "name": "Sample Data",
-          "tool": "oracle-tools__discover_sample_data",
+          "tool": "oracle__discover_sample_data",
           "description": "Get sample data from key tables",
           "use_from_previous": ["tables"],
           "limit_tables": 5,
