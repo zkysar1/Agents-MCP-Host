@@ -19,6 +19,7 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.core.eventbus.Message;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
+import AgentsMCPHost.streaming.StreamingEventPublisher;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -462,11 +463,20 @@ public class McpHostManager extends AbstractVerticle {
             originalToolName = toolName.substring(toolName.indexOf("__") + 2);
         }
         
-        // Make toolName final for lambda
+        // Make toolName and clientId final for lambda
         final String finalToolName = toolName;
+        final String finalClientId = clientId;
         
         // Publish tool routing event if streaming
         if (streamId != null) {
+            StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+            publisher.publishProgress("tool_routing", "Routing tool call to MCP client",
+                new JsonObject()
+                    .put("phase", "tool_routing")
+                    .put("tool", finalToolName)
+                    .put("client", clientId)
+                    .put("status", "routing"));
+            
             vertx.eventBus().publish("mcp.tool.routing",
                 new JsonObject()
                     .put("streamId", streamId)
@@ -478,7 +488,8 @@ public class McpHostManager extends AbstractVerticle {
         // Update request with original tool name for client
         JsonObject clientRequest = request.copy()
             .put("tool", originalToolName)  // Use original name for client
-            .put("_prefixedName", finalToolName);  // Keep prefixed name for reference
+            .put("_prefixedName", finalToolName)  // Keep prefixed name for reference
+            .put("requestTime", String.valueOf(System.currentTimeMillis()));  // Track timing
         
         // Forward to appropriate client via event bus
         vertx.eventBus().request("mcp.client." + clientId + ".call", clientRequest)
@@ -490,6 +501,14 @@ public class McpHostManager extends AbstractVerticle {
                 
                 // Publish tool completion event if streaming
                 if (streamId != null) {
+                    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+                    publisher.publishProgress("tool_completed", "Tool execution completed",
+                        new JsonObject()
+                            .put("phase", "tool_completed")
+                            .put("tool", finalToolName)
+                            .put("client", finalClientId)
+                            .put("status", "completed"));
+                    
                     vertx.eventBus().publish("mcp.tool.completed",
                         new JsonObject()
                             .put("streamId", streamId)

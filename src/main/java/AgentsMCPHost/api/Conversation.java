@@ -12,6 +12,8 @@ import io.vertx.core.eventbus.Message;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import java.util.UUID;
+import AgentsMCPHost.conversation.InterruptManager;
+import AgentsMCPHost.streaming.StreamingEventPublisher;
 
 /**
  * Unified conversation verticle with intelligent tool selection.
@@ -100,6 +102,11 @@ public class Conversation extends AbstractVerticle {
   public static void setRouter(Router parentRouter) {
     // Conversation API endpoint - OpenAI-compatible format
     parentRouter.post("/host/v1/conversations").handler(Conversation::handleConversation);
+    
+    // User intervention endpoints
+    parentRouter.post("/host/v1/conversations/:streamId/interrupt").handler(Conversation::handleInterrupt);
+    parentRouter.post("/host/v1/conversations/:streamId/feedback").handler(Conversation::handleFeedback);
+    parentRouter.get("/host/v1/conversations/:streamId/status").handler(Conversation::handleStatus);
   }
   
   /**
@@ -176,6 +183,16 @@ public class Conversation extends AbstractVerticle {
    * Handle conversation with unified tool selection
    */
   private static void handleWithUnifiedSelection(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
+    // Create streaming event publisher
+    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+    
+    // Publish tool selection phase
+    publisher.publishProgress("tool_selection", "Analyzing query for tool requirements", 
+      new JsonObject()
+        .put("phase", "tool_selection")
+        .put("userQuery", userMessage)
+        .put("strategy", "unified"));
+    
     // Request tool selection analysis
     JsonObject selectionRequest = new JsonObject()
       .put("query", userMessage)
@@ -186,6 +203,14 @@ public class Conversation extends AbstractVerticle {
       .onSuccess(reply -> {
         JsonObject decision = reply.body();
         String strategy = decision.getString("strategy");
+        
+        // Publish tool selection result
+        publisher.publishProgress("tool_selection", "Tool selection completed",
+          new JsonObject()
+            .put("phase", "tool_selection")
+            .put("strategy", strategy)
+            .put("selectedTools", decision.getJsonArray("additionalTools", new JsonArray()))
+            .put("primaryTool", decision.getString("primaryTool", "none")));
         
         // Route based on unified decision - beautifully simple!
         System.out.println("[Conversation] Tool selection decision: " + strategy);
@@ -229,10 +254,27 @@ public class Conversation extends AbstractVerticle {
     
     System.out.println("[Conversation] Executing single tool: " + tool);
     
+    // Create streaming event publisher
+    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+    
     // Notify tool call start if streaming
     if (streamId != null) {
       vertx.eventBus().publish("conversation." + streamId + ".tool.start", 
         new JsonObject().put("tool", tool));
+      
+      // Publish tool execution start
+      publisher.publishProgress("tool_execution", "Starting tool: " + tool,
+        new JsonObject()
+          .put("phase", "tool_execution")
+          .put("tool", tool)
+          .put("status", "starting"));
+    }
+    
+    // Check if interrupted before proceeding
+    InterruptManager interruptManager = new InterruptManager(vertx);
+    if (interruptManager.isInterrupted(streamId)) {
+      publisher.publishExecutionPaused("User requested interrupt");
+      return;
     }
     
     // Create tool arguments based on the tool and message
@@ -253,6 +295,15 @@ public class Conversation extends AbstractVerticle {
         
         // Notify tool completion if streaming
         if (streamId != null) {
+          // Publish tool completion with detailed results
+          StreamingEventPublisher completionPublisher = new StreamingEventPublisher(vertx, streamId);
+          completionPublisher.publishProgress("tool_execution", "Tool completed: " + tool,
+            new JsonObject()
+              .put("phase", "tool_execution")
+              .put("tool", tool)
+              .put("status", "completed")
+              .put("resultPreview", toolResult.encodePrettily().substring(0, Math.min(200, toolResult.encodePrettily().length()))));
+          
           vertx.eventBus().publish("conversation." + streamId + ".tool.complete", 
             new JsonObject()
               .put("tool", tool)
@@ -430,9 +481,19 @@ public class Conversation extends AbstractVerticle {
    * Handle queries with Oracle Agent Loop for intelligent SQL generation - streaming version
    */
   private static void handleWithOracleAgent(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
+    // Create streaming event publisher
+    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+    
     // Notify starting Oracle Agent
     vertx.eventBus().publish("conversation." + streamId + ".tool.start", 
       new JsonObject().put("tool", "oracle_agent").put("message", "Starting Oracle intelligent query processing..."));
+    
+    // Publish Oracle agent start
+    publisher.publishProgress("oracle_agent", "Starting Oracle intelligent query processing",
+      new JsonObject()
+        .put("phase", "oracle_agent")
+        .put("status", "initializing")
+        .put("query", userMessage));
     
     // Create request for Oracle Agent Loop with streamId
     JsonObject agentRequest = new JsonObject()
@@ -488,7 +549,14 @@ public class Conversation extends AbstractVerticle {
       return;
     }
     
-    Future<JsonObject> llmFuture = llmService.chatCompletion(messages);
+    // Create streaming event publisher
+    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+    publisher.publishProgress("llm", "Sending request to LLM",
+      new JsonObject()
+        .put("phase", "llm")
+        .put("status", "sending"));
+    
+    Future<JsonObject> llmFuture = llmService.chatCompletion(messages, streamId);
     
     llmFuture.onSuccess(response -> {
       // Extract content from OpenAI response
@@ -687,6 +755,106 @@ public class Conversation extends AbstractVerticle {
     
     // Return what we have (may be empty on first call)
     return tools;
+  }
+  
+  /**
+   * Handle interrupt request
+   * @param ctx The routing context
+   */
+  private static void handleInterrupt(RoutingContext ctx) {
+    String streamId = ctx.pathParam("streamId");
+    JsonObject body = ctx.body().asJsonObject();
+    String reason = body != null ? body.getString("reason", "user_requested") : "user_requested";
+    
+    // Create interrupt manager instance
+    InterruptManager interruptManager = new InterruptManager(ctx.vertx());
+    interruptManager.interrupt(streamId, reason);
+    
+    // Publish interrupt event
+    ctx.vertx().eventBus().publish("conversation." + streamId + ".interrupt", 
+      new JsonObject()
+        .put("streamId", streamId)
+        .put("reason", reason)
+        .put("timestamp", System.currentTimeMillis()));
+    
+    // Send response
+    ctx.response()
+      .putHeader("Content-Type", "application/json")
+      .end(new JsonObject()
+        .put("success", true)
+        .put("streamId", streamId)
+        .put("message", "Interrupt request received")
+        .encode());
+  }
+  
+  /**
+   * Handle user feedback
+   * @param ctx The routing context
+   */
+  private static void handleFeedback(RoutingContext ctx) {
+    String streamId = ctx.pathParam("streamId");
+    JsonObject feedback = ctx.body().asJsonObject();
+    
+    if (feedback == null || !feedback.containsKey("action")) {
+      sendError(ctx, 400, "Feedback must include 'action' field");
+      return;
+    }
+    
+    // Create interrupt manager instance
+    InterruptManager interruptManager = new InterruptManager(ctx.vertx());
+    
+    // Store feedback
+    interruptManager.storeFeedback(streamId, feedback);
+    
+    // Update state based on action
+    String action = feedback.getString("action");
+    switch (action) {
+      case "continue":
+        interruptManager.clearInterrupt(streamId);
+        interruptManager.setState(streamId, InterruptManager.ConversationState.EXECUTING);
+        break;
+      case "modify":
+        interruptManager.setState(streamId, InterruptManager.ConversationState.PLANNING);
+        break;
+      case "cancel":
+        interruptManager.setState(streamId, InterruptManager.ConversationState.CANCELLED);
+        break;
+    }
+    
+    // Publish feedback event
+    ctx.vertx().eventBus().publish("conversation." + streamId + ".feedback", feedback);
+    
+    // Send response
+    ctx.response()
+      .putHeader("Content-Type", "application/json")
+      .end(new JsonObject()
+        .put("success", true)
+        .put("streamId", streamId)
+        .put("action", action)
+        .encode());
+  }
+  
+  /**
+   * Get conversation status
+   * @param ctx The routing context
+   */
+  private static void handleStatus(RoutingContext ctx) {
+    String streamId = ctx.pathParam("streamId");
+    
+    // Create interrupt manager instance
+    InterruptManager interruptManager = new InterruptManager(ctx.vertx());
+    
+    InterruptManager.ConversationState state = interruptManager.getState(streamId);
+    boolean interrupted = interruptManager.isInterrupted(streamId);
+    
+    // Send status response
+    ctx.response()
+      .putHeader("Content-Type", "application/json")
+      .end(new JsonObject()
+        .put("streamId", streamId)
+        .put("state", state.name())
+        .put("interrupted", interrupted)
+        .encode());
   }
   
 }

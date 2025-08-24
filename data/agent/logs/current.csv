@@ -1,68 +1,62 @@
 Message,Level,Class,Category,Character,SequenceReceived,EpochTimeMillis
-Oracle Orchestration deployed,3,Driver,StartUp,Orchestration,1,1755970291622
-Tool Selection Verticle deployed,3,Driver,StartUp,System,2,1755970291641
-LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System,3,1755970291810
-Deployed OracleServer,2,McpHostManager,Deployment,MCP,4,1755970291827
-OracleClient discovered 24 tools via HTTP,2,OracleClient,Discovery,MCP,5,1755970297253
-OracleClient ready with HTTP transport,2,OracleClient,Registration,MCP,6,1755970297275
-OracleClient ready with 24 tools,1,OracleClient,StartUp,MCP,7,1755970297275
-Deployed OracleClient,2,McpHostManager,Deployment,MCP,8,1755970297275
-MCP Host Manager deployed,3,Driver,StartUp,MCP,9,1755970297275
-McpHostManager received tools.discovered from oracle with 24 tools,2,McpHostManager,Discovery,MCP,10,1755970297275
-McpHostManager received client.ready from oracle with 24 tools,2,McpHostManager,Registration,MCP,11,1755970297276
-MCP infrastructure ready,1,McpHostManager,StartUp,MCP,12,1755970297276
-ZAK-Agent startup complete,0,Driver,StartUp,System,13,1755970297303
-Host API server started on HTTP port 8080 - Access at http://localhost:8080,0,HostAPIVerticle,StartUp,System,14,1755970297323
-OpenAI API call successful,2,LlmAPIService,API,Success,15,1755970351202
-OpenAI API call successful,2,LlmAPIService,API,Success,16,1755970353565
-executeQuery missing sql argument,0,Oracle,Error,Validation,17,1755970353574
-Tool execute_query completed via HTTP,2,OracleClient,Success,Tool,18,1755970353576
-Failed to initialize Oracle connection: UCP-0: Unable to start the Universal Connection Pool,0,OracleConnectionManager,StartUp,Database,19,1755970357770
-Failed to initialize Oracle connection: UCP-0: Unable to start the Universal Connection Pool,0,OracleConnectionManager,StartUp,Database,20,1755970357771
-OpenAI API call successful,2,LlmAPIService,API,Success,21,1755970377572
-OpenAI API call successful,2,LlmAPIService,API,Success,22,1755970380042
-Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool,23,1755970380061
-Args for Analyze Query: {   "query" : "How many pending orders are there in California?  " },3,OrchestrationStrategy,Arguments,Tool,24,1755970380062
-Orchestration routing oracle__analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool,25,1755970380062
-OpenAI API call successful,2,LlmAPIService,API,Success,26,1755970381540
-Tool analyze_query completed via HTTP,2,OracleClient,Success,Tool,27,1755970381542
-Tool oracle__analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool,28,1755970381545
-Step Analyze Query passing analysis,3,OrchestrationStrategy,DataFlow,Tool,29,1755970381545
-Building args for Match Schema step,3,OrchestrationStrategy,Arguments,Tool,30,1755970381545
-Args for Match Schema: {   "tokens" : [ "orders" ] },3,OrchestrationStrategy,Arguments,Tool,31,1755970381545
-Orchestration routing oracle__match_schema via MCP,3,OrchestrationStrategy,Routing,Tool,32,1755970381546
-Tool match_schema completed via HTTP,2,OracleClient,Success,Tool,33,1755970381559
-Tool oracle__match_schema routed successfully,2,OrchestrationStrategy,Success,Tool,34,1755970381562
-Step Match Schema passing schema_matches,3,OrchestrationStrategy,DataFlow,Tool,35,1755970381562
-Building args for Discover Data step,3,OrchestrationStrategy,Arguments,Tool,36,1755970381563
-Args for Discover Data: {   "table_names" : [ ] },3,OrchestrationStrategy,Arguments,Tool,37,1755970381563
-Orchestration routing oracle__discover_sample_data via MCP,3,OrchestrationStrategy,Routing,Tool,38,1755970381563
-Tool discover_sample_data completed via HTTP,2,OracleClient,Success,Tool,39,1755970381568
-Tool oracle__discover_sample_data routed successfully,2,OrchestrationStrategy,Success,Tool,40,1755970381573
-Step Discover Data passing sample_data,3,OrchestrationStrategy,DataFlow,Tool,41,1755970381573
-Building args for Generate SQL step,3,OrchestrationStrategy,Arguments,Tool,42,1755970381576
-Args for Generate SQL: {   "query" : "How many pending orders are there in California?  ",   "schema_matches" : {     "tables" : [ ],     "columns" : [ ],     "confidence" : 0.0,     "timed_out" : false   },   "samp,3,OrchestrationStrategy,Arguments,Tool,43,1755970381576
-Orchestration routing oracle__generate_sql via MCP,3,OrchestrationStrategy,Routing,Tool,44,1755970381577
-OpenAI API call successful,2,LlmAPIService,API,Success,45,1755970382899
-Tool generate_sql completed via HTTP,2,OracleClient,Success,Tool,46,1755970382900
-Tool oracle__generate_sql routed successfully,2,OrchestrationStrategy,Success,Tool,47,1755970382902
-Step Generate SQL passing generated_sql,3,OrchestrationStrategy,DataFlow,Tool,48,1755970382902
-Building args for Optimize SQL step,3,OrchestrationStrategy,Arguments,Tool,49,1755970382903
-Args for Optimize SQL: {   "generated_sql" : {     "sql" : "SELECT COUNT(*) \nFROM ORDERS O \nJOIN CUSTOMERS C ON O.CUSTOMER_ID = C.CUSTOMER_ID \nWHERE O.ORDER_STATUS_ENUM = 'PENDING' \nAND C.CITY IN ('San Francisco', 'Lo,3,OrchestrationStrategy,Arguments,Tool,50,1755970382903
-Orchestration routing oracle__optimize_sql via MCP,3,OrchestrationStrategy,Routing,Tool,51,1755970382903
-Tool optimize_sql completed via HTTP,2,OracleClient,Success,Tool,52,1755970382910
-Tool oracle__optimize_sql routed successfully,2,OrchestrationStrategy,Success,Tool,53,1755970382914
-Step Optimize SQL passing optimized_sql,3,OrchestrationStrategy,DataFlow,Tool,54,1755970382914
-Building args for Execute Query step,3,OrchestrationStrategy,Arguments,Tool,55,1755970382918
-Args for Execute Query: {   "optimized_sql" : "SELECT COUNT(*) \nFROM ORDERS O \nJOIN CUSTOMERS C ON O.CUSTOMER_ID = C.CUSTOMER_ID \nWHERE O.ORDER_STATUS_ENUM = 'PENDING' \nAND C.CITY IN ('San Francisco', 'Los Angeles', 'Sa,3,OrchestrationStrategy,Arguments,Tool,56,1755970382919
-Orchestration routing oracle__execute_query via MCP,3,OrchestrationStrategy,Routing,Tool,57,1755970382919
-Tool execute_query completed via HTTP,2,OracleClient,Success,Tool,58,1755970382925
-Tool oracle__execute_query routed successfully,2,OrchestrationStrategy,Success,Tool,59,1755970382926
-Step Execute Query passing results,3,OrchestrationStrategy,DataFlow,Tool,60,1755970382926
-Building args for Format Results step,3,OrchestrationStrategy,Arguments,Tool,61,1755970382927
-Args for Format Results: {   "query" : "How many pending orders are there in California?  ",   "results" : {     "error" : "No result in response",     "_client" : "oracle",     "_transport" : "HTTP",     "_routedBy" : ,3,OrchestrationStrategy,Arguments,Tool,62,1755970382927
-Orchestration routing oracle__format_results via MCP,3,OrchestrationStrategy,Routing,Tool,63,1755970382927
-OpenAI API call successful,2,LlmAPIService,API,Success,64,1755970383353
-Tool format_results completed via HTTP,2,OracleClient,Success,Tool,65,1755970383354
-Tool oracle__format_results routed successfully,2,OrchestrationStrategy,Success,Tool,66,1755970383356
-Conversation final response sent for stream-8dee81f3-640d-4656-b358-69828440f537,2,Conversation,Response,SSE,67,1755970383357
+Oracle Orchestration deployed,3,Driver,StartUp,Orchestration,1,1756029708300
+Tool Selection Verticle deployed,3,Driver,StartUp,System,2,1756029708342
+OPENAI_API_KEY not configured - LLM service disabled,0,LlmAPIService,Configuration,Error,3,1756029709037
+Deployed OracleServer,2,McpHostManager,Deployment,MCP,4,1756029709080
+OracleClient discovered 24 tools via HTTP,2,OracleClient,Discovery,MCP,5,1756029715420
+OracleClient ready with HTTP transport,2,OracleClient,Registration,MCP,6,1756029715441
+OracleClient ready with 24 tools,1,OracleClient,StartUp,MCP,7,1756029715442
+Deployed OracleClient,2,McpHostManager,Deployment,MCP,8,1756029715443
+MCP Host Manager deployed,3,Driver,StartUp,MCP,9,1756029715443
+McpHostManager received tools.discovered from oracle with 24 tools,2,McpHostManager,Discovery,MCP,10,1756029715444
+McpHostManager received client.ready from oracle with 24 tools,2,McpHostManager,Registration,MCP,11,1756029715447
+MCP infrastructure ready,1,McpHostManager,StartUp,MCP,12,1756029715449
+ZAK-Agent startup complete,0,Driver,StartUp,System,13,1756029715458
+Host API server started on HTTP port 8080 - Access at http://localhost:8080,0,HostAPIVerticle,StartUp,System,14,1756029715481
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,15,1756029716676
+Failed to initialize Oracle connection: UCP-0: Unable to start the Universal Connection Pool,0,OracleConnectionManager,StartUp,Database,16,1756029716683
+Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool,17,1756029767998
+Args for Analyze Query: {   "query" : "What is the result of 42 + 58?" },3,OrchestrationStrategy,Arguments,Tool,18,1756029767999
+Orchestration routing oracle__analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool,19,1756029814865
+Tool analyze_query completed via HTTP,2,OracleClient,Success,Tool,20,1756029814893
+Tool oracle__analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool,21,1756029814906
+Step Analyze Query passing analysis,3,OrchestrationStrategy,DataFlow,Tool,22,1756029814909
+Building args for Match Schema step,3,OrchestrationStrategy,Arguments,Tool,23,1756029814912
+Args for Match Schema: {   "tokens" : [ ] },3,OrchestrationStrategy,Arguments,Tool,24,1756029814913
+Orchestration routing oracle__match_schema via MCP,3,OrchestrationStrategy,Routing,Tool,25,1756029814913
+matchSchema missing tokens/entities,0,Oracle,Error,Validation,26,1756029814927
+Tool match_schema completed via HTTP,2,OracleClient,Success,Tool,27,1756029814932
+Tool oracle__match_schema routed successfully,2,OrchestrationStrategy,Success,Tool,28,1756029814951
+Step Match Schema passing schema_matches,3,OrchestrationStrategy,DataFlow,Tool,29,1756029814952
+Building args for Discover Data step,3,OrchestrationStrategy,Arguments,Tool,30,1756029768090
+Args for Discover Data: { },3,OrchestrationStrategy,Arguments,Tool,31,1756029768092
+Orchestration routing oracle__discover_sample_data via MCP,3,OrchestrationStrategy,Routing,Tool,32,1756029768093
+discoverSampleData missing table_names,0,Oracle,Error,Validation,33,1756029768107
+Tool discover_sample_data completed via HTTP,2,OracleClient,Success,Tool,34,1756029768111
+Tool oracle__discover_sample_data routed successfully,2,OrchestrationStrategy,Success,Tool,35,1756029768126
+Step Discover Data passing sample_data,3,OrchestrationStrategy,DataFlow,Tool,36,1756029768127
+Building args for Generate SQL step,3,OrchestrationStrategy,Arguments,Tool,37,1756029768130
+Args for Generate SQL: {   "query" : "What is the result of 42 + 58?",   "schema_matches" : {     "error" : "No result in response",     "_client" : "oracle",     "_transport" : "HTTP",     "_routedBy" : "McpHostManager",  ,3,OrchestrationStrategy,Arguments,Tool,38,1756029768130
+Orchestration routing oracle__generate_sql via MCP,3,OrchestrationStrategy,Routing,Tool,39,1756029768131
+Tool generate_sql completed via HTTP,2,OracleClient,Success,Tool,40,1756029768150
+Tool oracle__generate_sql routed successfully,2,OrchestrationStrategy,Success,Tool,41,1756029768162
+Step Generate SQL passing generated_sql,3,OrchestrationStrategy,DataFlow,Tool,42,1756029768162
+Building args for Optimize SQL step,3,OrchestrationStrategy,Arguments,Tool,43,1756029768165
+Args for Optimize SQL: {   "generated_sql" : {     "error" : "No result in response",     "_client" : "oracle",     "_transport" : "HTTP",     "_routedBy" : "McpHostManager",     "_toolName" : "oracle__generate_sql"   } },3,OrchestrationStrategy,Arguments,Tool,44,1756029768166
+Orchestration routing oracle__optimize_sql via MCP,3,OrchestrationStrategy,Routing,Tool,45,1756029768166
+Tool optimize_sql completed via HTTP,2,OracleClient,Success,Tool,46,1756029768185
+Tool oracle__optimize_sql routed successfully,2,OrchestrationStrategy,Success,Tool,47,1756029768206
+Step Optimize SQL passing optimized_sql,3,OrchestrationStrategy,DataFlow,Tool,48,1756029768206
+Building args for Execute Query step,3,OrchestrationStrategy,Arguments,Tool,49,1756029768210
+Args for Execute Query: {   "optimized_sql" : {     "optimized_sql" : null,     "error" : "Could not optimize: Query execution failed: UCP-0: Unable to start the Universal Connection Pool"   },   "generated_sql" : {     "err,3,OrchestrationStrategy,Arguments,Tool,50,1756029768211
+Orchestration routing oracle__execute_query via MCP,3,OrchestrationStrategy,Routing,Tool,51,1756029768212
+executeQuery missing sql argument,0,Oracle,Error,Validation,52,1756029768223
+Tool execute_query completed via HTTP,2,OracleClient,Success,Tool,53,1756029768231
+Tool oracle__execute_query routed successfully,2,OrchestrationStrategy,Success,Tool,54,1756029768242
+Step Execute Query passing results,3,OrchestrationStrategy,DataFlow,Tool,55,1756029768242
+Building args for Format Results step,3,OrchestrationStrategy,Arguments,Tool,56,1756029768245
+Args for Format Results: {   "query" : "What is the result of 42 + 58?",   "results" : {     "error" : "No result in response",     "_client" : "oracle",     "_transport" : "HTTP",     "_routedBy" : "McpHostManager",     "_to,3,OrchestrationStrategy,Arguments,Tool,57,1756029768246
+Orchestration routing oracle__format_results via MCP,3,OrchestrationStrategy,Routing,Tool,58,1756029768246
+Tool format_results completed via HTTP,2,OracleClient,Success,Tool,59,1756029768258
+Tool oracle__format_results routed successfully,2,OrchestrationStrategy,Success,Tool,60,1756029768266
+Conversation final response sent for stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d,2,Conversation,Response,SSE,61,1756029768271

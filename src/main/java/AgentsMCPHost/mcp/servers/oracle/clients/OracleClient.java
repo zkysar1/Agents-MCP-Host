@@ -132,6 +132,7 @@ public class OracleClient extends AbstractVerticle {
         JsonObject request = msg.body();
         String toolName = request.getString("tool");
         JsonObject arguments = request.getJsonObject("arguments", new JsonObject());
+        String streamId = request.getString("streamId"); // Extract streamId if present
         
         System.out.println("[OracleClient] Received tool call request: " + toolName);
         
@@ -139,6 +140,11 @@ public class OracleClient extends AbstractVerticle {
         String serverToolName = toolName.startsWith("oracle__") 
             ? toolName.substring("oracle__".length()) 
             : toolName;
+        
+        // Add streamId to arguments if present
+        if (streamId != null) {
+            arguments.put("_streamId", streamId);
+        }
         
         // Call tool via HTTP transport using MCP protocol
         oracleTransport.callTool(serverToolName, arguments)

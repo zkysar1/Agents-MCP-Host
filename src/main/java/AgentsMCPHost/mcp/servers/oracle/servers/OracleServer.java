@@ -1023,6 +1023,7 @@ public class OracleServer extends AbstractVerticle {
      */
     private Future<JsonObject> executeQuery(JsonObject arguments) {
         String sql = arguments.getString("sql");
+        String streamId = arguments.getString("_streamId"); // Extract streamId if present
         
         // Null check and try alternatives
         if (sql == null || sql.trim().isEmpty()) {
@@ -1074,7 +1075,7 @@ public class OracleServer extends AbstractVerticle {
             finalSql = sql;
         }
         
-        return oracleManager.executeQuery(finalSql)
+        return oracleManager.executeQuery(finalSql, streamId)
             .map(results -> new JsonObject()
                 .put("results", results)
                 .put("row_count", results.size())
@@ -1087,7 +1088,7 @@ public class OracleServer extends AbstractVerticle {
                 if (errorMsg != null && errorMsg.contains("ORA-00933") && finalSql.contains(";")) {
                     System.out.println("[Oracle] Detected ORA-00933 with semicolon, retrying without semicolon");
                     String cleanedSql = finalSql.replace(";", "").trim();
-                    return oracleManager.executeQuery(cleanedSql)
+                    return oracleManager.executeQuery(cleanedSql, streamId)
                         .map(results -> new JsonObject()
                             .put("results", results)
                             .put("row_count", results.size())

@@ -1,1 +1,881 @@
-Error: Invalid or corrupt jarfile build/libs/Agents-MCP-Host-1.0.0-fat.jar
+=== ZAK-Agent Starting ===
+Java version: 21.0.8
+Working directory: /mnt/c/Users/Zachary/OneDrive/Zak/SmartNPCs/MCPThink/Agents-MCP-Host
+Data path: ./data
+ZAK Agent path: ./data/agent
+Logger Verticle initialized successfully
+WARNING: OPENAI_API_KEY environment variable not set
+The conversation API will not function without a valid OpenAI API key
+WARNING: OpenAI API service not initialized (missing API key)
+Set OPENAI_API_KEY environment variable to enable LLM responses
+Deploying MCP infrastructure...
+HostAPIVerticle starting (waiting for system ready)...
+Deploying Oracle Orchestration Strategy...
+HostAPI Verticle initialized successfully
+Health Verticle initialized successfully
+Status Verticle initialized successfully
+Conversation Verticle initialized successfully
+[OracleOrchestration] Initialized - coordinating tool calls only
+[OracleOrchestration] No business logic here - all in tools!
+Oracle Orchestration Strategy Ready
+[Driver] Waiting for components - MCP: false, Orchestration: true
+[Orchestration] oracle_full_pipeline strategy initialized
+[Orchestration] Steps: 7
+Oracle Orchestration deployed - pure coordination, no hidden logic
+Loaded tool registry with 8 tool definitions
+ToolSelectionVerticle started - unified tool selection ready
+Tool Selection Verticle initialized successfully
+Unified tool selection with LLM validation enabled
+[LOG] Oracle Orchestration deployed,3,Driver,StartUp,Orchestration
+Loaded MCP configuration from: src/main/resources/mcp-config.json
+Loaded MCP configuration
+[McpHostManager] Registering event bus consumers...
+[McpHostManager] Registered consumer for: mcp.tools.discovered
+[McpHostManager] Registered consumer for: mcp.client.ready
+[McpHostManager] Attempting to deploy: OracleServer
+[LOG] Tool Selection Verticle deployed,3,Driver,StartUp,System
+[WARNING] Using default test password - not for production!
+WARNING: OPENAI_API_KEY environment variable not set
+The conversation API will not function without a valid OpenAI API key
+[LOG] OPENAI_API_KEY not configured - LLM service disabled,0,LlmAPIService,Configuration,Error
+Oracle MCP Server started on port 8086
+Exposing 24 Oracle tools via HTTP
+External applications can connect to http://localhost:8086
+[McpHostManager] Successfully deployed OracleServer [836a1d07-6a12-4c12-9504-98011ca137cb]
+[McpHostManager] Waiting 5 seconds for servers to fully initialize HTTP endpoints...
+[McpHostManager] Server ready: oracle on port 8086
+[McpHostManager] Ready servers: 1/1
+[LOG] Deployed OracleServer,2,McpHostManager,Deployment,MCP
+[McpHostManager] Server initialization wait complete, deploying clients...
+[DEBUG] Oracle client enabled: true
+[DEBUG] Deploying OracleClient...
+[McpHostManager] Attempting to deploy: OracleClient
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "id" : "9b1e1a95-e303-4a78-bf82-ad5e99c1a451",
+  "result" : {
+    "protocolVersion" : "2024-11-05",
+    "serverInfo" : {
+      "name" : "oracle-server",
+      "version" : "1.0.0"
+    },
+    "capabilities" : {
+      "tools" : true,
+      "resources" : false
+    }
+  }
+}
+[OracleClient] Initialized MCP connection to Oracle server
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "id" : "8a8cf034-883d-4d86-a39b-d740c43e6f94",
+  "result" : {
+    "tools" : [ {
+      "name" : "analyze_query",
+      "description" : "Analyze a natural language query to extract intent, entities, and requirements",
+      "category" : "analysis",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "query" : {
+            "type" : "string",
+            "description" : "Natural language query to analyze"
+          },
+          "context" : {
+            "type" : "array",
+            "description" : "Optional conversation history"
+          }
+        },
+        "required" : [ "query" ]
+      }
+    }, {
+      "name" : "match_schema",
+      "description" : "Match query tokens against database schema to find relevant tables and columns",
+      "category" : "analysis",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "tokens" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            },
+            "description" : "Tokens to match against schema"
+          },
+          "limit" : {
+            "type" : "integer",
+            "default" : 5,
+            "description" : "Maximum number of matches to return"
+          }
+        },
+        "required" : [ "tokens" ]
+      }
+    }, {
+      "name" : "discover_enums",
+      "description" : "Discover enumeration tables and their values for business term mapping",
+      "category" : "analysis",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "refresh" : {
+            "type" : "boolean",
+            "default" : false,
+            "description" : "Force refresh of enum cache"
+          }
+        },
+        "required" : [ ]
+      }
+    }, {
+      "name" : "discover_sample_data",
+      "description" : "Get sample data from tables to understand content",
+      "category" : "analysis",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_names" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            },
+            "description" : "Tables to sample"
+          },
+          "limit" : {
+            "type" : "integer",
+            "default" : 5,
+            "description" : "Rows per table"
+          }
+        },
+        "required" : [ "table_names" ]
+      }
+    }, {
+      "name" : "generate_sql",
+      "description" : "Generate SQL from natural language using schema information and LLM",
+      "category" : "generation",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "query" : {
+            "type" : "string",
+            "description" : "Natural language query"
+          },
+          "schema_context" : {
+            "type" : "object",
+            "description" : "Schema matching results"
+          },
+          "discovered_data" : {
+            "type" : "object",
+            "description" : "Sample data context"
+          }
+        },
+        "required" : [ "query" ]
+      }
+    }, {
+      "name" : "optimize_sql",
+      "description" : "Optimize SQL query for better performance",
+      "category" : "generation",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "sql" : {
+            "type" : "string",
+            "description" : "SQL query to optimize"
+          },
+          "analyze" : {
+            "type" : "boolean",
+            "default" : true,
+            "description" : "Include execution plan analysis"
+          }
+        },
+        "required" : [ "sql" ]
+      }
+    }, {
+      "name" : "validate_sql",
+      "description" : "Validate SQL syntax without executing",
+      "category" : "validation",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "sql" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "sql" ]
+      }
+    }, {
+      "name" : "execute_query",
+      "description" : "Execute a SQL SELECT query",
+      "category" : "execution",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "sql" : {
+            "type" : "string"
+          },
+          "limit" : {
+            "type" : "integer",
+            "default" : 100
+          }
+        },
+        "required" : [ "sql" ]
+      }
+    }, {
+      "name" : "explain_plan",
+      "description" : "Get execution plan for a query",
+      "category" : "execution",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "sql" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "sql" ]
+      }
+    }, {
+      "name" : "format_results",
+      "description" : "Convert query results to natural language response",
+      "category" : "formatting",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "original_query" : {
+            "type" : "string"
+          },
+          "sql_executed" : {
+            "type" : "string"
+          },
+          "results" : {
+            "type" : "array"
+          },
+          "error" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "original_query" ]
+      }
+    }, {
+      "name" : "summarize_data",
+      "description" : "Create statistical summary of data",
+      "category" : "formatting",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "data" : {
+            "type" : "array"
+          },
+          "columns" : {
+            "type" : "array"
+          }
+        },
+        "required" : [ "data" ]
+      }
+    }, {
+      "name" : "list_tables",
+      "description" : "List all Oracle database tables",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "include_system" : {
+            "type" : "boolean",
+            "default" : false
+          }
+        },
+        "required" : [ ]
+      }
+    }, {
+      "name" : "describe_table",
+      "description" : "Get detailed table structure including columns, types, and constraints",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name" ]
+      }
+    }, {
+      "name" : "gather_statistics",
+      "description" : "Gather Oracle optimizer statistics for a table",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name" ]
+      }
+    }, {
+      "name" : "get_relationships",
+      "description" : "Get all foreign key relationships for a table",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name" ]
+      }
+    }, {
+      "name" : "get_table_statistics",
+      "description" : "Get table statistics including row count and size",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name" ]
+      }
+    }, {
+      "name" : "search_tables",
+      "description" : "Search for tables matching a pattern",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "pattern" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "pattern" ]
+      }
+    }, {
+      "name" : "search_columns",
+      "description" : "Search for columns across all tables",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "column_pattern" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "column_pattern" ]
+      }
+    }, {
+      "name" : "get_foreign_keys",
+      "description" : "Get foreign key constraints for a table",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name" ]
+      }
+    }, {
+      "name" : "get_indexes",
+      "description" : "Get indexes for a table",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name" ]
+      }
+    }, {
+      "name" : "get_constraints",
+      "description" : "Get all constraints for a table",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name" ]
+      }
+    }, {
+      "name" : "get_table_dependencies",
+      "description" : "Get tables that depend on or are depended on by a table",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name" ]
+      }
+    }, {
+      "name" : "analyze_join_paths",
+      "description" : "Find possible join paths between tables",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table1" : {
+            "type" : "string"
+          },
+          "table2" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table1", "table2" ]
+      }
+    }, {
+      "name" : "get_column_statistics",
+      "description" : "Get statistics for a specific column",
+      "category" : "metadata",
+      "inputSchema" : {
+        "type" : "object",
+        "properties" : {
+          "table_name" : {
+            "type" : "string"
+          },
+          "column_name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "table_name", "column_name" ]
+      }
+    } ]
+  }
+}
+[VertxStreamableHttpTransport] Received 24 tools from server
+[OracleClient]   Discovered tool: oracle__analyze_query
+[OracleClient]   Discovered tool: oracle__match_schema
+[OracleClient]   Discovered tool: oracle__discover_enums
+[OracleClient]   Discovered tool: oracle__discover_sample_data
+[OracleClient]   Discovered tool: oracle__generate_sql
+[OracleClient]   Discovered tool: oracle__optimize_sql
+[OracleClient]   Discovered tool: oracle__validate_sql
+[OracleClient]   Discovered tool: oracle__execute_query
+[OracleClient]   Discovered tool: oracle__explain_plan
+[OracleClient]   Discovered tool: oracle__format_results
+[OracleClient]   Discovered tool: oracle__summarize_data
+[OracleClient]   Discovered tool: oracle__list_tables
+[OracleClient]   Discovered tool: oracle__describe_table
+[OracleClient]   Discovered tool: oracle__gather_statistics
+[OracleClient]   Discovered tool: oracle__get_relationships
+[OracleClient]   Discovered tool: oracle__get_table_statistics
+[OracleClient]   Discovered tool: oracle__search_tables
+[OracleClient]   Discovered tool: oracle__search_columns
+[OracleClient]   Discovered tool: oracle__get_foreign_keys
+[OracleClient]   Discovered tool: oracle__get_indexes
+[OracleClient]   Discovered tool: oracle__get_constraints
+[OracleClient]   Discovered tool: oracle__get_table_dependencies
+[OracleClient]   Discovered tool: oracle__analyze_join_paths
+[OracleClient]   Discovered tool: oracle__get_column_statistics
+[OracleClient] Published tool discovery: 24 tools
+[OracleClient] Published client ready event
+[OracleClient] Connected to Oracle server via HTTP on port 8086
+[OracleClient] Discovered 24 tools
+[McpHostManager] Successfully deployed OracleClient [839ef0ea-9694-4b56-8f26-565a93e504e6]
+[McpHostManager] Infrastructure deployed, waiting for components to be ready...
+[McpHostManager] Expected servers: [oracle]
+[McpHostManager] Expected clients: [oracle]
+[McpHostManager] Waiting for components:
+  Ready servers: [oracle] / Expected: [oracle]
+  Ready clients: [] / Expected: [oracle]
+  Missing clients: [oracle]
+MCP Host Manager deployed successfully
+[McpHostManager] RECEIVED tools.discovered event:
+[McpHostManager]   client: oracle
+[McpHostManager]   server: oracle
+[McpHostManager]   tools count: 24
+[DEBUG] McpHostManager.handleToolsDiscovered - Client oracle discovered 24 tools from oracle
+[DEBUG]   Added tool: oracle__oracle__analyze_query (original: oracle__analyze_query)
+[DEBUG]   Added tool: oracle__oracle__match_schema (original: oracle__match_schema)
+[DEBUG]   Added tool: oracle__oracle__discover_enums (original: oracle__discover_enums)
+[DEBUG]   Added tool: oracle__oracle__discover_sample_data (original: oracle__discover_sample_data)
+[DEBUG]   Added tool: oracle__oracle__generate_sql (original: oracle__generate_sql)
+[DEBUG]   Added tool: oracle__oracle__optimize_sql (original: oracle__optimize_sql)
+[DEBUG]   Added tool: oracle__oracle__validate_sql (original: oracle__validate_sql)
+[DEBUG]   Added tool: oracle__oracle__execute_query (original: oracle__execute_query)
+[DEBUG]   Added tool: oracle__oracle__explain_plan (original: oracle__explain_plan)
+[DEBUG]   Added tool: oracle__oracle__format_results (original: oracle__format_results)
+[DEBUG]   Added tool: oracle__oracle__summarize_data (original: oracle__summarize_data)
+[DEBUG]   Added tool: oracle__oracle__list_tables (original: oracle__list_tables)
+[DEBUG]   Added tool: oracle__oracle__describe_table (original: oracle__describe_table)
+[DEBUG]   Added tool: oracle__oracle__gather_statistics (original: oracle__gather_statistics)
+[DEBUG]   Added tool: oracle__oracle__get_relationships (original: oracle__get_relationships)
+[DEBUG]   Added tool: oracle__oracle__get_table_statistics (original: oracle__get_table_statistics)
+[DEBUG]   Added tool: oracle__oracle__search_tables (original: oracle__search_tables)
+[DEBUG]   Added tool: oracle__oracle__search_columns (original: oracle__search_columns)
+[DEBUG]   Added tool: oracle__oracle__get_foreign_keys (original: oracle__get_foreign_keys)
+[DEBUG]   Added tool: oracle__oracle__get_indexes (original: oracle__get_indexes)
+[DEBUG]   Added tool: oracle__oracle__get_constraints (original: oracle__get_constraints)
+[DEBUG]   Added tool: oracle__oracle__get_table_dependencies (original: oracle__get_table_dependencies)
+[DEBUG]   Added tool: oracle__oracle__analyze_join_paths (original: oracle__analyze_join_paths)
+[DEBUG]   Added tool: oracle__oracle__get_column_statistics (original: oracle__get_column_statistics)
+[DEBUG] Total tools now registered: 24
+[LOG] OracleClient discovered 24 tools via HTTP,2,OracleClient,Discovery,MCP
+[McpHostManager] RECEIVED client.ready event:
+[McpHostManager]   clientId: oracle
+[McpHostManager]   toolCount: 24
+[McpHostManager]   type: http
+Client ready: oracle with 24 tools
+[McpHostManager] Ready clients: 1/1
+=== MCP Host Manager Ready ===
+Servers ready: 1/1
+Clients ready: 1/1
+Total tools: 24
+MCP System Ready - Servers: 1, Clients: 1, Tools: 24
+[LOG] OracleClient ready with HTTP transport,2,OracleClient,Registration,MCP
+[LOG] OracleClient ready with 24 tools,1,OracleClient,StartUp,MCP
+[LOG] Deployed OracleClient,2,McpHostManager,Deployment,MCP
+[LOG] MCP Host Manager deployed,3,Driver,StartUp,MCP
+[LOG] McpHostManager received tools.discovered from oracle with 24 tools,2,McpHostManager,Discovery,MCP
+[DEBUG] ConversationVerticle - Tool count updated: 24 tools available
+Tool registry updated: 24 tools available
+MCP tools enabled for conversation endpoint: 24 tools available
+[LOG] McpHostManager received client.ready from oracle with 24 tools,2,McpHostManager,Registration,MCP
+[LOG] MCP infrastructure ready,1,McpHostManager,StartUp,MCP
+MCP System Ready - Servers: 1, Clients: 1, Tools: 24
+=== ZAK-Agent Started ===
+MCP Infrastructure: READY
+Orchestration Strategies: READY
+Unified Tool Architecture: ACTIVE
+[Driver] Published system.fully.ready - HTTP server will now start accepting requests
+[DEBUG] ConversationVerticle - MCP system ready with 24 tools
+[LOG] ZAK-Agent startup complete,0,Driver,StartUp,System
+[HostAPI] System ready signal received, starting HTTP server...
+Creating HTTP server on port 8080...
+[ConversationVerticle] System fully ready - accepting requests
+*** Host API server successfully started on HTTP port 8080 ***
+
+=== Available API Endpoints ===
+
+1. Health Check:
+   GET http://localhost:8080/health
+
+2. Host Status:
+   GET http://localhost:8080/host/v1/status
+
+3. Conversation API (OpenAI-compatible with auto MCP tool detection):
+   POST http://localhost:8080/host/v1/conversations
+   
+   Examples:
+   
+   # Simple message (uses LLM if API key is set):
+     curl -X POST http://localhost:8080/host/v1/conversations \
+       -H "Content-Type: application/json" \
+       -d '{"messages":[{"role":"user","content":"Hello"}]}'
+   
+   # Tool-triggering message (auto-detects and uses MCP tools):
+     curl -X POST http://localhost:8080/host/v1/conversations \
+       -H "Content-Type: application/json" \
+       -d '{"messages":[{"role":"user","content":"Calculate 10 plus 20"}]}'
+
+   Note: Messages with keywords like 'calculate', 'weather', 'database', or 'file'
+         will automatically trigger MCP tools.
+
+================================
+[LOG] Host API server started on HTTP port 8080 - Access at http://localhost:8080,0,HostAPIVerticle,StartUp,System
+[LOG] Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database
+[WARNING] Using default test password - not for production!
+[LOG] Failed to initialize Oracle connection: UCP-0: Unable to start the Universal Connection Pool,0,OracleConnectionManager,StartUp,Database
+[Conversation] Streaming request acknowledged for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d
+[Conversation] Processing with unified tool selection (tools available: 24)
+[StreamingHandler] Conversation processor acknowledged: Request acknowledged, processing asynchronously
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_selection
+[ToolSelection] Analyzing query: What is the result of 42 + 58?
+[ToolSelection] Final decision: ORCHESTRATION (orchestration: oracle_full_pipeline)
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_analysis
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: intent_analysis
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_analysis
+[Conversation] Tool selection decision: ORCHESTRATION
+[Conversation] Delegating to orchestration: oracle_full_pipeline
+[Conversation] Starting orchestration: oracle_full_pipeline
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_selection
+[Orchestration] Starting oracle_full_pipeline for: What is the result of 42 + 58?
+[Orchestration] Progress update sent: Analyze Query to address: conversation.stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d.progress
+[Orchestration]   Step: 1/7, Elapsed: 10ms
+[Orchestration] Step 1: Auto-adding original query: What is the result of 42 + 58?
+[Orchestration] Final arguments for Analyze Query: {"query":"What is the result of 42 + 58?"}
+[Orchestration] Step 1: Calling oracle__analyze_query
+[Orchestration] Routing tool: oracle__analyze_query through MCP host
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: Analyze Query (1/7)
+[LOG] Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Args for Analyze Query: {   "query" : "What is the result of 42 + 58?" },3,OrchestrationStrategy,Arguments,Tool
+[LOG] Orchestration routing oracle__analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_routing
+[OracleClient] Received tool call request: analyze_query
+[Oracle] Executing tool: analyze_query
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "id" : "b7797ae9-947d-4638-aac0-d24af5b34458",
+  "result" : {
+    "content" : [ {
+      "type" : "text",
+      "text" : "{\"intent\":\"search\",\"entities\":[]}"
+    } ]
+  }
+}
+[OracleClient] Tool call succeeded: analyze_query
+[LOG] Tool analyze_query completed via HTTP,2,OracleClient,Success,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_completed
+[Orchestration] Raw result from oracle__analyze_query: {"content":[{"type":"text","text":"{\"intent\":\"search\",\"entities\":[]}"}],"_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__analyze_query"}
+[Orchestration] Extracting from MCP response type: MCP format
+[Orchestration] Extracted JSON from MCP response
+[Orchestration] Extracted data type: JsonObject
+[Orchestration] Storing entire extracted object for analysis
+[Orchestration] Stored for next step: analysis = JSON data
+[Orchestration] Progress update sent: Match Schema to address: conversation.stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d.progress
+[Orchestration]   Step: 2/7, Elapsed: 46939ms
+[Orchestration] Added nested analysis.entities as tokens
+[Orchestration] Final arguments for Match Schema: {"tokens":[]}
+[Orchestration] Step 2: Calling oracle__match_schema
+[Orchestration] Routing tool: oracle__match_schema through MCP host
+[LOG] Tool oracle__analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool
+[LOG] Step Analyze Query passing analysis,3,OrchestrationStrategy,DataFlow,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: Match Schema (2/7)
+[LOG] Building args for Match Schema step,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Args for Match Schema: {   "tokens" : [ ] },3,OrchestrationStrategy,Arguments,Tool
+[LOG] Orchestration routing oracle__match_schema via MCP,3,OrchestrationStrategy,Routing,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_routing
+[OracleClient] Received tool call request: match_schema
+[Oracle] Executing tool: match_schema
+[Oracle] matchSchema: Missing required argument: tokens or entities
+[LOG] matchSchema missing tokens/entities,0,Oracle,Error,Validation
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "error" : {
+    "code" : -32000,
+    "message" : "Tool execution failed: Missing required argument: tokens or entities"
+  },
+  "id" : "e2d25dff-889e-4d59-8079-a8a21938f2fe"
+}
+[OracleClient] Tool call succeeded: match_schema
+[LOG] Tool match_schema completed via HTTP,2,OracleClient,Success,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_completed
+[Orchestration] Raw result from oracle__match_schema: {"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__match_schema"}
+[Orchestration] Extracting from MCP response type: Direct format
+[Orchestration] Using direct response (not MCP format)
+[Orchestration] Extracted data type: JsonObject
+[Orchestration] Storing entire extracted object for schema_matches
+[Orchestration] Stored for next step: schema_matches = JSON data
+[Orchestration] Progress update sent: Discover Data to address: conversation.stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d.progress
+[Orchestration]   Step: 3/7, Elapsed: 46979ms
+[Orchestration] WARNING: Could not find nested value: schema_matches.tables
+[Orchestration] Final arguments for Discover Data: {}
+[Orchestration] Step 3: Calling oracle__discover_sample_data
+[Orchestration] Routing tool: oracle__discover_sample_data through MCP host
+[LOG] Tool oracle__match_schema routed successfully,2,OrchestrationStrategy,Success,Tool
+[LOG] Step Match Schema passing schema_matches,3,OrchestrationStrategy,DataFlow,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: Discover Data (3/7)
+[LOG] Building args for Discover Data step,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Args for Discover Data: { },3,OrchestrationStrategy,Arguments,Tool
+[LOG] Orchestration routing oracle__discover_sample_data via MCP,3,OrchestrationStrategy,Routing,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_routing
+[OracleClient] Received tool call request: discover_sample_data
+[Oracle] Executing tool: discover_sample_data
+[Oracle] discoverSampleData: Missing required argument: table_names
+[LOG] discoverSampleData missing table_names,0,Oracle,Error,Validation
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "error" : {
+    "code" : -32000,
+    "message" : "Tool execution failed: Missing required argument: table_names"
+  },
+  "id" : "b4291b24-5ef5-4b72-bd0f-58a26a20f9b7"
+}
+[OracleClient] Tool call succeeded: discover_sample_data
+[LOG] Tool discover_sample_data completed via HTTP,2,OracleClient,Success,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_completed
+[Orchestration] Raw result from oracle__discover_sample_data: {"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__discover_sample_data"}
+[Orchestration] Extracting from MCP response type: Direct format
+[Orchestration] Using direct response (not MCP format)
+[Orchestration] Extracted data type: JsonObject
+[Orchestration] Storing entire extracted object for sample_data
+[Orchestration] Stored for next step: sample_data = JSON data
+[Orchestration] Progress update sent: Generate SQL to address: conversation.stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d.progress
+[Orchestration]   Step: 4/7, Elapsed: 157ms
+[Orchestration] Mapped original_query -> query: What is the result of 42 + 58?
+[Orchestration] Added from dataToPass: schema_matches (type: JsonObject)
+[Orchestration] Added from dataToPass: sample_data (type: JsonObject)
+[Orchestration] Final arguments for Generate SQL: {"query":"What is the result of 42 + 58?","schema_matches":{"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__match_schema"},"sample_data":{"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__discover_sample_data"}}
+[Orchestration] Step 4: Calling oracle__generate_sql
+[Orchestration] Routing tool: oracle__generate_sql through MCP host
+[LOG] Tool oracle__discover_sample_data routed successfully,2,OrchestrationStrategy,Success,Tool
+[LOG] Step Discover Data passing sample_data,3,OrchestrationStrategy,DataFlow,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: Generate SQL (4/7)
+[LOG] Building args for Generate SQL step,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Args for Generate SQL: {   "query" : "What is the result of 42 + 58?",   "schema_matches" : {     "error" : "No result in response",     "_client" : "oracle",     "_transport" : "HTTP",     "_routedBy" : "McpHostManager",  ,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Orchestration routing oracle__generate_sql via MCP,3,OrchestrationStrategy,Routing,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_routing
+[OracleClient] Received tool call request: generate_sql
+[Oracle] Executing tool: generate_sql
+[Oracle] Using schema_matches for SQL generation
+[Oracle] Using sample_data (JsonObject) for SQL generation
+[Oracle] generateSql inputs:
+[Oracle]   Query: What is the result of 42 + 58?
+[Oracle]   Schema context size: 5
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "error" : {
+    "code" : -32000,
+    "message" : "Tool execution failed: LlmAPIService not properly initialized - check OPENAI_API_KEY"
+  },
+  "id" : "686c3bdd-c3ba-46fb-95df-47eed64c5dfc"
+}
+[OracleClient] Tool call succeeded: generate_sql
+[LOG] Tool generate_sql completed via HTTP,2,OracleClient,Success,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_completed
+[Orchestration] Raw result from oracle__generate_sql: {"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__generate_sql"}
+[Orchestration] Extracting from MCP response type: Direct format
+[Orchestration] Using direct response (not MCP format)
+[Orchestration] Extracted data type: JsonObject
+[Orchestration] Storing entire extracted object for generated_sql
+[Orchestration] Stored for next step: generated_sql = JSON data
+[Orchestration] Progress update sent: Optimize SQL to address: conversation.stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d.progress
+[Orchestration]   Step: 5/7, Elapsed: 195ms
+[Orchestration] Added from dataToPass: generated_sql (type: JsonObject)
+[Orchestration] Final arguments for Optimize SQL: {"generated_sql":{"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__generate_sql"}}
+[Orchestration] Step 5: Calling oracle__optimize_sql
+[Orchestration] Routing tool: oracle__optimize_sql through MCP host
+[LOG] Tool oracle__generate_sql routed successfully,2,OrchestrationStrategy,Success,Tool
+[LOG] Step Generate SQL passing generated_sql,3,OrchestrationStrategy,DataFlow,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: Optimize SQL (5/7)
+[LOG] Building args for Optimize SQL step,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Args for Optimize SQL: {   "generated_sql" : {     "error" : "No result in response",     "_client" : "oracle",     "_transport" : "HTTP",     "_routedBy" : "McpHostManager",     "_toolName" : "oracle__generate_sql"   } },3,OrchestrationStrategy,Arguments,Tool
+[LOG] Orchestration routing oracle__optimize_sql via MCP,3,OrchestrationStrategy,Routing,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_routing
+[OracleClient] Received tool call request: optimize_sql
+[Oracle] Executing tool: optimize_sql
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "id" : "485aca68-639d-423f-add5-5a0ad5f448e7",
+  "result" : {
+    "content" : [ {
+      "type" : "text",
+      "text" : "{\"optimized_sql\":null,\"error\":\"Could not optimize: Query execution failed: UCP-0: Unable to start the Universal Connection Pool\"}"
+    } ]
+  }
+}
+[OracleClient] Tool call succeeded: optimize_sql
+[LOG] Tool optimize_sql completed via HTTP,2,OracleClient,Success,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_completed
+[Orchestration] Raw result from oracle__optimize_sql: {"content":[{"type":"text","text":"{\"optimized_sql\":null,\"error\":\"Could not optimize: Query execution failed: UCP-0: Unable to start the Universal Connection Pool\"}"}],"_client":"oracle","_trans
+[Orchestration] Extracting from MCP response type: MCP format
+[Orchestration] Extracted JSON from MCP response
+[Orchestration] Extracted data type: JsonObject
+[Orchestration] Storing entire extracted object for optimized_sql
+[Orchestration] Stored for next step: optimized_sql = JSON data
+[Orchestration] Progress update sent: Execute Query to address: conversation.stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d.progress
+[Orchestration]   Step: 6/7, Elapsed: 236ms
+[Orchestration] Added from dataToPass: optimized_sql (type: JsonObject)
+[Orchestration] Added from dataToPass: generated_sql (type: JsonObject)
+[Orchestration] Final arguments for Execute Query: {"optimized_sql":{"optimized_sql":null,"error":"Could not optimize: Query execution failed: UCP-0: Unable to start the Universal Connection Pool"},"generated_sql":{"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__generate_sql"}}
+[Orchestration] Step 6: Calling oracle__execute_query
+[Orchestration] Routing tool: oracle__execute_query through MCP host
+[LOG] Tool oracle__optimize_sql routed successfully,2,OrchestrationStrategy,Success,Tool
+[LOG] Step Optimize SQL passing optimized_sql,3,OrchestrationStrategy,DataFlow,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: Execute Query (6/7)
+[LOG] Building args for Execute Query step,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Args for Execute Query: {   "optimized_sql" : {     "optimized_sql" : null,     "error" : "Could not optimize: Query execution failed: UCP-0: Unable to start the Universal Connection Pool"   },   "generated_sql" : {     "err,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Orchestration routing oracle__execute_query via MCP,3,OrchestrationStrategy,Routing,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_routing
+[OracleClient] Received tool call request: execute_query
+[Oracle] Executing tool: execute_query
+[Oracle] executeQuery: Missing required argument: sql
+[LOG] executeQuery missing sql argument,0,Oracle,Error,Validation
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "error" : {
+    "code" : -32000,
+    "message" : "Tool execution failed: Missing required argument: sql"
+  },
+  "id" : "9a5f6eec-d611-430e-a147-91f2790194ce"
+}
+[OracleClient] Tool call succeeded: execute_query
+[LOG] Tool execute_query completed via HTTP,2,OracleClient,Success,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_completed
+[Orchestration] Raw result from oracle__execute_query: {"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__execute_query"}
+[Orchestration] Extracting from MCP response type: Direct format
+[Orchestration] Using direct response (not MCP format)
+[Orchestration] Extracted data type: JsonObject
+[Orchestration] Storing entire extracted object for results
+[Orchestration] Stored for next step: results = JSON data
+[Orchestration] Progress update sent: Format Results to address: conversation.stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d.progress
+[Orchestration]   Step: 7/7, Elapsed: 273ms
+[Orchestration] Mapped original_query -> query: What is the result of 42 + 58?
+[Orchestration] Added from dataToPass: results (type: JsonObject)
+[Orchestration] Added from dataToPass: generated_sql (type: JsonObject)
+[Orchestration] Final arguments for Format Results: {"query":"What is the result of 42 + 58?","results":{"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__execute_query"},"generated_sql":{"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__generate_sql"}}
+[Orchestration] Step 7: Calling oracle__format_results
+[Orchestration] Routing tool: oracle__format_results through MCP host
+[LOG] Tool oracle__execute_query routed successfully,2,OrchestrationStrategy,Success,Tool
+[LOG] Step Execute Query passing results,3,OrchestrationStrategy,DataFlow,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: Format Results (7/7)
+[LOG] Building args for Format Results step,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Args for Format Results: {   "query" : "What is the result of 42 + 58?",   "results" : {     "error" : "No result in response",     "_client" : "oracle",     "_transport" : "HTTP",     "_routedBy" : "McpHostManager",     "_to,3,OrchestrationStrategy,Arguments,Tool
+[LOG] Orchestration routing oracle__format_results via MCP,3,OrchestrationStrategy,Routing,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_routing
+[OracleClient] Received tool call request: format_results
+[Oracle] Executing tool: format_results
+[VertxStreamableHttpTransport] Response: {
+  "jsonrpc" : "2.0",
+  "error" : {
+    "code" : -32000,
+    "message" : "Tool execution failed: LlmAPIService not properly initialized - check OPENAI_API_KEY"
+  },
+  "id" : "70d9b758-3d49-4bcf-893d-57b61383bafa"
+}
+[OracleClient] Tool call succeeded: format_results
+[LOG] Tool format_results completed via HTTP,2,OracleClient,Success,Tool
+[StreamingHandler] Received progress event for stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d, state: active
+[StreamingHandler] Sending progress to client: tool_completed
+[Orchestration] Raw result from oracle__format_results: {"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__format_results"}
+[Orchestration] Extracting from MCP response type: Direct format
+[Orchestration] Using direct response (not MCP format)
+[Orchestration] Extracted data type: JsonObject
+[Orchestration] Extracting from MCP response type: Direct format
+[Orchestration] Using direct response (not MCP format)
+[Orchestration] Final result extracted: {"error":"No result in response","_client":"oracle","_transport":"HTTP","_routedBy":"McpHostManager","_toolName":"oracle__format_results"}
+[Orchestration] Returning final result with formatted field: false
+[Orchestration] oracle_full_pipeline completed successfully
+[LOG] Tool oracle__format_results routed successfully,2,OrchestrationStrategy,Success,Tool
+[Conversation] Orchestration completed: oracle_full_pipeline
+[Conversation] Extracted response: {
+  "error" : "No result in response",
+  "_client" : "oracle",
+  "_transport" : "HTTP",
+  "_routedBy" : "McpHostManager",
+  "_toolName" : "oracle__format_results",
+  "strategy" : "oracle_full_pipeline...
+[Conversation] Publishing final response to stream: stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d
+[Conversation] Final response published successfully
+[LOG] Conversation final response sent for stream-9f567ad6-c162-4378-8e9d-d9631a7ec47d,2,Conversation,Response,SSE

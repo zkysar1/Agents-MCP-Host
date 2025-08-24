@@ -175,6 +175,33 @@ public class StreamingConversationHandler {
         });
         consumers.add(errorConsumer);
         
+        // Add interrupt event consumer
+        MessageConsumer<JsonObject> interruptConsumer = eventBus.consumer("conversation." + streamId + ".interrupt", msg -> {
+            String state = streamState.get(streamId);
+            if ("active".equals(state)) {
+                JsonObject data = msg.body();
+                sendEvent(response, "execution_paused", new JsonObject()
+                    .put("reason", data.getString("reason"))
+                    .put("message", "Execution paused. Waiting for your input...")
+                    .put("timestamp", data.getLong("timestamp")));
+                streamState.put(streamId, "paused");
+            }
+        });
+        consumers.add(interruptConsumer);
+        
+        // Add agent question event consumer
+        MessageConsumer<JsonObject> questionConsumer = eventBus.consumer("conversation." + streamId + ".agent_question", msg -> {
+            String state = streamState.get(streamId);
+            if ("active".equals(state) || "paused".equals(state)) {
+                JsonObject data = msg.body();
+                sendEvent(response, "agent_question", new JsonObject()
+                    .put("question", data.getString("question"))
+                    .put("context", data.getJsonObject("context", new JsonObject()))
+                    .put("options", data.getJsonArray("options", new JsonArray())));
+            }
+        });
+        consumers.add(questionConsumer);
+        
         // Process the conversation with streaming context
         processStreamingConversation(messages, streamId, eventBus);
     }

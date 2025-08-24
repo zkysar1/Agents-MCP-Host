@@ -12,6 +12,7 @@ import java.sql.*;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import AgentsMCPHost.streaming.StreamingEventPublisher;
 
 /**
  * Oracle Connection Manager using Universal Connection Pool (UCP).
@@ -164,6 +165,13 @@ public class OracleConnectionManager {
      * Execute a query and return results as JSON
      */
     public Future<JsonArray> executeQuery(String sql, Object... params) {
+        return executeQuery(sql, null, params);
+    }
+    
+    /**
+     * Execute a query and return results as JSON with streaming support
+     */
+    public Future<JsonArray> executeQuery(String sql, String streamId, Object... params) {
         Promise<JsonArray> promise = Promise.promise();
         
         if (!initialized) {
@@ -176,6 +184,17 @@ public class OracleConnectionManager {
         final String cleanSql = trimmedSql.endsWith(";") ? 
             trimmedSql.substring(0, trimmedSql.length() - 1).trim() : 
             trimmedSql;
+        
+        // Publish SQL query event if streaming
+        if (streamId != null) {
+            StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+            JsonObject context = new JsonObject()
+                .put("paramCount", params.length)
+                .put("queryLength", cleanSql.length());
+            publisher.publishSQLQuery(cleanSql, context);
+        }
+        
+        long queryStartTime = System.currentTimeMillis();
         
         // Use new Callable API for executeBlocking (Vert.x 4.5+)
         vertx.<JsonArray>executeBlocking(() -> {
@@ -197,7 +216,16 @@ public class OracleConnectionManager {
             }
         }, false).onComplete(res -> {  // Unordered - DB queries don't need ordering
             if (res.succeeded()) {
-                promise.complete(res.result());
+                JsonArray results = res.result();
+                long executionTime = System.currentTimeMillis() - queryStartTime;
+                
+                // Publish SQL result event if streaming
+                if (streamId != null) {
+                    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+                    publisher.publishSQLResult(results, executionTime);
+                }
+                
+                promise.complete(results);
             } else {
                 promise.fail(res.cause());
             }
@@ -254,6 +282,13 @@ public class OracleConnectionManager {
      * Get table metadata
      */
     public Future<JsonObject> getTableMetadata(String tableName) {
+        return getTableMetadata(tableName, null);
+    }
+    
+    /**
+     * Get table metadata with streaming support
+     */
+    public Future<JsonObject> getTableMetadata(String tableName, String streamId) {
         String cacheKey = "table_" + tableName.toUpperCase();
         
         // Check cache
@@ -314,6 +349,12 @@ public class OracleConnectionManager {
                 
                 // Cache the result
                 metadataCache.put(cacheKey, tableInfo);
+                
+                // Publish metadata event if streaming
+                if (streamId != null) {
+                    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+                    publisher.publishMetadataExploration(tableName, tableInfo);
+                }
                 
                 return tableInfo;
                 

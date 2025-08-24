@@ -8,6 +8,7 @@ import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.file.FileSystem;
+import AgentsMCPHost.streaming.StreamingEventPublisher;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -214,6 +215,16 @@ public class ToolSelection extends AbstractVerticle {
         
         System.out.println("[ToolSelection] Analyzing query: " + query);
         
+        // Publish tool selection start event if streaming
+        if (sessionId != null) {
+            StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, sessionId);
+            publisher.publishProgress("tool_analysis", "Analyzing query for tool requirements",
+                new JsonObject()
+                    .put("phase", "tool_analysis")
+                    .put("query", query)
+                    .put("status", "analyzing"));
+        }
+        
         // Check cache for similar recent queries
         String cacheKey = generateCacheKey(query);
         ToolDecision cachedDecision = decisionCache.get(cacheKey);
@@ -234,6 +245,18 @@ public class ToolSelection extends AbstractVerticle {
                     (decision.primaryTool != null ? " (tool: " + decision.primaryTool + ")" : "") +
                     (decision.orchestrationName != null ? " (orchestration: " + decision.orchestrationName + ")" : ""));
                 
+                // Publish tool selection completion if streaming
+                if (sessionId != null) {
+                    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, sessionId);
+                    publisher.publishProgress("tool_analysis", "Tool selection completed",
+                        new JsonObject()
+                            .put("phase", "tool_analysis")
+                            .put("strategy", decision.strategy.name())
+                            .put("primaryTool", decision.primaryTool != null ? decision.primaryTool : "none")
+                            .put("confidence", decision.confidence)
+                            .put("status", "completed"));
+                }
+                
                 // Reply with decision
                 msg.reply(decision.toJson());
             })
@@ -247,6 +270,16 @@ public class ToolSelection extends AbstractVerticle {
      * Main tool selection algorithm
      */
     private Future<ToolDecision> analyzeAndSelectTools(String query, JsonArray history, String sessionId) {
+        // Publish analysis phase if streaming
+        if (sessionId != null) {
+            StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, sessionId);
+            publisher.publishProgress("intent_analysis", "Analyzing query intent",
+                new JsonObject()
+                    .put("phase", "intent_analysis")
+                    .put("method", llmService.isInitialized() ? "llm" : "pattern")
+                    .put("status", "processing"));
+        }
+        
         // Step 1: Analyze query with LLM (or fallback to pattern matching)
         return analyzeQueryIntent(query, history)
             .compose(analysis -> {

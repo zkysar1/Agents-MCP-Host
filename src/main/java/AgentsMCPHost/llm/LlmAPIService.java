@@ -10,6 +10,7 @@ import io.vertx.ext.web.client.HttpRequest;
 import io.vertx.ext.web.client.HttpResponse;
 import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
+import AgentsMCPHost.streaming.StreamingEventPublisher;
 
 import static AgentsMCPHost.Driver.logLevel;
 
@@ -89,6 +90,16 @@ public class LlmAPIService {
    * @return Future containing the OpenAI response
    */
   public Future<JsonObject> chatCompletion(JsonArray messages) {
+    return chatCompletion(messages, null);
+  }
+  
+  /**
+   * Make a chat completion request to OpenAI with optional streaming
+   * @param messages The messages array for the conversation
+   * @param streamId Optional stream ID for publishing events
+   * @return Future containing the OpenAI response
+   */
+  public Future<JsonObject> chatCompletion(JsonArray messages, String streamId) {
     Promise<JsonObject> promise = Promise.promise();
     
     if (!isInitialized()) {
@@ -105,6 +116,12 @@ public class LlmAPIService {
     
     if (logLevel >= 3) {
       System.out.println("[DEBUG] Sending request to OpenAI: " + requestBody.encodePrettily());
+    }
+    
+    // Publish LLM request event if streaming
+    if (streamId != null) {
+      StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+      publisher.publishLLMRequest(messages);
     }
     
     // Create the HTTP request
@@ -133,6 +150,24 @@ public class LlmAPIService {
             
             vertx.eventBus().publish("log", 
               "OpenAI API call successful,2,LlmAPIService,API,Success");
+            
+            // Publish LLM response event if streaming
+            if (streamId != null) {
+              StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+              JsonObject usage = responseBody.getJsonObject("usage", new JsonObject());
+              JsonObject metadata = new JsonObject()
+                .put("model", responseBody.getString("model"))
+                .put("totalTokens", usage.getInteger("total_tokens", 0))
+                .put("promptTokens", usage.getInteger("prompt_tokens", 0))
+                .put("completionTokens", usage.getInteger("completion_tokens", 0));
+              
+              String content = responseBody.getJsonArray("choices")
+                .getJsonObject(0)
+                .getJsonObject("message")
+                .getString("content");
+              
+              publisher.publishLLMResponse(content, metadata);
+            }
             
             promise.complete(responseBody);
           } catch (Exception e) {
