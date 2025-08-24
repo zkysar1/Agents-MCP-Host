@@ -725,7 +725,12 @@ public class McpHostManager extends AbstractVerticle {
         
         Future.all(undeploys)
             .onComplete(ar -> {
-                System.out.println("MCP Host Manager stopped");
+                if (ar.succeeded()) {
+                    System.out.println("MCP Host Manager stopped - all verticles undeployed");
+                } else {
+                    System.err.println("MCP Host Manager stop had errors: " + ar.cause().getMessage());
+                }
+                // Always complete the stop promise to avoid hanging
                 stopPromise.complete();
             });
     }

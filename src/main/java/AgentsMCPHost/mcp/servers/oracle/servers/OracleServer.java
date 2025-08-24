@@ -430,13 +430,25 @@ public class OracleServer extends AbstractVerticle {
         try {
             JsonObject request = ctx.body().asJsonObject();
             if (request == null) {
-                sendError(ctx, 400, "Invalid JSON", null);
+                // Transport error - use HTTP status
+                ctx.response()
+                    .setStatusCode(400)
+                    .putHeader("Content-Type", "application/json")
+                    .end(new JsonObject()
+                        .put("error", "Invalid JSON request body")
+                        .encode());
                 return;
             }
             
             String method = request.getString("method");
             String id = request.getString("id");
             JsonObject params = request.getJsonObject("params", new JsonObject());
+            
+            // Validate method is present
+            if (method == null || method.trim().isEmpty()) {
+                sendError(ctx, -32600, "Invalid Request: missing method", id);
+                return;
+            }
             
             // Route based on method
             switch (method) {
@@ -518,6 +530,13 @@ public class OracleServer extends AbstractVerticle {
      */
     private void handleCallTool(RoutingContext ctx, String id, JsonObject params) {
         String toolName = params.getString("name");
+        
+        // Validate tool name is present
+        if (toolName == null || toolName.trim().isEmpty()) {
+            sendError(ctx, -32602, "Missing required parameter: name", id);
+            return;
+        }
+        
         JsonObject arguments = params.getJsonObject("arguments", new JsonObject());
         
         System.out.println("[Oracle] Executing tool: " + toolName);
@@ -1038,11 +1057,18 @@ public class OracleServer extends AbstractVerticle {
         System.out.println("[Oracle] Executing SQL: " + sql.substring(0, Math.min(100, sql.length())));
         
         
+        // Validate and sanitize limit parameter to prevent SQL injection
         int limit = arguments.getInteger("limit", 100);
+        if (limit < 1) {
+            limit = 1;
+        } else if (limit > 10000) {
+            limit = 10000;  // Cap at reasonable maximum
+        }
         
-        // Add limit if not present
+        // Add limit if not present - limit is now guaranteed to be a safe integer
         final String finalSql;
         if (!sql.toUpperCase().contains("FETCH") && !sql.toUpperCase().contains("ROWNUM")) {
+            // Safe to concatenate since limit is validated integer
             finalSql = sql + " FETCH FIRST " + limit + " ROWS ONLY";
         } else {
             finalSql = sql;
@@ -1608,13 +1634,24 @@ public class OracleServer extends AbstractVerticle {
     
     @Override
     public void stop(Promise<Void> stopPromise) {
-        if (httpServer != null) {
-            httpServer.close(ar -> {
-                System.out.println("Oracle Server stopped");
-                stopPromise.complete();
+        // Clean up all resources
+        Future<Void> serverCloseFuture = httpServer != null ? 
+            httpServer.close() : Future.succeededFuture();
+        
+        Future<Void> oracleShutdownFuture = oracleManager != null ? 
+            oracleManager.shutdown() : Future.succeededFuture();
+        
+        // Combine all cleanup futures
+        Future.all(serverCloseFuture, oracleShutdownFuture)
+            .onComplete(ar -> {
+                if (ar.succeeded()) {
+                    System.out.println("Oracle Server stopped - all resources cleaned up");
+                    stopPromise.complete();
+                } else {
+                    System.err.println("Oracle Server stop failed: " + ar.cause().getMessage());
+                    // Still complete the stop promise to avoid hanging
+                    stopPromise.complete();
+                }
             });
-        } else {
-            stopPromise.complete();
-        }
     }
 }

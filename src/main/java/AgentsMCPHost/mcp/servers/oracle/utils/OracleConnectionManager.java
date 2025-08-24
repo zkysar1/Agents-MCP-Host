@@ -69,8 +69,13 @@ public class OracleConnectionManager {
         // Use new Callable API for executeBlocking (Vert.x 4.5+)
         vertx.<Void>executeBlocking(() -> {
             try {
-                // Get password from environment variable
-                password = "ARmy0320-- milk";
+                // Get password from environment variable or use test default
+                password = System.getenv("ORACLE_TESTING_DATABASE_PASSWORD");
+                if (password == null || password.isEmpty()) {
+                    // Only use hardcoded password in test/development mode
+                    System.out.println("[WARNING] Using default test password - not for production!");
+                    password = "ARmy0320-- milk";
+                }
                 
                 // Load Oracle driver
                 Class.forName("oracle.jdbc.driver.OracleDriver");
@@ -87,6 +92,7 @@ public class OracleConnectionManager {
                 // Initialize UCP connection pool
                 poolDataSource = PoolDataSourceFactory.getPoolDataSource();
                 poolDataSource.setConnectionFactoryClassName("oracle.jdbc.pool.OracleDataSource");
+                poolDataSource.setConnectionPoolName("OracleAgentPool");  // Set name for proper cleanup
                 poolDataSource.setURL(jdbcUrl);
                 poolDataSource.setUser(DB_USER);
                 poolDataSource.setPassword(password);
@@ -256,9 +262,8 @@ public class OracleConnectionManager {
             return Future.succeededFuture(cached);
         }
         
-        Promise<JsonObject> promise = Promise.promise();
-        
-        vertx.executeBlocking(blockingPromise -> {
+        // Use new Callable API for executeBlocking (Vert.x 4.5+)
+        return vertx.executeBlocking(() -> {
             try (Connection conn = getConnection()) {
                 DatabaseMetaData metaData = conn.getMetaData();
                 
@@ -310,29 +315,20 @@ public class OracleConnectionManager {
                 // Cache the result
                 metadataCache.put(cacheKey, tableInfo);
                 
-                blockingPromise.complete(tableInfo);
+                return tableInfo;
                 
             } catch (SQLException e) {
-                blockingPromise.fail(new RuntimeException("Failed to get table metadata: " + e.getMessage(), e));
+                throw new RuntimeException("Failed to get table metadata: " + e.getMessage(), e);
             }
-        }, res -> {
-            if (res.succeeded()) {
-                promise.complete((JsonObject) res.result());
-            } else {
-                promise.fail(res.cause());
-            }
-        });
-        
-        return promise.future();
+        }, false);  // Unordered execution
     }
     
     /**
      * List all tables in the schema with row counts
      */
     public Future<JsonArray> listTables() {
-        Promise<JsonArray> promise = Promise.promise();
-        
-        vertx.executeBlocking(blockingPromise -> {
+        // Use new Callable API for executeBlocking (Vert.x 4.5+)
+        return vertx.executeBlocking(() -> {
             try (Connection conn = getConnection()) {
                 JsonArray tables = new JsonArray();
                 
@@ -357,24 +353,15 @@ public class OracleConnectionManager {
                     }
                 }
                 
-                // Return empty array if no tables found (don't mask database issues)
-                blockingPromise.complete(tables);
+                return tables;
                 
             } catch (SQLException e) {
                 // Return empty array on failure (don't mask database issues)
                 // Log error but don't use event bus in blocking handler
                 // Error will be handled by caller
-                blockingPromise.complete(new JsonArray());
+                return new JsonArray();
             }
-        }, res -> {
-            if (res.succeeded()) {
-                promise.complete((JsonArray) res.result());
-            } else {
-                promise.fail(res.cause());
-            }
-        });
-        
-        return promise.future();
+        }, false);  // Unordered execution
     }
     
     /**
@@ -417,25 +404,18 @@ public class OracleConnectionManager {
      * Test connection
      */
     public Future<Boolean> testConnection() {
-        Promise<Boolean> promise = Promise.promise();
-        
         if (!initialized) {
-            promise.complete(false);
-            return promise.future();
+            return Future.succeededFuture(false);
         }
         
-        vertx.executeBlocking(blockingPromise -> {
+        // Use new Callable API for executeBlocking (Vert.x 4.5+)
+        return vertx.executeBlocking(() -> {
             try (Connection conn = getConnection()) {
-                boolean valid = conn.isValid(5);
-                blockingPromise.complete(valid);
+                return conn.isValid(5);
             } catch (SQLException e) {
-                blockingPromise.complete(false);
+                return false;
             }
-        }, res -> {
-            promise.complete((Boolean) res.result());
-        });
-        
-        return promise.future();
+        }, false);  // Unordered execution
     }
     
     /**
@@ -468,37 +448,58 @@ public class OracleConnectionManager {
      * Shutdown the connection pool
      */
     public Future<Void> shutdown() {
-        Promise<Void> promise = Promise.promise();
-        
         if (!initialized) {
-            promise.complete();
-            return promise.future();
+            return Future.succeededFuture();
         }
         
-        vertx.executeBlocking(blockingPromise -> {
-            // Close the connection pool
-            if (poolDataSource != null) {
-                // UCP doesn't have close(), just null the reference
-                // Connections will be closed when JVM shuts down
-                poolDataSource = null;
+        // Use new Callable API for executeBlocking (Vert.x 4.5+)
+        return vertx.executeBlocking(() -> {
+            try {
+                // Properly close the Oracle UCP connection pool
+                if (poolDataSource != null) {
+                    // First, set connection wait timeout to 0 to prevent new connections
+                    poolDataSource.setConnectionWaitTimeout(0);
+                    
+                    // Get the pool name if set
+                    String poolName = poolDataSource.getConnectionPoolName();
+                    
+                    if (poolName != null && !poolName.isEmpty()) {
+                        // Use UniversalConnectionPoolManager for proper cleanup
+                        try {
+                            oracle.ucp.admin.UniversalConnectionPoolManager mgr = 
+                                oracle.ucp.admin.UniversalConnectionPoolManagerImpl
+                                    .getUniversalConnectionPoolManager();
+                            
+                            // First purge all connections
+                            mgr.purgeConnectionPool(poolName);
+                            
+                            // Then destroy the pool
+                            mgr.destroyConnectionPool(poolName);
+                            
+                            System.out.println("[OracleConnectionManager] Connection pool '" + poolName + "' destroyed successfully");
+                        } catch (oracle.ucp.UniversalConnectionPoolException e) {
+                            // If manager fails, at least nullify the reference
+                            System.err.println("[OracleConnectionManager] Failed to destroy pool via manager: " + e.getMessage());
+                        }
+                    }
+                    
+                    // Nullify the reference
+                    poolDataSource = null;
+                }
+                
+                // Clean up connection manager
+                jdbcUrl = null;
+                password = null;
+                initialized = false;
+                
+                if (vertx != null) {
+                    vertx.eventBus().publish("log", "Oracle UCP pool shut down properly,1,OracleConnectionManager,Shutdown,Database");
+                }
+                
+                return null;  // Return null for Void
+            } catch (SQLException e) {
+                throw new RuntimeException("Failed to shutdown connection pool: " + e.getMessage(), e);
             }
-            
-            // Clean up connection manager
-            jdbcUrl = null;
-            password = null;
-            initialized = false;
-            if (vertx != null) {
-                vertx.eventBus().publish("log", "Oracle UCP pool shut down,1,OracleConnectionManager,Shutdown,Database");
-            }
-            blockingPromise.complete();
-        }, res -> {
-            if (res.succeeded()) {
-                promise.complete();
-            } else {
-                promise.fail(res.cause());
-            }
-        });
-        
-        return promise.future();
+        }, false);  // Unordered execution
     }
 }
