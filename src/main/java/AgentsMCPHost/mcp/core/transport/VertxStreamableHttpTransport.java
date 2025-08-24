@@ -201,8 +201,25 @@ public class VertxStreamableHttpTransport {
         return sendMessage(request).map(response -> {
             if (response.containsKey("result")) {
                 return response.getJsonObject("result");
+            } else if (response.containsKey("error")) {
+                // Handle error response properly
+                JsonObject error = response.getJsonObject("error");
+                String errorMessage = error.getString("message", "Unknown error");
+                int errorCode = error.getInteger("code", -32000);
+                System.err.println("[VertxStreamableHttpTransport] Tool call error: " + errorMessage);
+                
+                // Return error in a structured format
+                return new JsonObject()
+                    .put("isError", true)
+                    .put("error", errorMessage)
+                    .put("errorCode", errorCode)
+                    .put("originalError", error);
             }
-            return new JsonObject().put("error", "No result in response");
+            // Unexpected response format
+            System.err.println("[VertxStreamableHttpTransport] Unexpected response format for tool call: " + response.encode());
+            return new JsonObject()
+                .put("isError", true)
+                .put("error", "Unexpected response format: no result or error field");
         });
     }
     

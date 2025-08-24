@@ -7,6 +7,7 @@ import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.file.FileSystem;
+import AgentsMCPHost.streaming.StreamingEventPublisher;
 
 import java.util.*;
 
@@ -192,6 +193,28 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 String resultKey = step.getString("name", "step_" + context.currentStep);
                 context.stepResults.put(resultKey, result);
                 
+                // Check for error in result
+                boolean isCriticalStep = step.getBoolean("critical", true); // Default to critical
+                if (result.containsKey("error") || result.getBoolean("isError", false)) {
+                    String errorMsg = result.getString("error", "Unknown error");
+                    System.err.println("[Orchestration] Step " + context.currentStep + " (" + toolName + ") failed with error: " + errorMsg);
+                    
+                    if (isCriticalStep) {
+                        // Critical step failed - stop orchestration
+                        System.err.println("[Orchestration] Critical step failed - stopping orchestration");
+                        String failureMessage = "Critical step " + context.currentStep + " (" + toolName + ") failed: " + errorMsg;
+                        
+                        // Avoid recursive error wrapping - check if error already contains "Step X failed"
+                        if (errorMsg.contains("Step") && errorMsg.contains("failed")) {
+                            failureMessage = errorMsg; // Use original error message without wrapping
+                        }
+                        
+                        return Future.failedFuture(failureMessage);
+                    } else {
+                        System.out.println("[Orchestration] Non-critical step failed - continuing");
+                    }
+                }
+                
                 // Extract data from MCP format FIRST
                 Object extractedData = extractDataFromMcpResponse(result);
                 System.out.println("[Orchestration] Extracted data type: " + 
@@ -269,13 +292,25 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
             .recover(err -> {
                 System.err.println("[Orchestration] Step " + context.currentStep + " failed: " + err.getMessage());
                 
-                // Check if we allow partial success
-                if (strategyConfig.getBoolean("allow_partial_success", false)) {
+                // Check if step is critical
+                boolean isCriticalStep = step.getBoolean("critical", true);
+                
+                // Check if we allow partial success and step is not critical
+                if (strategyConfig.getBoolean("allow_partial_success", false) && !isCriticalStep) {
                     // Skip failed step and continue
+                    System.out.println("[Orchestration] Skipping non-critical failed step and continuing");
                     return executeStrategy(context, steps, stepIndex + 1);
                 } else {
                     // Fail the entire orchestration
-                    return Future.failedFuture("Step " + context.currentStep + " failed: " + err.getMessage());
+                    System.err.println("[Orchestration] Critical step or no partial success allowed - stopping orchestration");
+                    String errorMessage = err.getMessage();
+                    
+                    // Avoid recursive error wrapping
+                    if (errorMessage != null && errorMessage.contains("Step") && errorMessage.contains("failed")) {
+                        return Future.failedFuture(errorMessage); // Don't wrap again
+                    } else {
+                        return Future.failedFuture("Step " + context.currentStep + " failed: " + errorMessage);
+                    }
                 }
             });
     }
@@ -291,6 +326,17 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
             "Orchestration routing " + toolName + " via MCP,3,OrchestrationStrategy,Routing,Tool");
         
         System.out.println("[Orchestration] Routing tool: " + toolName + " through MCP host");
+        
+        // Publish streaming event for tool execution start
+        if (streamId != null) {
+            StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+            publisher.publishProgress("tool_execution", "Executing tool: " + toolName,
+                new JsonObject()
+                    .put("phase", "tool_execution")
+                    .put("tool", toolName)
+                    .put("status", "routing")
+                    .put("arguments", arguments));
+        }
         
         // Build tool request
         JsonObject toolRequest = new JsonObject()
@@ -310,6 +356,17 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 vertx.eventBus().publish("log",
                     "Tool " + toolName + " routed successfully,2,OrchestrationStrategy,Success,Tool");
                 
+                // Publish streaming event for tool completion
+                if (streamId != null) {
+                    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+                    publisher.publishProgress("tool_execution", "Tool completed: " + toolName,
+                        new JsonObject()
+                            .put("phase", "tool_execution")
+                            .put("tool", toolName)
+                            .put("status", "completed")
+                            .put("hasResult", true));
+                }
+                
                 promise.complete(result);
             })
             .onFailure(err -> {
@@ -321,6 +378,17 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 
                 System.err.println("[Orchestration] " + error);
                 System.err.println("[Orchestration] No fallback - maintaining single routing path");
+                
+                // Publish streaming event for tool failure
+                if (streamId != null) {
+                    StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
+                    publisher.publishProgress("tool_execution", "Tool failed: " + toolName,
+                        new JsonObject()
+                            .put("phase", "tool_execution")
+                            .put("tool", toolName)
+                            .put("status", "failed")
+                            .put("error", err.getMessage()));
+                }
                 
                 promise.fail(err);
             });

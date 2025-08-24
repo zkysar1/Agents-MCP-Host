@@ -26,6 +26,9 @@ public class OracleConnectionManager {
     private String password;
     private Vertx vertx;
     private boolean initialized = false;
+    private String lastConnectionError = null;
+    private long lastConnectionAttempt = 0;
+    private static final long RETRY_INTERVAL_MS = 5000; // 5 seconds between retries
     
     // Connection configuration
     private static final String DB_HOST = "adb.us-ashburn-1.oraclecloud.com";
@@ -119,21 +122,28 @@ public class OracleConnectionManager {
                 }
                 
                 initialized = true;
+                lastConnectionError = null;
                 return null; // Return null for Void
                 
             } catch (SQLException e) {
+                lastConnectionError = "SQL Exception: " + e.getMessage();
+                lastConnectionAttempt = System.currentTimeMillis();
                 if (vertx != null) {
                     vertx.eventBus().publish("log", "Failed to initialize Oracle connection: " + e.getMessage() + 
                         ",0,OracleConnectionManager,StartUp,Database");
                 }
                 throw new RuntimeException("SQL Exception during initialization", e);
             } catch (ClassNotFoundException e) {
+                lastConnectionError = "Oracle JDBC driver not found: " + e.getMessage();
+                lastConnectionAttempt = System.currentTimeMillis();
                 if (vertx != null) {
                     vertx.eventBus().publish("log", "Oracle JDBC driver not found: " + e.getMessage() + 
                         ",0,OracleConnectionManager,StartUp,Database");
                 }
                 throw new RuntimeException("Oracle JDBC driver not found", e);
             } catch (Exception e) {
+                lastConnectionError = "Connection failed: " + e.getMessage();
+                lastConnectionAttempt = System.currentTimeMillis();
                 if (vertx != null) {
                     vertx.eventBus().publish("log", "Failed to initialize Oracle connection: " + e.getMessage() + 
                         ",0,OracleConnectionManager,StartUp,Database");
@@ -542,5 +552,66 @@ public class OracleConnectionManager {
                 throw new RuntimeException("Failed to shutdown connection pool: " + e.getMessage(), e);
             }
         }, false);  // Unordered execution
+    }
+    
+    /**
+     * Check if connection is healthy and available
+     */
+    public boolean isConnectionHealthy() {
+        if (!initialized || poolDataSource == null) {
+            return false;
+        }
+        
+        try {
+            // Quick check of pool statistics
+            int available = poolDataSource.getAvailableConnectionsCount();
+            int borrowed = poolDataSource.getBorrowedConnectionsCount();
+            
+            // If we have at least one available connection or can create new ones
+            return (available > 0) || (borrowed < poolDataSource.getMaxPoolSize());
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+    
+    /**
+     * Get last connection error
+     */
+    public String getLastConnectionError() {
+        if (lastConnectionError == null) {
+            return null;
+        }
+        
+        // Add time since last attempt
+        if (lastConnectionAttempt > 0) {
+            long timeSince = System.currentTimeMillis() - lastConnectionAttempt;
+            return lastConnectionError + " (occurred " + (timeSince / 1000) + " seconds ago)";
+        }
+        
+        return lastConnectionError;
+    }
+    
+    /**
+     * Get connection status for tools to check
+     */
+    public JsonObject getConnectionStatus() {
+        JsonObject status = new JsonObject()
+            .put("healthy", isConnectionHealthy())
+            .put("initialized", initialized);
+            
+        if (lastConnectionError != null) {
+            status.put("lastError", getLastConnectionError());
+        }
+        
+        if (initialized && poolDataSource != null) {
+            try {
+                status.put("availableConnections", poolDataSource.getAvailableConnectionsCount())
+                      .put("borrowedConnections", poolDataSource.getBorrowedConnectionsCount());
+            } catch (SQLException e) {
+                status.put("poolError", e.getMessage());
+            }
+        }
+        
+        return status;
     }
 }

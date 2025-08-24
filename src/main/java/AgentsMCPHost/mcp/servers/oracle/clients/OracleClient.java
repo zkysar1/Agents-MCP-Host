@@ -149,17 +149,34 @@ public class OracleClient extends AbstractVerticle {
         // Call tool via HTTP transport using MCP protocol
         oracleTransport.callTool(serverToolName, arguments)
             .onSuccess(result -> {
-                // Add metadata about which client handled it
-                result.put("_client", CLIENT_ID);
-                result.put("_transport", "HTTP");
-                
-                System.out.println("[OracleClient] Tool call succeeded: " + toolName);
-                
-                // Log success
-                vertx.eventBus().publish("log",
-                    "Tool " + toolName + " completed via HTTP,2,OracleClient,Success,Tool");
-                
-                msg.reply(result);
+                // Check if result contains an error
+                if (result.getBoolean("isError", false)) {
+                    String errorMessage = result.getString("error", "Unknown error");
+                    System.err.println("[OracleClient] Tool returned error: " + errorMessage);
+                    
+                    // Log error
+                    vertx.eventBus().publish("log",
+                        "Tool " + toolName + " returned error: " + errorMessage + ",0,OracleClient,Error,Tool");
+                    
+                    // Add metadata about which client handled it
+                    result.put("_client", CLIENT_ID);
+                    result.put("_transport", "HTTP");
+                    
+                    // Reply with error result (don't fail the message)
+                    msg.reply(result);
+                } else {
+                    // Add metadata about which client handled it
+                    result.put("_client", CLIENT_ID);
+                    result.put("_transport", "HTTP");
+                    
+                    System.out.println("[OracleClient] Tool call succeeded: " + toolName);
+                    
+                    // Log success
+                    vertx.eventBus().publish("log",
+                        "Tool " + toolName + " completed via HTTP,2,OracleClient,Success,Tool");
+                    
+                    msg.reply(result);
+                }
             })
             .onFailure(err -> {
                 System.err.println("[OracleClient] Tool call failed: " + err.getMessage());
@@ -201,18 +218,11 @@ public class OracleClient extends AbstractVerticle {
      * Publish tool discovery to McpHostManager
      */
     private void publishToolsDiscovered(JsonArray tools) {
-        // Create prefixed tool list for McpHostManager
-        JsonArray prefixedTools = new JsonArray();
-        for (int i = 0; i < tools.size(); i++) {
-            JsonObject tool = tools.getJsonObject(i).copy();
-            tool.put("name", "oracle__" + tool.getString("name"));
-            prefixedTools.add(tool);
-        }
-        
+        // Send tools without prefix - McpHostManager will handle prefixing
         JsonObject discovery = new JsonObject()
             .put("client", CLIENT_ID)
             .put("server", "oracle")
-            .put("tools", prefixedTools);
+            .put("tools", tools);
         
         vertx.eventBus().publish("mcp.tools.discovered", discovery);
         

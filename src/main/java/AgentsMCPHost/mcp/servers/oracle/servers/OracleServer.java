@@ -766,6 +766,12 @@ public class OracleServer extends AbstractVerticle {
      * Get sample data from tables
      */
     private Future<JsonObject> discoverSampleData(JsonObject arguments) {
+        // Check database connection first
+        Future<JsonObject> connectionCheck = checkDatabaseConnection();
+        if (connectionCheck != null) {
+            return connectionCheck;
+        }
+        
         JsonArray tableNames = arguments.getJsonArray("table_names");
         
         // Distinguish between null (missing) and empty array
@@ -952,6 +958,12 @@ public class OracleServer extends AbstractVerticle {
      * Optimize SQL query
      */
     private Future<JsonObject> optimizeSql(JsonObject arguments) {
+        // Check database connection first
+        Future<JsonObject> connectionCheck = checkDatabaseConnection();
+        if (connectionCheck != null) {
+            return connectionCheck;
+        }
+        
         // Try to get SQL from various places
         String sql = arguments.getString("sql");
         if (sql == null) {
@@ -1006,6 +1018,12 @@ public class OracleServer extends AbstractVerticle {
      * Validate SQL syntax
      */
     private Future<JsonObject> validateSql(JsonObject arguments) {
+        // Check database connection first
+        Future<JsonObject> connectionCheck = checkDatabaseConnection();
+        if (connectionCheck != null) {
+            return connectionCheck;
+        }
+        
         String sql = arguments.getString("sql");
         
         // Try to parse/prepare the statement without executing
@@ -1022,6 +1040,24 @@ public class OracleServer extends AbstractVerticle {
      * Execute SQL query
      */
     private Future<JsonObject> executeQuery(JsonObject arguments) {
+        // Check database connection health first
+        if (!oracleManager.isConnectionHealthy()) {
+            String lastError = oracleManager.getLastConnectionError();
+            String errorMessage = "Database connection is not available" + 
+                (lastError != null ? ": " + lastError : ". Please check database configuration and connectivity.");
+            System.err.println("[Oracle] executeQuery: " + errorMessage);
+            
+            vertx.eventBus().publish("log",
+                "executeQuery failed - database unavailable,0,Oracle,Error,Database");
+            
+            // Return error in consistent format
+            return Future.succeededFuture(new JsonObject()
+                .put("isError", true)
+                .put("error", errorMessage)
+                .put("results", new JsonArray())
+                .put("row_count", 0));
+        }
+        
         String sql = arguments.getString("sql");
         String streamId = arguments.getString("_streamId"); // Extract streamId if present
         
@@ -1104,6 +1140,12 @@ public class OracleServer extends AbstractVerticle {
      * Get execution plan
      */
     private Future<JsonObject> explainPlan(JsonObject arguments) {
+        // Check database connection first
+        Future<JsonObject> connectionCheck = checkDatabaseConnection();
+        if (connectionCheck != null) {
+            return connectionCheck;
+        }
+        
         String sql = arguments.getString("sql");
         
         return oracleManager.executeQuery("EXPLAIN PLAN FOR " + sql)
@@ -1185,6 +1227,27 @@ public class OracleServer extends AbstractVerticle {
     }
     
     // ============ HELPER METHODS ============
+    
+    /**
+     * Check if database connection is healthy and return error response if not
+     */
+    private Future<JsonObject> checkDatabaseConnection() {
+        if (!oracleManager.isConnectionHealthy()) {
+            String lastError = oracleManager.getLastConnectionError();
+            String errorMessage = "Database connection is not available" + 
+                (lastError != null ? ": " + lastError : ". Please check database configuration and connectivity.");
+            System.err.println("[Oracle] Database health check failed: " + errorMessage);
+            
+            vertx.eventBus().publish("log",
+                "Database unavailable - " + (lastError != null ? lastError : "connection failed") + ",0,Oracle,Error,Database");
+            
+            // Return error in consistent format
+            return Future.succeededFuture(new JsonObject()
+                .put("isError", true)
+                .put("error", errorMessage));
+        }
+        return null; // Connection is healthy
+    }
     
     private String buildAnalysisPrompt(String query, JsonArray context) {
         return "Analyze this query and extract:\n" +

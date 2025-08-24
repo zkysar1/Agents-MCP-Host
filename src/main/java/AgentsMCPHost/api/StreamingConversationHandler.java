@@ -125,10 +125,8 @@ public class StreamingConversationHandler {
             if ("active".equals(state)) {
                 JsonObject data = msg.body();
                 System.out.println("[StreamingHandler] Sending progress to client: " + data.getString("step"));
-                sendEvent(response, "progress", new JsonObject()
-                    .put("step", data.getString("step"))
-                    .put("message", data.getString("message"))
-                    .put("elapsed", data.getLong("elapsed", 0L)));
+                // Forward the entire progress data including details
+                sendEvent(response, "progress", data);
             } else {
                 System.out.println("[StreamingHandler] Ignoring progress event - stream not active: " + state);
             }
