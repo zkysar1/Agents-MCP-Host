@@ -134,11 +134,13 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
             .onFailure(err -> {
                 if (!replied[0]) {
                     replied[0] = true;
-                    System.err.println("[Orchestration] " + strategyName + " failed: " + err.getMessage());
+                    String errorMessage = err.getMessage();
+                    System.err.println("[Orchestration] " + strategyName + " failed: " + errorMessage);
                     if (progressTimerId[0] != null) {
                         vertx.cancelTimer(progressTimerId[0]);
                     }
-                    msg.fail(500, err.getMessage());
+                    // Pass through the error message without adding any prefix
+                    msg.fail(500, errorMessage);
                 }
             });
         
@@ -193,23 +195,62 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 String resultKey = step.getString("name", "step_" + context.currentStep);
                 context.stepResults.put(resultKey, result);
                 
-                // Check for error in result
+                // Check for critical errors FIRST
+                if (result.containsKey("severity") && "CRITICAL".equals(result.getString("severity"))) {
+                    String errorMsg = result.getString("error", "Critical error occurred");
+                    String stepName = step.getString("name", "step_" + context.currentStep);
+                    System.err.println("[Orchestration] CRITICAL ERROR in step " + context.currentStep + 
+                        " (" + toolName + "): " + errorMsg);
+                    
+                    // Publish critical error event
+                    vertx.eventBus().publish("critical.error", new JsonObject()
+                        .put("eventType", "critical.error")
+                        .put("component", "OrchestrationStrategy")
+                        .put("orchestration", strategyName)
+                        .put("step", stepName)
+                        .put("error", errorMsg)
+                        .put("severity", "CRITICAL")
+                        .put("timestamp", java.time.Instant.now().toString())
+                        .put("streamId", context.streamId));
+                    
+                    // Always stop orchestration for critical errors
+                    return Future.failedFuture("CRITICAL: " + errorMsg);
+                }
+                
+                // Check for regular errors
                 boolean isCriticalStep = step.getBoolean("critical", true); // Default to critical
                 if (result.containsKey("error") || result.getBoolean("isError", false)) {
                     String errorMsg = result.getString("error", "Unknown error");
                     System.err.println("[Orchestration] Step " + context.currentStep + " (" + toolName + ") failed with error: " + errorMsg);
                     
+                    // Check if this is a database connection error (treat as critical)
+                    if (errorMsg.contains("Database connection") || 
+                        errorMsg.contains("UCP-0") ||
+                        errorMsg.contains("connection pool")) {
+                        String stepName = step.getString("name", "step_" + context.currentStep);
+                        System.err.println("[Orchestration] Database connection error detected - treating as critical");
+                        
+                        // Publish critical error
+                        vertx.eventBus().publish("critical.error", new JsonObject()
+                            .put("eventType", "critical.error")
+                            .put("component", "OrchestrationStrategy")
+                            .put("orchestration", strategyName)
+                            .put("step", stepName)
+                            .put("error", errorMsg)
+                            .put("severity", "CRITICAL")
+                            .put("timestamp", java.time.Instant.now().toString())
+                            .put("streamId", context.streamId));
+                        
+                        return Future.failedFuture("CRITICAL: " + errorMsg);
+                    }
+                    
                     if (isCriticalStep) {
                         // Critical step failed - stop orchestration
                         System.err.println("[Orchestration] Critical step failed - stopping orchestration");
-                        String failureMessage = "Critical step " + context.currentStep + " (" + toolName + ") failed: " + errorMsg;
                         
-                        // Avoid recursive error wrapping - check if error already contains "Step X failed"
-                        if (errorMsg.contains("Step") && errorMsg.contains("failed")) {
-                            failureMessage = errorMsg; // Use original error message without wrapping
-                        }
-                        
-                        return Future.failedFuture(failureMessage);
+                        // Return the original error without any wrapping
+                        // The error already contains enough context from the tool
+                        return Future.failedFuture(errorMsg);
                     } else {
                         System.out.println("[Orchestration] Non-critical step failed - continuing");
                     }
@@ -290,7 +331,8 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 return executeStrategy(context, steps, stepIndex + 1);
             })
             .recover(err -> {
-                System.err.println("[Orchestration] Step " + context.currentStep + " failed: " + err.getMessage());
+                String errorMessage = err.getMessage();
+                System.err.println("[Orchestration] Step " + context.currentStep + " failed: " + errorMessage);
                 
                 // Check if step is critical
                 boolean isCriticalStep = step.getBoolean("critical", true);
@@ -303,14 +345,9 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 } else {
                     // Fail the entire orchestration
                     System.err.println("[Orchestration] Critical step or no partial success allowed - stopping orchestration");
-                    String errorMessage = err.getMessage();
                     
-                    // Avoid recursive error wrapping
-                    if (errorMessage != null && errorMessage.contains("Step") && errorMessage.contains("failed")) {
-                        return Future.failedFuture(errorMessage); // Don't wrap again
-                    } else {
-                        return Future.failedFuture("Step " + context.currentStep + " failed: " + errorMessage);
-                    }
+                    // Don't add any wrapping - just pass through the original error
+                    return Future.failedFuture(errorMessage);
                 }
             });
     }
@@ -459,8 +496,28 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                         } else {
                             // Map nested key to simpler key for the tool
                             String targetKey = nestedKey.equals("entities") ? "tokens" : nestedKey;
-                            arguments.put(targetKey, nestedValue);
-                            System.out.println("[Orchestration] Added nested " + key + " as " + targetKey);
+                            
+                            // Convert to proper JSON type if needed
+                            if (nestedValue instanceof List) {
+                                // Convert List/LinkedHashMap to JsonArray
+                                arguments.put(targetKey, new JsonArray((List<?>) nestedValue));
+                                System.out.println("[Orchestration] Added nested " + key + " as " + targetKey + " (converted List to JsonArray)");
+                            } else if (nestedValue instanceof Map) {
+                                // Convert Map to JsonObject with safe casting
+                                if (nestedValue instanceof Map<?, ?>) {
+                                    @SuppressWarnings("unchecked")
+                                    Map<String, Object> mapValue = (Map<String, Object>) nestedValue;
+                                    arguments.put(targetKey, new JsonObject(mapValue));
+                                    System.out.println("[Orchestration] Added nested " + key + " as " + targetKey + " (converted Map to JsonObject)");
+                                } else {
+                                    System.out.println("[Orchestration] WARNING: Unexpected Map type for " + key);
+                                }
+                            } else {
+                                // Already a proper type or primitive
+                                arguments.put(targetKey, nestedValue);
+                                System.out.println("[Orchestration] Added nested " + key + " as " + targetKey + " (type: " + 
+                                                 (nestedValue != null ? nestedValue.getClass().getSimpleName() : "null") + ")");
+                            }
                         }
                     } else {
                         System.out.println("[Orchestration] WARNING: Could not find nested value: " + key);

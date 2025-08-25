@@ -73,6 +73,7 @@ public class HostAPI extends AbstractVerticle {
     Health.setRouter(mainRouter);
     Status.setRouter(mainRouter);
     Conversation.setRouter(mainRouter);
+    Test.setRouter(mainRouter);
     
     // Mount MCP status endpoints from McpHostManager
     AgentsMCPHost.mcp.core.McpHostManager.setRouter(mainRouter);

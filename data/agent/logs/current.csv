@@ -1,56 +1,17 @@
 Message,Level,Class,Category,Character,SequenceReceived,EpochTimeMillis
-Oracle Orchestration deployed,3,Driver,StartUp,Orchestration,1,1756034416008
-Tool Selection Verticle deployed,3,Driver,StartUp,System,2,1756034416164
-LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System,3,1756034416164
-Deployed OracleServer,2,McpHostManager,Deployment,MCP,4,1756034416164
-Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,5,1756034420091
-Failed to initialize Oracle connection: UCP-0: Unable to start the Universal Connection Pool,0,OracleConnectionManager,StartUp,Database,6,1756034420094
-OracleClient discovered 24 tools via HTTP,2,OracleClient,Discovery,MCP,7,1756034421524
-OracleClient ready with HTTP transport,2,OracleClient,Registration,MCP,8,1756034421530
-OracleClient ready with 24 tools,1,OracleClient,StartUp,MCP,9,1756034421530
-Deployed OracleClient,2,McpHostManager,Deployment,MCP,10,1756034421530
-MCP Host Manager deployed,3,Driver,StartUp,MCP,11,1756034421530
-McpHostManager received tools.discovered from oracle with 24 tools,2,McpHostManager,Discovery,MCP,12,1756034421530
-McpHostManager received client.ready from oracle with 24 tools,2,McpHostManager,Registration,MCP,13,1756034421531
-MCP infrastructure ready,1,McpHostManager,StartUp,MCP,14,1756034421531
-ZAK-Agent startup complete,0,Driver,StartUp,System,15,1756034421532
-Host API server started on HTTP port 8080 - Access at http://localhost:8080,0,HostAPIVerticle,StartUp,System,16,1756034421537
-OpenAI API call successful,2,LlmAPIService,API,Success,17,1756034725961
-OpenAI API call successful,2,LlmAPIService,API,Success,18,1756034727973
-Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool,19,1756034727998
-Args for Analyze Query: {   "query" : "How many orders are there?" },3,OrchestrationStrategy,Arguments,Tool,20,1756034727999
-Orchestration routing oracle__analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool,21,1756034727999
-OpenAI API call successful,2,LlmAPIService,API,Success,22,1756034729380
-Tool analyze_query completed via HTTP,2,OracleClient,Success,Tool,23,1756034729382
-Tool oracle__analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool,24,1756034729386
-Step Analyze Query passing analysis,3,OrchestrationStrategy,DataFlow,Tool,25,1756034729387
-Building args for Match Schema step,3,OrchestrationStrategy,Arguments,Tool,26,1756034729388
-Args for Match Schema: {   "tokens" : [ "orders" ] },3,OrchestrationStrategy,Arguments,Tool,27,1756034729388
-Orchestration routing oracle__match_schema via MCP,3,OrchestrationStrategy,Routing,Tool,28,1756034729388
-Tool match_schema completed via HTTP,2,OracleClient,Success,Tool,29,1756034729406
-Tool oracle__match_schema routed successfully,2,OrchestrationStrategy,Success,Tool,30,1756034729409
-Step Match Schema passing schema_matches,3,OrchestrationStrategy,DataFlow,Tool,31,1756034729409
-Building args for Discover Data step,3,OrchestrationStrategy,Arguments,Tool,32,1756034729410
-Args for Discover Data: {   "table_names" : [ ] },3,OrchestrationStrategy,Arguments,Tool,33,1756034729410
-Orchestration routing oracle__discover_sample_data via MCP,3,OrchestrationStrategy,Routing,Tool,34,1756034729410
-Tool discover_sample_data completed via HTTP,2,OracleClient,Success,Tool,35,1756034729417
-Tool oracle__discover_sample_data routed successfully,2,OrchestrationStrategy,Success,Tool,36,1756034729420
-Step Discover Data passing sample_data,3,OrchestrationStrategy,DataFlow,Tool,37,1756034729421
-Building args for Generate SQL step,3,OrchestrationStrategy,Arguments,Tool,38,1756034729422
-Args for Generate SQL: {   "query" : "How many orders are there?",   "schema_matches" : {     "tables" : [ ],     "columns" : [ ],     "confidence" : 0.0,     "timed_out" : false   },   "sample_data" : {     "messa,3,OrchestrationStrategy,Arguments,Tool,39,1756034729422
-Orchestration routing oracle__generate_sql via MCP,3,OrchestrationStrategy,Routing,Tool,40,1756034729422
-OpenAI API call successful,2,LlmAPIService,API,Success,41,1756034729834
-Tool generate_sql completed via HTTP,2,OracleClient,Success,Tool,42,1756034729836
-Tool oracle__generate_sql routed successfully,2,OrchestrationStrategy,Success,Tool,43,1756034729838
-Step Generate SQL passing generated_sql,3,OrchestrationStrategy,DataFlow,Tool,44,1756034729839
-Building args for Optimize SQL step,3,OrchestrationStrategy,Arguments,Tool,45,1756034729839
-Args for Optimize SQL: {   "generated_sql" : {     "sql" : "SELECT COUNT(*) FROM ORDERS",     "confidence" : 0.8   } },3,OrchestrationStrategy,Arguments,Tool,46,1756034729839
-Orchestration routing oracle__optimize_sql via MCP,3,OrchestrationStrategy,Routing,Tool,47,1756034729839
-Tool optimize_sql completed via HTTP,2,OracleClient,Success,Tool,48,1756034729839
-Tool oracle__optimize_sql routed successfully,2,OrchestrationStrategy,Success,Tool,49,1756034729839
-Step Optimize SQL passing optimized_sql,3,OrchestrationStrategy,DataFlow,Tool,50,1756034729839
-Building args for Execute Query step,3,OrchestrationStrategy,Arguments,Tool,51,1756034729839
-Args for Execute Query: {   "optimized_sql" : "SELECT COUNT(*) FROM ORDERS",   "generated_sql" : {     "sql" : "SELECT COUNT(*) FROM ORDERS",     "confidence" : 0.8   } },3,OrchestrationStrategy,Arguments,Tool,52,1756034729839
-Orchestration routing oracle__execute_query via MCP,3,OrchestrationStrategy,Routing,Tool,53,1756034729839
-Tool execute_query completed via HTTP,2,OracleClient,Success,Tool,54,1756034729855
-Tool oracle__execute_query routed successfully,2,OrchestrationStrategy,Success,Tool,55,1756034729855
+Oracle Orchestration deployed,3,Driver,StartUp,Orchestration,1,1756083307217
+Tool Selection Verticle deployed,3,Driver,StartUp,System,2,1756083307407
+LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System,3,1756083307407
+Deployed OracleServer,2,McpHostManager,Deployment,MCP,4,1756083307411
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,5,1756083311685
+OracleClient discovered 32 tools via HTTP,2,OracleClient,Discovery,MCP,6,1756083312881
+OracleClient ready with HTTP transport,2,OracleClient,Registration,MCP,7,1756083312888
+OracleClient ready with 32 tools,1,OracleClient,StartUp,MCP,8,1756083312888
+Deployed OracleClient,2,McpHostManager,Deployment,MCP,9,1756083312888
+MCP Host Manager deployed,3,Driver,StartUp,MCP,10,1756083312888
+McpHostManager received tools.discovered from oracle with 32 tools,2,McpHostManager,Discovery,MCP,11,1756083312888
+McpHostManager received client.ready from oracle with 32 tools,2,McpHostManager,Registration,MCP,12,1756083312889
+MCP infrastructure ready,1,McpHostManager,StartUp,MCP,13,1756083312889
+ZAK-Agent startup complete,0,Driver,StartUp,System,14,1756083312890
+Host API server started on HTTP port 8080 - Access at http://localhost:8080,0,HostAPIVerticle,StartUp,System,15,1756083312894
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,16,1756083313646

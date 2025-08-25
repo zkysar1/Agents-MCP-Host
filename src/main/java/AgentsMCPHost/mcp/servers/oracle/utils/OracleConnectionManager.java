@@ -2,6 +2,9 @@ package AgentsMCPHost.mcp.servers.oracle.utils;
 
 import oracle.ucp.jdbc.PoolDataSource;
 import oracle.ucp.jdbc.PoolDataSourceFactory;
+import oracle.ucp.admin.UniversalConnectionPoolManager;
+import oracle.ucp.admin.UniversalConnectionPoolManagerImpl;
+import oracle.ucp.UniversalConnectionPoolException;
 import io.vertx.core.Vertx;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -12,6 +15,7 @@ import java.sql.*;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.time.Instant;
 import AgentsMCPHost.streaming.StreamingEventPublisher;
 
 /**
@@ -29,6 +33,8 @@ public class OracleConnectionManager {
     private String lastConnectionError = null;
     private long lastConnectionAttempt = 0;
     private static final long RETRY_INTERVAL_MS = 5000; // 5 seconds between retries
+    private int retryCount = 0;
+    private static final int MAX_RETRY_COUNT = 3;
     
     // Connection configuration
     private static final String DB_HOST = "adb.us-ashburn-1.oraclecloud.com";
@@ -59,13 +65,37 @@ public class OracleConnectionManager {
     }
     
     /**
+     * Publish critical error to event bus for system-wide notification
+     */
+    private void publishCriticalError(String error, String operation) {
+        if (vertx != null) {
+            JsonObject criticalError = new JsonObject()
+                .put("eventType", "critical.error")
+                .put("component", "OracleConnectionManager")
+                .put("operation", operation)
+                .put("error", error)
+                .put("severity", "CRITICAL")
+                .put("timestamp", Instant.now().toString())
+                .put("requiresRestart", true)
+                .put("userMessage", "Database connection critical failure. The system cannot access the database. Please contact support or restart the system.");
+            
+            vertx.eventBus().publish("critical.error", criticalError);
+            
+            // Also log for persistence
+            vertx.eventBus().publish("log",
+                "CRITICAL: " + error + ",0,OracleConnectionManager," + operation + ",Database");
+        }
+    }
+    
+    /**
      * Initialize the connection pool
      */
     public Future<Void> initialize(Vertx vertx) {
         this.vertx = vertx;
         Promise<Void> promise = Promise.promise();
         
-        if (initialized) {
+        // Quick check if already initialized and healthy
+        if (initialized && isConnectionHealthy()) {
             promise.complete();
             return promise.future();
         }
@@ -81,9 +111,6 @@ public class OracleConnectionManager {
                     password = "ARmy0320-- milk";
                 }
                 
-                // Load Oracle driver
-                Class.forName("oracle.jdbc.driver.OracleDriver");
-                
                 // Build JDBC URL with TLS
                 jdbcUrl = String.format(
                     "jdbc:oracle:thin:@(description=(retry_count=20)(retry_delay=3)" +
@@ -93,41 +120,115 @@ public class OracleConnectionManager {
                     DB_PORT, DB_HOST, DB_SERVICE
                 );
                 
-                // Initialize UCP connection pool
-                poolDataSource = PoolDataSourceFactory.getPoolDataSource();
-                poolDataSource.setConnectionFactoryClassName("oracle.jdbc.pool.OracleDataSource");
-                poolDataSource.setConnectionPoolName("OracleAgentPool");  // Set name for proper cleanup
-                poolDataSource.setURL(jdbcUrl);
-                poolDataSource.setUser(DB_USER);
-                poolDataSource.setPassword(password);
+                // Get the UCP manager singleton
+                UniversalConnectionPoolManager mgr = 
+                    UniversalConnectionPoolManagerImpl.getUniversalConnectionPoolManager();
                 
-                // Configure pool settings
-                poolDataSource.setInitialPoolSize(MIN_POOL_SIZE);
-                poolDataSource.setMinPoolSize(MIN_POOL_SIZE);
-                poolDataSource.setMaxPoolSize(MAX_POOL_SIZE);
-                poolDataSource.setConnectionWaitTimeout(CONNECTION_TIMEOUT);
-                poolDataSource.setValidateConnectionOnBorrow(true);
-                poolDataSource.setMaxIdleTime(300); // 5 minutes
+                // Check if our pool already exists
+                String[] existingPools = mgr.getConnectionPoolNames();
+                boolean poolExists = false;
                 
-                // Test the connection
-                try (Connection conn = poolDataSource.getConnection()) {
-                    if (!conn.isValid(5)) {
-                        throw new SQLException("Connection validation failed");
-                    }
-                    // Log successful initialization
-                    if (vertx != null) {
-                        vertx.eventBus().publish("log", "Oracle UCP pool initialized - " + DB_SERVICE + 
-                            " (min=" + MIN_POOL_SIZE + ", max=" + MAX_POOL_SIZE + "),1,OracleConnectionManager,StartUp,Database");
+                for (String poolName : existingPools) {
+                    if ("OracleAgentPool".equals(poolName)) {
+                        poolExists = true;
+                        break;
                     }
                 }
                 
-                initialized = true;
-                lastConnectionError = null;
-                return null; // Return null for Void
+                if (poolExists) {
+                    // Pool exists - try to reuse it
+                    try {
+                        System.out.println("[OracleConnectionManager] Found existing pool 'OracleAgentPool', attempting to reuse...");
+                        
+                        // Get existing pool reference
+                        // Note: getConnectionPool returns UniversalConnectionPoolAdapter which implements PoolDataSource
+                        poolDataSource = (PoolDataSource) mgr.getConnectionPool("OracleAgentPool");
+                        
+                        // Test if it's healthy
+                        try (Connection conn = poolDataSource.getConnection()) {
+                            if (conn.isValid(5)) {
+                                // Existing pool is healthy - reuse it!
+                                initialized = true;
+                                lastConnectionError = null;
+                                
+                                if (vertx != null) {
+                                    vertx.eventBus().publish("log", "Reusing existing healthy Oracle connection pool,1,OracleConnectionManager,StartUp,Database");
+                                }
+                                
+                                System.out.println("[OracleConnectionManager] Successfully reusing existing healthy connection pool");
+                                return null; // Success - reused existing pool
+                            }
+                        }
+                    } catch (Exception e) {
+                        // Existing pool is unhealthy - need to destroy and recreate
+                        System.out.println("[OracleConnectionManager] Existing pool unhealthy: " + e.getMessage());
+                        System.out.println("[OracleConnectionManager] Destroying unhealthy pool and creating new one...");
+                        
+                        try {
+                            mgr.destroyConnectionPool("OracleAgentPool");
+                        } catch (UniversalConnectionPoolException uce) {
+                            // Ignore - pool might already be in bad state
+                            System.out.println("[OracleConnectionManager] Warning during pool destroy: " + uce.getMessage());
+                        }
+                        
+                        poolExists = false; // Will create new one below
+                    }
+                }
+                
+                // Create new pool only if needed
+                if (!poolExists) {
+                    System.out.println("[OracleConnectionManager] Creating new connection pool...");
+                    
+                    // Load Oracle driver
+                    Class.forName("oracle.jdbc.driver.OracleDriver");
+                    
+                    // Initialize UCP connection pool
+                    poolDataSource = PoolDataSourceFactory.getPoolDataSource();
+                    poolDataSource.setConnectionFactoryClassName("oracle.jdbc.pool.OracleDataSource");
+                    poolDataSource.setConnectionPoolName("OracleAgentPool");  // Set name for proper cleanup
+                    poolDataSource.setURL(jdbcUrl);
+                    poolDataSource.setUser(DB_USER);
+                    poolDataSource.setPassword(password);
+                    
+                    // Configure pool settings
+                    poolDataSource.setInitialPoolSize(MIN_POOL_SIZE);
+                    poolDataSource.setMinPoolSize(MIN_POOL_SIZE);
+                    poolDataSource.setMaxPoolSize(MAX_POOL_SIZE);
+                    poolDataSource.setConnectionWaitTimeout(CONNECTION_TIMEOUT);
+                    poolDataSource.setValidateConnectionOnBorrow(true);
+                    poolDataSource.setMaxIdleTime(300); // 5 minutes
+                    
+                    // Test the connection
+                    try (Connection conn = poolDataSource.getConnection()) {
+                        if (!conn.isValid(5)) {
+                            throw new SQLException("Connection validation failed");
+                        }
+                        
+                        // Only set initialized to true if connection actually works
+                        initialized = true;
+                        lastConnectionError = null;
+                        
+                        // Log successful initialization
+                        if (vertx != null) {
+                            vertx.eventBus().publish("log", "Oracle UCP pool initialized - " + DB_SERVICE + 
+                                " (min=" + MIN_POOL_SIZE + ", max=" + MAX_POOL_SIZE + "),1,OracleConnectionManager,StartUp,Database");
+                        }
+                        
+                        System.out.println("[OracleConnectionManager] Successfully created and tested new connection pool");
+                        return null; // Return null for Void
+                    }
+                }
+                
+                // Should not reach here, but return null for completeness
+                return null;
                 
             } catch (SQLException e) {
                 lastConnectionError = "SQL Exception: " + e.getMessage();
                 lastConnectionAttempt = System.currentTimeMillis();
+                
+                // Publish critical error for SQL exceptions
+                publishCriticalError(e.getMessage(), "Initialization");
+                
                 if (vertx != null) {
                     vertx.eventBus().publish("log", "Failed to initialize Oracle connection: " + e.getMessage() + 
                         ",0,OracleConnectionManager,StartUp,Database");
@@ -136,6 +237,10 @@ public class OracleConnectionManager {
             } catch (ClassNotFoundException e) {
                 lastConnectionError = "Oracle JDBC driver not found: " + e.getMessage();
                 lastConnectionAttempt = System.currentTimeMillis();
+                
+                // Publish critical error for missing driver
+                publishCriticalError("Oracle JDBC driver not found: " + e.getMessage(), "Initialization");
+                
                 if (vertx != null) {
                     vertx.eventBus().publish("log", "Oracle JDBC driver not found: " + e.getMessage() + 
                         ",0,OracleConnectionManager,StartUp,Database");
@@ -144,6 +249,10 @@ public class OracleConnectionManager {
             } catch (Exception e) {
                 lastConnectionError = "Connection failed: " + e.getMessage();
                 lastConnectionAttempt = System.currentTimeMillis();
+                
+                // Publish critical error for any other initialization failure
+                publishCriticalError("Connection failed: " + e.getMessage(), "Initialization");
+                
                 if (vertx != null) {
                     vertx.eventBus().publish("log", "Failed to initialize Oracle connection: " + e.getMessage() + 
                         ",0,OracleConnectionManager,StartUp,Database");
@@ -506,50 +615,30 @@ public class OracleConnectionManager {
         // Use new Callable API for executeBlocking (Vert.x 4.5+)
         return vertx.executeBlocking(() -> {
             try {
-                // Properly close the Oracle UCP connection pool
                 if (poolDataSource != null) {
-                    // First, set connection wait timeout to 0 to prevent new connections
-                    poolDataSource.setConnectionWaitTimeout(0);
-                    
-                    // Get the pool name if set
                     String poolName = poolDataSource.getConnectionPoolName();
                     
-                    if (poolName != null && !poolName.isEmpty()) {
-                        // Use UniversalConnectionPoolManager for proper cleanup
-                        try {
-                            oracle.ucp.admin.UniversalConnectionPoolManager mgr = 
-                                oracle.ucp.admin.UniversalConnectionPoolManagerImpl
-                                    .getUniversalConnectionPoolManager();
-                            
-                            // First purge all connections
-                            mgr.purgeConnectionPool(poolName);
-                            
-                            // Then destroy the pool
-                            mgr.destroyConnectionPool(poolName);
-                            
-                            System.out.println("[OracleConnectionManager] Connection pool '" + poolName + "' destroyed successfully");
-                        } catch (oracle.ucp.UniversalConnectionPoolException e) {
-                            // If manager fails, at least nullify the reference
-                            System.err.println("[OracleConnectionManager] Failed to destroy pool via manager: " + e.getMessage());
-                        }
-                    }
+                    // Mark as not initialized first
+                    initialized = false;
                     
-                    // Nullify the reference
+                    // Don't destroy the pool - just release our reference
+                    // This allows other parts of the application to potentially reuse it
                     poolDataSource = null;
+                    
+                    System.out.println("[OracleConnectionManager] Released reference to pool '" + poolName + "' (pool remains active for reuse)");
+                    
+                    if (vertx != null) {
+                        vertx.eventBus().publish("log", "Released Oracle pool reference (pool remains active for reuse),1,OracleConnectionManager,Shutdown,Database");
+                    }
                 }
                 
-                // Clean up connection manager
+                // Clean up other references
                 jdbcUrl = null;
                 password = null;
-                initialized = false;
-                
-                if (vertx != null) {
-                    vertx.eventBus().publish("log", "Oracle UCP pool shut down properly,1,OracleConnectionManager,Shutdown,Database");
-                }
                 
                 return null;  // Return null for Void
-            } catch (SQLException e) {
-                throw new RuntimeException("Failed to shutdown connection pool: " + e.getMessage(), e);
+            } catch (Exception e) {
+                throw new RuntimeException("Shutdown error: " + e.getMessage(), e);
             }
         }, false);  // Unordered execution
     }
@@ -563,13 +652,39 @@ public class OracleConnectionManager {
         }
         
         try {
-            // Quick check of pool statistics
+            // Quick check of pool statistics first
             int available = poolDataSource.getAvailableConnectionsCount();
             int borrowed = poolDataSource.getBorrowedConnectionsCount();
             
-            // If we have at least one available connection or can create new ones
-            return (available > 0) || (borrowed < poolDataSource.getMaxPoolSize());
+            // If pool is maxed out, we can't get a connection
+            if (borrowed >= poolDataSource.getMaxPoolSize() && available == 0) {
+                lastConnectionError = "Connection pool exhausted";
+                return false;
+            }
+            
+            // Actually try to get a connection to verify it works
+            // Use a very short timeout to avoid blocking
+            int originalTimeout = poolDataSource.getConnectionWaitTimeout();
+            poolDataSource.setConnectionWaitTimeout(2); // 2 seconds
+            
+            try (Connection conn = poolDataSource.getConnection()) {
+                boolean isValid = conn.isValid(1); // 1 second validation timeout
+                if (!isValid) {
+                    lastConnectionError = "Connection validation failed";
+                    lastConnectionAttempt = System.currentTimeMillis();
+                }
+                return isValid;
+            } catch (SQLException e) {
+                lastConnectionError = "Failed to get connection: " + e.getMessage();
+                lastConnectionAttempt = System.currentTimeMillis();
+                return false;
+            } finally {
+                // Restore original timeout
+                poolDataSource.setConnectionWaitTimeout(originalTimeout);
+            }
         } catch (SQLException e) {
+            lastConnectionError = "Pool error: " + e.getMessage();
+            lastConnectionAttempt = System.currentTimeMillis();
             return false;
         }
     }
@@ -597,7 +712,8 @@ public class OracleConnectionManager {
     public JsonObject getConnectionStatus() {
         JsonObject status = new JsonObject()
             .put("healthy", isConnectionHealthy())
-            .put("initialized", initialized);
+            .put("initialized", initialized)
+            .put("retryCount", retryCount);
             
         if (lastConnectionError != null) {
             status.put("lastError", getLastConnectionError());
@@ -606,12 +722,64 @@ public class OracleConnectionManager {
         if (initialized && poolDataSource != null) {
             try {
                 status.put("availableConnections", poolDataSource.getAvailableConnectionsCount())
-                      .put("borrowedConnections", poolDataSource.getBorrowedConnectionsCount());
+                      .put("borrowedConnections", poolDataSource.getBorrowedConnectionsCount())
+                      .put("maxConnections", poolDataSource.getMaxPoolSize());
             } catch (SQLException e) {
                 status.put("poolError", e.getMessage());
             }
         }
         
         return status;
+    }
+    
+    /**
+     * Attempt to reconnect if connection has failed
+     */
+    public Future<Void> attemptReconnection() {
+        if (initialized && isConnectionHealthy()) {
+            // Already connected
+            return Future.succeededFuture();
+        }
+        
+        // Check if we should retry
+        long timeSinceLastAttempt = System.currentTimeMillis() - lastConnectionAttempt;
+        long backoffTime = RETRY_INTERVAL_MS * (1L << Math.min(retryCount, 4)); // Exponential backoff, max 80 seconds
+        
+        if (timeSinceLastAttempt < backoffTime) {
+            return Future.failedFuture("Retry backoff period not elapsed. Wait " + 
+                (backoffTime - timeSinceLastAttempt) / 1000 + " more seconds");
+        }
+        
+        if (retryCount >= MAX_RETRY_COUNT) {
+            return Future.failedFuture("Maximum retry attempts (" + MAX_RETRY_COUNT + ") exceeded");
+        }
+        
+        retryCount++;
+        lastConnectionAttempt = System.currentTimeMillis();
+        
+        System.out.println("[OracleConnectionManager] Attempting reconnection (attempt " + retryCount + "/" + MAX_RETRY_COUNT + ")");
+        
+        // If already initialized but not healthy, try to reset
+        if (initialized) {
+            return shutdown()
+                .compose(v -> initialize(vertx))
+                .onSuccess(v -> {
+                    retryCount = 0; // Reset on success
+                    System.out.println("[OracleConnectionManager] Reconnection successful");
+                })
+                .onFailure(err -> {
+                    System.err.println("[OracleConnectionManager] Reconnection failed: " + err.getMessage());
+                });
+        } else {
+            // Not initialized, just try to initialize
+            return initialize(vertx)
+                .onSuccess(v -> {
+                    retryCount = 0; // Reset on success
+                    System.out.println("[OracleConnectionManager] Connection successful");
+                })
+                .onFailure(err -> {
+                    System.err.println("[OracleConnectionManager] Connection failed: " + err.getMessage());
+                });
+        }
     }
 }

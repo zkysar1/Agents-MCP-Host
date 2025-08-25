@@ -4,6 +4,14 @@ import AgentsMCPHost.mcp.servers.oracle.orchestration.SchemaMatcher;
 import AgentsMCPHost.mcp.servers.oracle.orchestration.QueryTokenExtractor;
 import AgentsMCPHost.mcp.servers.oracle.utils.OracleConnectionManager;
 import AgentsMCPHost.mcp.servers.oracle.utils.EnumerationMapper;
+import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.SmartSQLOptimizer;
+import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.DeepQueryAnalyzer;
+import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.ColumnSemanticsDiscoverer;
+import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.BusinessTermMapper;
+import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.RelationshipInferrer;
+import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.IntelligentSchemaMatcher;
+import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.SQLSchemaValidator;
+import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.OracleErrorParser;
 import AgentsMCPHost.llm.LlmAPIService;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Promise;
@@ -17,6 +25,9 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 
 import java.util.*;
+import java.time.Instant;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 /**
  * Oracle MCP Server - Exposes ALL Oracle capabilities as individual, composable tools.
@@ -43,6 +54,14 @@ public class OracleServer extends AbstractVerticle {
     private SchemaMatcher schemaMatcher;
     private EnumerationMapper enumMapper;
     private LlmAPIService llmService;
+    private SmartSQLOptimizer sqlOptimizer;
+    private DeepQueryAnalyzer deepQueryAnalyzer;
+    private ColumnSemanticsDiscoverer columnSemanticsDiscoverer;
+    private BusinessTermMapper businessTermMapper;
+    private RelationshipInferrer relationshipInferrer;
+    private IntelligentSchemaMatcher intelligentSchemaMatcher;
+    private SQLSchemaValidator sqlSchemaValidator;
+    private OracleErrorParser oracleErrorParser;
     
     // Session management for stateful operations
     private final Map<String, JsonObject> sessions = new HashMap<>();
@@ -148,6 +167,22 @@ public class OracleServer extends AbstractVerticle {
                 .put("required", new JsonArray().add("sql"))))
         
         .add(new JsonObject()
+            .put("name", "optimize_sql_smart")
+            .put("description", "Intelligently optimize SQL with proper EXPLAIN PLAN and complexity checking")
+            .put("category", "generation")
+            .put("inputSchema", new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("sql", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "SQL query to optimize"))
+                    .put("complexity_threshold", new JsonObject()
+                        .put("type", "number")
+                        .put("default", 0.3)
+                        .put("description", "Skip optimization below this complexity (0.0-1.0)")))
+                .put("required", new JsonArray().add("sql"))))
+        
+        .add(new JsonObject()
             .put("name", "validate_sql")
             .put("description", "Validate SQL syntax without executing")
             .put("category", "validation")
@@ -156,6 +191,21 @@ public class OracleServer extends AbstractVerticle {
                 .put("properties", new JsonObject()
                     .put("sql", new JsonObject()
                         .put("type", "string")))
+                .put("required", new JsonArray().add("sql"))))
+        
+        .add(new JsonObject()
+            .put("name", "validate_schema_sql")
+            .put("description", "Validate SQL against actual database schema to ensure all tables and columns exist")
+            .put("category", "validation")
+            .put("inputSchema", new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("sql", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "SQL query to validate"))
+                    .put("schema_context", new JsonObject()
+                        .put("type", "object")
+                        .put("description", "Optional schema context from previous tools")))
                 .put("required", new JsonArray().add("sql"))))
         
         // ============ EXECUTION TOOLS ============
@@ -362,7 +412,102 @@ public class OracleServer extends AbstractVerticle {
                         .put("type", "string"))
                     .put("column_name", new JsonObject()
                         .put("type", "string")))
-                .put("required", new JsonArray().add("table_name").add("column_name"))));
+                .put("required", new JsonArray().add("table_name").add("column_name"))))
+        
+        // ============ INTELLIGENCE TOOLS ============
+        .add(new JsonObject()
+            .put("name", "oracle__deep_analyze_query")
+            .put("description", "Deeply analyze query to extract ALL semantic concepts, not just entities")
+            .put("category", "intelligence")
+            .put("inputSchema", new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("query", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Natural language query to analyze"))
+                    .put("conversation_history", new JsonObject()
+                        .put("type", "array")
+                        .put("description", "Optional conversation context")))
+                .put("required", new JsonArray().add("query"))))
+        
+        .add(new JsonObject()
+            .put("name", "oracle__discover_column_semantics")
+            .put("description", "Discover what columns contain based on data patterns and query needs")
+            .put("category", "intelligence")
+            .put("inputSchema", new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("tables", new JsonObject()
+                        .put("type", "array")
+                        .put("items", new JsonObject().put("type", "string"))
+                        .put("description", "Tables to analyze"))
+                    .put("query_analysis", new JsonObject()
+                        .put("type", "object")
+                        .put("description", "Deep query analysis result")))
+                .put("required", new JsonArray().add("tables").add("query_analysis"))))
+        
+        .add(new JsonObject()
+            .put("name", "oracle__map_business_terms")
+            .put("description", "Map business language to technical database terms")
+            .put("category", "intelligence")
+            .put("inputSchema", new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("business_terms", new JsonObject()
+                        .put("type", "array")
+                        .put("items", new JsonObject().put("type", "string"))
+                        .put("description", "Business terms to map"))
+                    .put("schema_context", new JsonObject()
+                        .put("type", "object")
+                        .put("description", "Available schema information")))
+                .put("required", new JsonArray().add("business_terms").add("schema_context"))))
+        
+        .add(new JsonObject()
+            .put("name", "oracle__infer_relationships")
+            .put("description", "Discover relationships between tables even without foreign keys")
+            .put("category", "intelligence")
+            .put("inputSchema", new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("tables", new JsonObject()
+                        .put("type", "array")
+                        .put("items", new JsonObject().put("type", "string"))
+                        .put("description", "Tables to find relationships between"))
+                    .put("query_analysis", new JsonObject()
+                        .put("type", "object")
+                        .put("description", "Query analysis for context")))
+                .put("required", new JsonArray().add("tables"))))
+        
+        .add(new JsonObject()
+            .put("name", "oracle__smart_schema_match")
+            .put("description", "Intelligently match schema using deep analysis and all discovery tools")
+            .put("category", "intelligence")
+            .put("inputSchema", new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("query", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Natural language query"))
+                    .put("conversation_history", new JsonObject()
+                        .put("type", "array")
+                        .put("description", "Optional conversation context")))
+                .put("required", new JsonArray().add("query"))))
+        
+        .add(new JsonObject()
+            .put("name", "oracle__optimize_sql_smart")
+            .put("description", "Intelligently optimize SQL using EXPLAIN PLAN and complexity analysis")
+            .put("category", "intelligence")
+            .put("inputSchema", new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("sql", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "SQL query to optimize"))
+                    .put("complexity_threshold", new JsonObject()
+                        .put("type", "number")
+                        .put("default", 0.3)
+                        .put("description", "Threshold below which to skip optimization")))
+                .put("required", new JsonArray().add("sql"))));
     
     @Override
     public void start(Promise<Void> startPromise) {
@@ -375,6 +520,15 @@ public class OracleServer extends AbstractVerticle {
         enumMapper = EnumerationMapper.getInstance();
         llmService = LlmAPIService.getInstance();
         llmService.setupService(vertx);
+        sqlOptimizer = new SmartSQLOptimizer(oracleManager);
+        deepQueryAnalyzer = new DeepQueryAnalyzer(llmService);
+        columnSemanticsDiscoverer = new ColumnSemanticsDiscoverer(oracleManager);
+        businessTermMapper = new BusinessTermMapper(llmService, enumMapper);
+        relationshipInferrer = new RelationshipInferrer(oracleManager);
+        intelligentSchemaMatcher = new IntelligentSchemaMatcher(schemaMatcher, deepQueryAnalyzer, 
+            businessTermMapper, columnSemanticsDiscoverer, relationshipInferrer);
+        sqlSchemaValidator = new SQLSchemaValidator(oracleManager);
+        oracleErrorParser = new OracleErrorParser();
         
         // Create router
         Router router = Router.router(vertx);
@@ -566,8 +720,14 @@ public class OracleServer extends AbstractVerticle {
             case "optimize_sql":
                 resultFuture = optimizeSql(arguments);
                 break;
+            case "optimize_sql_smart":
+                resultFuture = optimizeSqlSmart(arguments);
+                break;
             case "validate_sql":
                 resultFuture = validateSql(arguments);
+                break;
+            case "validate_schema_sql":
+                resultFuture = validateSchemaSql(arguments);
                 break;
                 
             // Execution tools
@@ -625,6 +785,26 @@ public class OracleServer extends AbstractVerticle {
                 break;
             case "get_column_statistics":
                 resultFuture = getColumnStatistics(arguments);
+                break;
+                
+            // Intelligence tools
+            case "oracle__deep_analyze_query":
+                resultFuture = deepAnalyzeQuery(arguments);
+                break;
+            case "oracle__discover_column_semantics":
+                resultFuture = discoverColumnSemantics(arguments);
+                break;
+            case "oracle__map_business_terms":
+                resultFuture = mapBusinessTerms(arguments);
+                break;
+            case "oracle__infer_relationships":
+                resultFuture = inferRelationships(arguments);
+                break;
+            case "oracle__smart_schema_match":
+                resultFuture = smartSchemaMatch(arguments);
+                break;
+            case "oracle__optimize_sql_smart":
+                resultFuture = optimizeSqlSmart(arguments);
                 break;
                 
             default:
@@ -931,7 +1111,35 @@ public class OracleServer extends AbstractVerticle {
             System.out.println("[Oracle]   Columns found: " + columns.size());
         }
         
-        String prompt = buildSqlGenerationPrompt(query, schemaContext, discoveredData);
+        // Save schema context for error parsing
+        sessions.put("lastSchemaContext", schemaContext);
+        
+        // Make a final copy for use in lambda
+        final String finalQuery = query;
+        final JsonObject finalSchemaContext = schemaContext;
+        
+        // Check for additional constraints from retry mechanism
+        String additionalConstraint = arguments.getString("additional_constraint", "");
+        
+        // Check for validation corrections from previous failed attempt
+        JsonObject validationCorrections = arguments.getJsonObject("validation.suggestedCorrections");
+        if (validationCorrections == null) {
+            // Try alternate path from orchestration
+            validationCorrections = arguments.getJsonObject("suggestedCorrections");
+        }
+        
+        // Build the prompt with error-learning if corrections available
+        String prompt;
+        if (validationCorrections != null && !validationCorrections.isEmpty()) {
+            prompt = buildErrorLearningPrompt(query, schemaContext, discoveredData, validationCorrections);
+        } else {
+            prompt = buildSqlGenerationPrompt(query, schemaContext, discoveredData);
+        }
+        
+        // Add additional constraint if present
+        if (!additionalConstraint.isEmpty()) {
+            prompt = prompt + "\n\nADDITIONAL CONSTRAINT: " + additionalConstraint;
+        }
         
         JsonArray messages = new JsonArray()
             .add(new JsonObject()
@@ -947,6 +1155,11 @@ public class OracleServer extends AbstractVerticle {
                 String cleanSql = stripMarkdownFromSql(rawSql);
                 
                 System.out.println("[Oracle] Generated SQL (clean): " + cleanSql);
+                
+                // Cache successful query pattern
+                if (!cleanSql.toUpperCase().contains("SELECT 1 FROM DUAL")) {
+                    oracleErrorParser.cacheSuccessfulMapping(finalQuery, cleanSql, finalSchemaContext);
+                }
                 
                 return new JsonObject()
                     .put("sql", cleanSql)
@@ -990,28 +1203,40 @@ public class OracleServer extends AbstractVerticle {
                 .put("changes", "No optimization requested"));
         }
         
-        // Get execution plan
-        return oracleManager.executeQuery("EXPLAIN PLAN FOR " + finalSql)
-            .compose(v -> oracleManager.executeQuery(
-                "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY())"))
-            .map(planRows -> {
-                String plan = planRows.encodePrettily();
-                
-                // Use LLM to suggest optimizations
-                String prompt = "Given this SQL and execution plan, suggest optimizations:\n\n" +
-                              "SQL: " + finalSql + "\n\n" +
-                              "Plan: " + plan;
-                
-                return new JsonObject()
-                    .put("optimized_sql", finalSql)
-                    .put("execution_plan", plan)
-                    .put("suggestions", "Consider adding indexes on join columns");
-            })
+        // Use SmartSQLOptimizer with default complexity threshold
+        return sqlOptimizer.optimize(finalSql, 0.3)
             .recover(err -> {
                 return Future.succeededFuture(new JsonObject()
                     .put("optimized_sql", finalSql)
                     .put("error", "Could not optimize: " + err.getMessage()));
             });
+    }
+    
+    /**
+     * Smart SQL optimization with complexity checking
+     */
+    private Future<JsonObject> optimizeSqlSmart(JsonObject arguments) {
+        // Check database connection first
+        Future<JsonObject> connectionCheck = checkDatabaseConnection();
+        if (connectionCheck != null) {
+            return connectionCheck;
+        }
+        
+        String sql = arguments.getString("sql");
+        
+        // Null check
+        if (sql == null || sql.trim().isEmpty()) {
+            String error = "Missing required argument: sql";
+            vertx.eventBus().publish("log",
+                "optimizeSqlSmart missing sql argument,0,Oracle,Error,Validation");
+            System.err.println("[Oracle] optimizeSqlSmart: " + error);
+            return Future.failedFuture(error);
+        }
+        
+        double complexityThreshold = arguments.getDouble("complexity_threshold", 0.3);
+        
+        // Use SmartSQLOptimizer
+        return sqlOptimizer.optimize(sql, complexityThreshold);
     }
     
     /**
@@ -1037,6 +1262,25 @@ public class OracleServer extends AbstractVerticle {
     }
     
     /**
+     * Validate SQL against database schema
+     */
+    private Future<JsonObject> validateSchemaSql(JsonObject arguments) {
+        String sql = arguments.getString("sql");
+        if (sql == null || sql.trim().isEmpty()) {
+            return Future.failedFuture("Missing required argument: sql");
+        }
+        
+        JsonObject schemaContext = arguments.getJsonObject("schema_context", new JsonObject());
+        
+        return sqlSchemaValidator.validateSQL(sql, schemaContext)
+            .recover(err -> {
+                return Future.succeededFuture(new JsonObject()
+                    .put("valid", false)
+                    .put("error", "Validation failed: " + err.getMessage()));
+            });
+    }
+    
+    /**
      * Execute SQL query
      */
     private Future<JsonObject> executeQuery(JsonObject arguments) {
@@ -1047,13 +1291,27 @@ public class OracleServer extends AbstractVerticle {
                 (lastError != null ? ": " + lastError : ". Please check database configuration and connectivity.");
             System.err.println("[Oracle] executeQuery: " + errorMessage);
             
+            // Publish critical error event
+            vertx.eventBus().publish("critical.error", new JsonObject()
+                .put("eventType", "critical.error")
+                .put("component", "OracleServer")
+                .put("operation", "executeQuery")
+                .put("error", errorMessage)
+                .put("severity", "CRITICAL")
+                .put("timestamp", java.time.Instant.now().toString())
+                .put("requiresRestart", true)
+                .put("userMessage", "Database service is currently unavailable. Please try again later or contact support."));
+            
             vertx.eventBus().publish("log",
                 "executeQuery failed - database unavailable,0,Oracle,Error,Database");
             
-            // Return error in consistent format
+            // Return error in consistent format with severity
             return Future.succeededFuture(new JsonObject()
                 .put("isError", true)
+                .put("severity", "CRITICAL")
                 .put("error", errorMessage)
+                .put("requiresUserAction", true)
+                .put("userMessage", "Database service is currently unavailable. Please try again later or contact support.")
                 .put("results", new JsonArray())
                 .put("row_count", 0));
         }
@@ -1120,17 +1378,36 @@ public class OracleServer extends AbstractVerticle {
                 String errorMsg = error.getMessage();
                 System.out.println("[Oracle] Query execution failed: " + errorMsg);
                 
-                // If it's ORA-00933 and the SQL has a semicolon, try removing it
-                if (errorMsg != null && errorMsg.contains("ORA-00933") && finalSql.contains(";")) {
-                    System.out.println("[Oracle] Detected ORA-00933 with semicolon, retrying without semicolon");
-                    String cleanedSql = finalSql.replace(";", "").trim();
-                    return oracleManager.executeQuery(cleanedSql, streamId)
-                        .map(results -> new JsonObject()
-                            .put("results", results)
-                            .put("row_count", results.size())
-                            .put("sql_executed", cleanedSql)
-                            .put("note", "Removed semicolon after ORA-00933 error"));
+                // Parse Oracle error for schema-aware feedback
+                if (errorMsg != null && errorMsg.contains("ORA-")) {
+                    // Get last schema context used
+                    JsonObject schemaContext = sessions.getOrDefault("lastSchemaContext", new JsonObject());
+                    JsonObject errorFeedback = oracleErrorParser.parseError(errorMsg, schemaContext);
+                    
+                    // Publish error feedback for retry mechanism
+                    vertx.eventBus().publish("oracle.error.feedback", errorFeedback);
+                    
+                    // If it's ORA-00933 and the SQL has a semicolon, try removing it
+                    if (errorMsg.contains("ORA-00933") && finalSql.contains(";")) {
+                        System.out.println("[Oracle] Detected ORA-00933 with semicolon, retrying without semicolon");
+                        String cleanedSql = finalSql.replace(";", "").trim();
+                        return oracleManager.executeQuery(cleanedSql, streamId)
+                            .map(results -> new JsonObject()
+                                .put("results", results)
+                                .put("row_count", results.size())
+                                .put("sql_executed", cleanedSql)
+                                .put("note", "Removed semicolon after ORA-00933 error"));
+                    }
+                    
+                    // Return error with feedback
+                    return Future.succeededFuture(new JsonObject()
+                        .put("error", errorMsg)
+                        .put("error_feedback", errorFeedback)
+                        .put("retry_hint", "Use error_feedback to correct SQL")
+                        .put("results", new JsonArray())
+                        .put("row_count", 0));
                 }
+                
                 // Otherwise, propagate the original error
                 return Future.failedFuture(error);
             });
@@ -1163,6 +1440,10 @@ public class OracleServer extends AbstractVerticle {
         String originalQuery = arguments.getString("original_query", arguments.getString("query", ""));
         String sqlExecuted = arguments.getString("sql_executed", arguments.getString("generated_sql", ""));
         
+        // Check for critical errors in arguments
+        boolean hasCriticalError = arguments.getBoolean("isError", false) && 
+                                   "CRITICAL".equals(arguments.getString("severity"));
+        
         // Handle results - could be JsonArray, String (error), or missing
         JsonArray results = null;
         String error = arguments.getString("error");
@@ -1180,6 +1461,17 @@ public class OracleServer extends AbstractVerticle {
             System.out.println("[Oracle] formatResults: no results provided");
         }
         
+        // Check for database connection errors specifically
+        if (hasCriticalError || (error != null && (error.contains("Database connection") || 
+                                                   error.contains("UCP-0") || 
+                                                   error.contains("connection pool")))) {
+            return Future.succeededFuture(new JsonObject()
+                .put("formatted", "Unable to process your request due to a database connection error. Please try again later or contact support.")
+                .put("success", false)
+                .put("severity", "CRITICAL")
+                .put("requiresAction", true));
+        }
+        
         if (error != null) {
             return Future.succeededFuture(new JsonObject()
                 .put("formatted", "I encountered an error: " + error)
@@ -1189,6 +1481,15 @@ public class OracleServer extends AbstractVerticle {
         // Ensure we have results
         if (results == null) {
             results = new JsonArray();
+        }
+        
+        // Check if results are truly empty (not an error condition)
+        if (results.isEmpty() && error == null) {
+            // This is a valid empty result set, not an error
+            return Future.succeededFuture(new JsonObject()
+                .put("formatted", "No data found matching your query.")
+                .put("success", true)
+                .put("confidence", 0.9));
         }
         
         String prompt = buildFormattingPrompt(originalQuery, sqlExecuted, results);
@@ -1238,13 +1539,27 @@ public class OracleServer extends AbstractVerticle {
                 (lastError != null ? ": " + lastError : ". Please check database configuration and connectivity.");
             System.err.println("[Oracle] Database health check failed: " + errorMessage);
             
+            // Publish critical error event
+            vertx.eventBus().publish("critical.error", new JsonObject()
+                .put("eventType", "critical.error")
+                .put("component", "OracleServer")
+                .put("operation", "checkDatabaseConnection")
+                .put("error", errorMessage)
+                .put("severity", "CRITICAL")
+                .put("timestamp", Instant.now().toString())
+                .put("requiresRestart", true)
+                .put("userMessage", "Database service is currently unavailable. Please try again later or contact support."));
+            
             vertx.eventBus().publish("log",
                 "Database unavailable - " + (lastError != null ? lastError : "connection failed") + ",0,Oracle,Error,Database");
             
-            // Return error in consistent format
+            // Return error in consistent format with severity
             return Future.succeededFuture(new JsonObject()
                 .put("isError", true)
-                .put("error", errorMessage));
+                .put("severity", "CRITICAL")
+                .put("error", errorMessage)
+                .put("requiresUserAction", true)
+                .put("userMessage", "Database service is currently unavailable. Please try again later or contact support."));
         }
         return null; // Connection is healthy
     }
@@ -1261,14 +1576,17 @@ public class OracleServer extends AbstractVerticle {
     
     private String buildSqlGenerationPrompt(String query, JsonObject schema, JsonObject data) {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("Generate Oracle SQL for: ").append(query).append("\n\n");
         
-        // Add explicit schema information
+        prompt.append("Generate Oracle SQL using systematic validation thinking.\n\n");
+        prompt.append("User Query: \"").append(query).append("\"\n\n");
+        
+        // Add schema information
         if (schema != null && !schema.isEmpty()) {
-            prompt.append("IMPORTANT: Use ONLY the following discovered schema information:\n\n");
+            prompt.append("Available Database Schema:\n");
+            prompt.append("========================\n");
             
             if (schema.containsKey("tables")) {
-                prompt.append("Available Tables:\n");
+                prompt.append("Tables:\n");
                 JsonArray tables = schema.getJsonArray("tables");
                 for (int i = 0; i < tables.size(); i++) {
                     JsonObject table = tables.getJsonObject(i);
@@ -1278,9 +1596,9 @@ public class OracleServer extends AbstractVerticle {
             }
             
             if (schema.containsKey("columns")) {
-                prompt.append("Available Columns:\n");
+                prompt.append("Columns (showing first 30):\n");
                 JsonArray columns = schema.getJsonArray("columns");
-                for (int i = 0; i < Math.min(20, columns.size()); i++) {
+                for (int i = 0; i < Math.min(30, columns.size()); i++) {
                     JsonObject col = columns.getJsonObject(i);
                     prompt.append("  - ").append(col.getString("table")).append(".")
                           .append(col.getString("column")).append(" (")
@@ -1289,29 +1607,83 @@ public class OracleServer extends AbstractVerticle {
                 prompt.append("\n");
             }
             
-            prompt.append("Full schema details:\n").append(schema.encodePrettily()).append("\n\n");
+            // Add full schema for reference
+            prompt.append("Complete schema context:\n").append(schema.encodePrettily()).append("\n\n");
         }
         
         // Add sample data if available
         if (data != null && !data.isEmpty()) {
-            prompt.append("Sample data from tables:\n").append(data.encodePrettily()).append("\n\n");
+            prompt.append("Sample Data:\n");
+            prompt.append("============\n");
+            prompt.append(data.encodePrettily()).append("\n\n");
         }
         
-        prompt.append("Rules:\n");
-        prompt.append("1. Use ONLY the tables and columns shown above\n");
-        prompt.append("2. Table names are case-sensitive in Oracle (use uppercase as shown)\n");
-        prompt.append("3. For location queries (like 'California', 'CA', 'Texas', 'TX'):\n");
-        prompt.append("   - If ORDERS has no state column, JOIN with CUSTOMERS table to use customer location\n");
-        prompt.append("   - California cities include: San Francisco, Los Angeles, San Diego, Sacramento\n");
-        prompt.append("   - Texas cities include: Houston, Dallas, Austin, San Antonio\n");
-        prompt.append("   - New York cities include: New York, Buffalo, Albany\n");
-        prompt.append("   - For state abbreviations: CA=California, TX=Texas, NY=New York, etc.\n");
-        prompt.append("   - Use IN clause with multiple city names when searching by state\n");
-        prompt.append("4. For 'pending', check ORDER_STATUS_ENUM where status_code = 'PENDING'\n");
-        prompt.append("5. DO NOT add semicolons at the end of the SQL\n");
-        prompt.append("6. NEVER use columns that don't exist (e.g., don't use ORDERS.CITY if only ORDERS.SHIPPING_CITY exists)\n");
-        prompt.append("7. When joining enumeration tables, use the proper foreign key relationships\n");
-        prompt.append("\nReturn only the SQL query, no explanation or markdown.");
+        // Now add the cognitive scaffolding prompt
+        prompt.append("""
+        SYSTEMATIC SQL GENERATION PROCESS:
+        ==================================
+        
+        Step 1 - Query Understanding:
+        ---------------------------
+        First, understand what the user is asking for:
+        - What is the core business question?
+        - What data elements are needed to answer it?
+        - What operations are required (filtering, joining, aggregating)?
+        
+        Step 2 - Schema Mapping (CRITICAL):
+        ---------------------------------
+        For EACH concept in the query, find the EXACT schema match:
+        - List each business concept from the query
+        - Map each to a specific table and column from the schema above
+        - If a concept has no match, note this explicitly
+        
+        Example mapping process:
+        - "California" → Look for state/location columns → Find CUSTOMERS.STATE or similar
+        - "orders" → Look for order tables → Find ORDERS table
+        - "amount" → Look for amount columns → Find ORDERS.TOTAL_AMOUNT (not AMOUNT)
+        
+        Step 3 - Pre-Flight Validation:
+        -----------------------------
+        Before writing ANY SQL, explicitly list:
+        - Tables I will use: [verify each exists in schema above]
+        - Columns I will reference: [verify each exists in its table]
+        - Join conditions: [verify join columns exist in both tables]
+        
+        Step 4 - SQL Construction:
+        ------------------------
+        Only NOW write the SQL using ONLY the verified elements:
+        - Use exact table names (uppercase in Oracle)
+        - Use exact column names as shown in schema
+        - Include proper joins if multiple tables needed
+        
+        Step 5 - Final Safety Check:
+        --------------------------
+        Re-read your SQL and verify:
+        - Every table name appears in the schema tables list
+        - Every column name appears in the schema columns list
+        - No assumptions or guesses were made
+        
+        CRITICAL VALIDATION RULES:
+        =========================
+        1. NEVER use a table/column not explicitly shown in the schema
+        2. Column names must match EXACTLY (TOTAL_AMOUNT not AMOUNT)
+        3. If you cannot find required data in the schema, explain why
+        4. NO semicolons at the end of SQL
+        5. Return ONLY the final SQL query, no explanations
+        
+        COMMON PITFALLS TO AVOID:
+        ========================
+        - Assuming COUNTRIES table exists (check schema first!)
+        - Using ORDERS.AMOUNT when it's actually TOTAL_AMOUNT
+        - Guessing column names based on common patterns
+        - Assuming relationships that aren't in the schema
+        
+        If you cannot generate valid SQL due to missing schema elements:
+        Return: SELECT 'Unable to generate SQL: [specific missing element]' as error_message FROM DUAL
+        
+        Now, think through each step systematically and generate the SQL.
+        Return ONLY the final SQL query starting with SELECT/WITH/INSERT/UPDATE/DELETE.
+        """);
         
         return prompt.toString();
     }
@@ -1320,6 +1692,166 @@ public class OracleServer extends AbstractVerticle {
         return "User asked: " + query + "\n\n" +
                "Results: " + results.encodePrettily() + "\n\n" +
                "Provide a natural language response.";
+    }
+    
+    /**
+     * Build error-learning prompt for SQL regeneration after validation failure
+     */
+    private String buildErrorLearningPrompt(String query, JsonObject schema, JsonObject data, 
+                                          JsonObject validationCorrections) {
+        StringBuilder prompt = new StringBuilder();
+        
+        prompt.append("Generate Oracle SQL using error-learning from previous validation failures.\n\n");
+        prompt.append("User Query: \"").append(query).append("\"\n\n");
+        
+        prompt.append("PREVIOUS ATTEMPT FAILED VALIDATION\n");
+        prompt.append("=================================\n\n");
+        
+        // Add validation errors
+        prompt.append("Validation Errors Found:\n");
+        prompt.append("----------------------\n");
+        
+        // Table corrections
+        JsonArray tableCorrections = validationCorrections.getJsonArray("tables", new JsonArray());
+        if (!tableCorrections.isEmpty()) {
+            prompt.append("\nInvalid Tables:\n");
+            for (int i = 0; i < tableCorrections.size(); i++) {
+                JsonObject correction = tableCorrections.getJsonObject(i);
+                prompt.append("- Tried to use: ").append(correction.getString("invalid")).append("\n");
+                JsonArray suggestions = correction.getJsonArray("suggestions", new JsonArray());
+                if (!suggestions.isEmpty()) {
+                    prompt.append("  Suggestions: ");
+                    for (int j = 0; j < suggestions.size(); j++) {
+                        if (j > 0) prompt.append(", ");
+                        prompt.append(suggestions.getString(j));
+                    }
+                    prompt.append("\n");
+                }
+            }
+        }
+        
+        // Column corrections
+        JsonArray columnCorrections = validationCorrections.getJsonArray("columns", new JsonArray());
+        if (!columnCorrections.isEmpty()) {
+            prompt.append("\nInvalid Columns:\n");
+            for (int i = 0; i < columnCorrections.size(); i++) {
+                JsonObject correction = columnCorrections.getJsonObject(i);
+                prompt.append("- Tried to use: ").append(correction.getString("invalid"));
+                String table = correction.getString("table", "");
+                if (!table.isEmpty()) {
+                    prompt.append(" in table ").append(table);
+                }
+                prompt.append("\n");
+                
+                JsonArray suggestions = correction.getJsonArray("suggestions", new JsonArray());
+                if (!suggestions.isEmpty()) {
+                    prompt.append("  Suggestions: ");
+                    for (int j = 0; j < suggestions.size(); j++) {
+                        if (j > 0) prompt.append(", ");
+                        prompt.append(suggestions.getString(j));
+                    }
+                    prompt.append("\n");
+                }
+                
+                JsonArray foundIn = correction.getJsonArray("foundIn", new JsonArray());
+                if (!foundIn.isEmpty()) {
+                    prompt.append("  Found in tables: ");
+                    for (int j = 0; j < foundIn.size(); j++) {
+                        if (j > 0) prompt.append(", ");
+                        prompt.append(foundIn.getString(j));
+                    }
+                    prompt.append("\n");
+                }
+            }
+        }
+        
+        prompt.append("\n");
+        
+        // Add schema information
+        prompt.append("Correct Schema Information:\n");
+        prompt.append("=========================\n");
+        
+        // Include standard schema info
+        if (schema != null && !schema.isEmpty()) {
+            if (schema.containsKey("tables")) {
+                prompt.append("\nAvailable Tables:\n");
+                JsonArray tables = schema.getJsonArray("tables");
+                for (int i = 0; i < tables.size(); i++) {
+                    JsonObject table = tables.getJsonObject(i);
+                    prompt.append("  - ").append(table.getString("table")).append("\n");
+                }
+            }
+            
+            if (schema.containsKey("columns")) {
+                prompt.append("\nAvailable Columns:\n");
+                JsonArray columns = schema.getJsonArray("columns");
+                for (int i = 0; i < Math.min(40, columns.size()); i++) {
+                    JsonObject col = columns.getJsonObject(i);
+                    prompt.append("  - ").append(col.getString("table")).append(".")
+                          .append(col.getString("column")).append(" (")
+                          .append(col.getString("type")).append(")\n");
+                }
+                if (columns.size() > 40) {
+                    prompt.append("  ... and ").append(columns.size() - 40).append(" more columns\n");
+                }
+            }
+        }
+        
+        prompt.append("""
+        
+        ERROR-LEARNING SQL GENERATION PROCESS:
+        ====================================
+        
+        Step 1 - Analyze Previous Failure:
+        --------------------------------
+        Review the validation errors above and understand:
+        - Which tables/columns don't exist in the schema
+        - What the validator suggested as alternatives
+        - Why your previous attempt failed
+        
+        Step 2 - Learn from Corrections:
+        -------------------------------
+        For each invalid reference:
+        - If suggestions were provided, evaluate which best matches the query intent
+        - If no suggestions, find alternative ways to get the needed data
+        - Consider if the query needs restructuring
+        
+        Step 3 - Apply Schema Constraints:
+        --------------------------------
+        CRITICAL: Use ONLY tables and columns that appear in the "Available Tables" 
+        and "Available Columns" lists above. The validator has confirmed these exist.
+        
+        Step 4 - Alternative Approaches:
+        ------------------------------
+        If the exact data requested isn't available:
+        - Look for related columns that could provide similar information
+        - Consider joining different tables to get the data
+        - Use available columns even if they're not perfect matches
+        
+        Step 5 - Generate Corrected SQL:
+        -------------------------------
+        Write SQL that:
+        - Fixes all validation errors
+        - Uses only validated schema elements
+        - Still attempts to answer the original query
+        
+        CRITICAL RULES FOR RETRY:
+        =======================
+        1. NEVER use the invalid tables/columns identified above
+        2. ALWAYS use the suggested corrections when provided
+        3. If a concept has no direct match, explain in a comment
+        4. Generate valid SQL even if it's not a perfect answer
+        5. Return ONLY the SQL query, no explanations
+        
+        Example correction pattern:
+        - Wanted: COUNTRIES table → Use: CUSTOMERS.STATE or LOCATIONS table
+        - Wanted: ORDERS.AMOUNT → Use: ORDERS.TOTAL_AMOUNT
+        - Wanted: non-existent column → Find alternative or omit
+        
+        Now generate the corrected SQL that will pass validation.
+        """);
+        
+        return prompt.toString();
     }
     
     private JsonObject performPatternAnalysis(String query) {
@@ -1388,6 +1920,33 @@ public class OracleServer extends AbstractVerticle {
                         cleaned = cleaned.substring(startIdx, endIdx).trim();
                     }
                 }
+            }
+        }
+        
+        // Remove table/column listing that LLM might include
+        // Look for "Tables:" and "Columns:" prefix before the actual SQL
+        Pattern listingPattern = Pattern.compile(
+            "^\\s*Tables:\\s*[^\\n]+\\s*Columns:\\s*[^\\n]+\\s*(?=SELECT|WITH|INSERT|UPDATE|DELETE)",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+        );
+        Matcher listingMatcher = listingPattern.matcher(cleaned);
+        if (listingMatcher.find()) {
+            System.out.println("[Oracle] Removing table/column listing prefix from SQL");
+            cleaned = listingMatcher.replaceFirst("");
+        }
+        
+        // Alternative pattern: Sometimes the listing might be on multiple lines
+        if (cleaned.toLowerCase().startsWith("tables:")) {
+            // Find where the actual SQL starts (SELECT, WITH, etc.)
+            Pattern sqlStartPattern = Pattern.compile(
+                "(?:SELECT|WITH|INSERT|UPDATE|DELETE)\\s",
+                Pattern.CASE_INSENSITIVE
+            );
+            Matcher sqlStartMatcher = sqlStartPattern.matcher(cleaned);
+            if (sqlStartMatcher.find()) {
+                int sqlStart = sqlStartMatcher.start();
+                System.out.println("[Oracle] Found SQL start at position " + sqlStart + ", removing prefix");
+                cleaned = cleaned.substring(sqlStart);
             }
         }
         
@@ -1716,6 +2275,109 @@ public class OracleServer extends AbstractVerticle {
                     // Still complete the stop promise to avoid hanging
                     stopPromise.complete();
                 }
+            });
+    }
+    
+    // ============ INTELLIGENCE TOOL IMPLEMENTATIONS ============
+    
+    /**
+     * Deep analyze query using AI
+     */
+    private Future<JsonObject> deepAnalyzeQuery(JsonObject arguments) {
+        String query = arguments.getString("query");
+        if (query == null || query.trim().isEmpty()) {
+            return Future.failedFuture("Missing required argument: query");
+        }
+        
+        JsonArray history = arguments.getJsonArray("conversation_history", new JsonArray());
+        
+        return deepQueryAnalyzer.analyze(query, history)
+            .recover(err -> {
+                // Return basic analysis on error
+                return Future.succeededFuture(new JsonObject()
+                    .put("error", "Deep analysis failed: " + err.getMessage())
+                    .put("intent", "query")
+                    .put("entities", new JsonArray()));
+            });
+    }
+    
+    /**
+     * Discover column semantics
+     */
+    private Future<JsonObject> discoverColumnSemantics(JsonObject arguments) {
+        JsonArray tables = arguments.getJsonArray("tables");
+        if (tables == null || tables.isEmpty()) {
+            return Future.failedFuture("Missing required argument: tables");
+        }
+        
+        JsonObject queryAnalysis = arguments.getJsonObject("query_analysis", new JsonObject());
+        
+        return columnSemanticsDiscoverer.discoverSemantics(tables, queryAnalysis)
+            .recover(err -> {
+                return Future.succeededFuture(new JsonObject()
+                    .put("error", "Semantics discovery failed: " + err.getMessage())
+                    .put("discoveries", new JsonArray()));
+            });
+    }
+    
+    /**
+     * Map business terms to database terms
+     */
+    private Future<JsonObject> mapBusinessTerms(JsonObject arguments) {
+        JsonArray businessTerms = arguments.getJsonArray("business_terms");
+        if (businessTerms == null || businessTerms.isEmpty()) {
+            return Future.failedFuture("Missing required argument: business_terms");
+        }
+        
+        JsonObject schemaContext = arguments.getJsonObject("schema_context", new JsonObject());
+        
+        return businessTermMapper.mapTerms(businessTerms, schemaContext)
+            .recover(err -> {
+                return Future.succeededFuture(new JsonObject()
+                    .put("error", "Term mapping failed: " + err.getMessage())
+                    .put("mappings", new JsonArray())
+                    .put("confidence", 0.0));
+            });
+    }
+    
+    /**
+     * Infer relationships between tables
+     */
+    private Future<JsonObject> inferRelationships(JsonObject arguments) {
+        JsonArray tables = arguments.getJsonArray("tables");
+        if (tables == null || tables.isEmpty()) {
+            return Future.failedFuture("Missing required argument: tables");
+        }
+        
+        JsonObject queryAnalysis = arguments.getJsonObject("query_analysis", new JsonObject());
+        
+        return relationshipInferrer.inferRelationships(tables, queryAnalysis)
+            .recover(err -> {
+                return Future.succeededFuture(new JsonObject()
+                    .put("error", "Relationship inference failed: " + err.getMessage())
+                    .put("relationships", new JsonArray())
+                    .put("join_paths", new JsonArray()));
+            });
+    }
+    
+    /**
+     * Smart schema matching using all intelligence tools
+     */
+    private Future<JsonObject> smartSchemaMatch(JsonObject arguments) {
+        String query = arguments.getString("query");
+        if (query == null || query.trim().isEmpty()) {
+            return Future.failedFuture("Missing required argument: query");
+        }
+        
+        JsonArray history = arguments.getJsonArray("conversation_history", new JsonArray());
+        
+        return intelligentSchemaMatcher.match(query, history)
+            .recover(err -> {
+                return Future.succeededFuture(new JsonObject()
+                    .put("error", "Smart schema matching failed: " + err.getMessage())
+                    .put("query", query)
+                    .put("matches", new JsonObject())
+                    .put("confidence", 0.0));
             });
     }
 }

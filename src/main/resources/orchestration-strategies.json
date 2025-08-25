@@ -31,6 +31,7 @@
           "description": "Get sample data for context",
           "use_from_previous": ["schema_matches.tables"],
           "optional": true,
+          "critical": false,
           "pass_to_next": ["sample_data"]
         },
         {
@@ -68,7 +69,8 @@
         }
       ],
       "timeout_ms": 30000,
-      "allow_partial_success": true
+      "halt_on_critical_error": true,
+      "allow_partial_success": false
     },
     
     "oracle_simple_query": {
@@ -150,17 +152,410 @@
       },
       "steps": "dynamic",
       "timeout_ms": 20000
+    },
+    
+    "oracle_adaptive_pipeline": {
+      "name": "Oracle Adaptive Intelligence Pipeline",
+      "description": "Intelligently adapts to query complexity using smart analysis",
+      "when_to_use": {
+        "complexity": "adaptive",
+        "needs_intelligence": true
+      },
+      "steps": [
+        {
+          "step": 1,
+          "name": "Deep Query Analysis",
+          "tool": "oracle__deep_analyze_query",
+          "description": "Extract ALL semantic concepts",
+          "pass_to_next": ["deep_analysis"]
+        },
+        {
+          "step": 2,
+          "name": "Smart Schema Match",
+          "tool": "oracle__smart_schema_match",
+          "description": "Intelligent schema matching with all tools",
+          "use_from_previous": ["original_query"],
+          "pass_to_next": ["smart_matches"]
+        },
+        {
+          "step": 3,
+          "name": "Generate SQL",
+          "tool": "oracle__generate_sql",
+          "description": "Create SQL using intelligent context",
+          "use_from_previous": ["original_query", "smart_matches"],
+          "pass_to_next": ["generated_sql"]
+        },
+        {
+          "step": 4,
+          "name": "Smart Optimize",
+          "tool": "oracle__optimize_sql_smart",
+          "description": "Optimize with complexity checking",
+          "use_from_previous": ["generated_sql"],
+          "pass_to_next": ["optimized_sql"]
+        },
+        {
+          "step": 5,
+          "name": "Execute Query",
+          "tool": "oracle__execute_query",
+          "description": "Run the optimized query",
+          "use_from_previous": ["optimized_sql"],
+          "pass_to_next": ["results"]
+        },
+        {
+          "step": 6,
+          "name": "Format Results",
+          "tool": "oracle__format_results",
+          "description": "Convert to natural language",
+          "use_from_previous": ["original_query", "results"],
+          "final": true
+        }
+      ],
+      "timeout_ms": 35000,
+      "allow_partial_success": true
+    },
+    
+    "oracle_discovery_first": {
+      "name": "Oracle Discovery-First Strategy",
+      "description": "Prioritizes understanding data before query generation",
+      "when_to_use": {
+        "intent": "explore",
+        "unfamiliar_data": true
+      },
+      "steps": [
+        {
+          "step": 1,
+          "name": "Deep Analyze",
+          "tool": "oracle__deep_analyze_query",
+          "description": "Understand query intent deeply",
+          "pass_to_next": ["analysis"]
+        },
+        {
+          "step": 2,
+          "name": "List Tables",
+          "tool": "oracle__list_tables",
+          "description": "Get available tables",
+          "pass_to_next": ["tables"]
+        },
+        {
+          "step": 3,
+          "name": "Discover Semantics",
+          "tool": "oracle__discover_column_semantics",
+          "description": "Understand column meanings",
+          "use_from_previous": ["tables", "analysis"],
+          "parallel": true,
+          "pass_to_next": ["semantics"]
+        },
+        {
+          "step": 4,
+          "name": "Infer Relationships",
+          "tool": "oracle__infer_relationships",
+          "description": "Find table connections",
+          "use_from_previous": ["tables", "analysis"],
+          "parallel": true,
+          "pass_to_next": ["relationships"]
+        },
+        {
+          "step": 5,
+          "name": "Smart Schema Match",
+          "tool": "oracle__smart_schema_match",
+          "description": "Match with full context",
+          "use_from_previous": ["original_query"],
+          "pass_to_next": ["matches"]
+        },
+        {
+          "step": 6,
+          "name": "Generate and Execute",
+          "tool": "oracle__generate_sql",
+          "description": "Create SQL with rich context",
+          "use_from_previous": ["original_query", "matches", "semantics", "relationships"],
+          "pass_to_next": ["sql"]
+        },
+        {
+          "step": 7,
+          "name": "Execute Query",
+          "tool": "oracle__execute_query",
+          "description": "Run the query",
+          "use_from_previous": ["sql"],
+          "final": true
+        }
+      ],
+      "timeout_ms": 40000
+    },
+    
+    "oracle_performance_focused": {
+      "name": "Oracle Performance-Optimized Pipeline",
+      "description": "Focuses on query performance with smart optimization",
+      "when_to_use": {
+        "performance_critical": true,
+        "large_dataset": true
+      },
+      "steps": [
+        {
+          "step": 1,
+          "name": "Quick Analysis",
+          "tool": "oracle__analyze_query",
+          "description": "Fast query analysis",
+          "pass_to_next": ["analysis"]
+        },
+        {
+          "step": 2,
+          "name": "Schema Match",
+          "tool": "oracle__match_schema",
+          "description": "Quick schema matching",
+          "use_from_previous": ["analysis.entities"],
+          "pass_to_next": ["matches"]
+        },
+        {
+          "step": 3,
+          "name": "Generate SQL",
+          "tool": "oracle__generate_sql",
+          "description": "Create initial SQL",
+          "use_from_previous": ["original_query", "matches"],
+          "pass_to_next": ["sql"]
+        },
+        {
+          "step": 4,
+          "name": "Smart Optimize",
+          "tool": "oracle__optimize_sql_smart",
+          "description": "Aggressive optimization",
+          "use_from_previous": ["sql"],
+          "config": {"complexity_threshold": 0.1},
+          "pass_to_next": ["optimized"]
+        },
+        {
+          "step": 5,
+          "name": "Explain Plan",
+          "tool": "oracle__explain_plan",
+          "description": "Verify performance",
+          "use_from_previous": ["optimized"],
+          "parallel": true,
+          "optional": true,
+          "pass_to_next": ["plan"]
+        },
+        {
+          "step": 6,
+          "name": "Execute",
+          "tool": "oracle__execute_query",
+          "description": "Run optimized query",
+          "use_from_previous": ["optimized"],
+          "config": {"limit": 1000},
+          "final": true
+        }
+      ],
+      "timeout_ms": 25000
+    },
+    
+    "oracle_validated_pipeline": {
+      "name": "Oracle Schema-Validated Pipeline",
+      "description": "Ensures generated SQL is validated against actual schema before execution",
+      "when_to_use": {
+        "schema_validation": true,
+        "high_accuracy": true
+      },
+      "steps": [
+        {
+          "step": 1,
+          "name": "Deep Analysis",
+          "tool": "oracle__deep_analyze_query",
+          "description": "Extract all semantic concepts",
+          "pass_to_next": ["analysis"]
+        },
+        {
+          "step": 2,
+          "name": "Schema Match",
+          "tool": "oracle__smart_schema_match",
+          "description": "Smart schema matching",
+          "use_from_previous": ["original_query"],
+          "pass_to_next": ["schema_matches"]
+        },
+        {
+          "step": 3,
+          "name": "Discover Data",
+          "tool": "oracle__discover_sample_data",
+          "description": "Get sample data for context",
+          "use_from_previous": ["schema_matches.tableMatches"],
+          "optional": true,
+          "pass_to_next": ["sample_data"]
+        },
+        {
+          "step": 4,
+          "name": "Generate SQL",
+          "tool": "oracle__generate_sql",
+          "description": "Create SQL with full context",
+          "use_from_previous": ["original_query", "schema_matches", "sample_data"],
+          "pass_to_next": ["generated_sql"]
+        },
+        {
+          "step": 5,
+          "name": "Validate Schema",
+          "tool": "oracle__validate_schema_sql",
+          "description": "Validate SQL against actual schema",
+          "use_from_previous": ["generated_sql.sql", "schema_matches"],
+          "pass_to_next": ["validation"],
+          "on_error": "retry_with_corrections"
+        },
+        {
+          "step": 6,
+          "name": "Regenerate if Invalid",
+          "tool": "oracle__generate_sql",
+          "description": "Regenerate SQL with corrections",
+          "condition": "validation.valid == false",
+          "use_from_previous": ["original_query", "schema_matches", "validation.suggestedCorrections"],
+          "pass_to_next": ["corrected_sql"]
+        },
+        {
+          "step": 7,
+          "name": "Execute Query",
+          "tool": "oracle__execute_query",
+          "description": "Run validated SQL",
+          "use_from_previous": ["corrected_sql", "generated_sql"],
+          "pass_to_next": ["results"]
+        },
+        {
+          "step": 8,
+          "name": "Format Results",
+          "tool": "oracle__format_results",
+          "description": "Convert to natural language",
+          "use_from_previous": ["original_query", "results"],
+          "final": true
+        }
+      ],
+      "timeout_ms": 40000,
+      "retry_on_validation_failure": true,
+      "max_retries": 2
+    },
+    
+    "oracle_adaptive_retry_pipeline": {
+      "name": "Oracle Adaptive Retry Pipeline",
+      "description": "Validates and retries SQL with progressive constraints on each attempt",
+      "when_to_use": {
+        "schema_validation": true,
+        "high_accuracy": true,
+        "adaptive_retry": true
+      },
+      "steps": [
+        {
+          "step": 1,
+          "name": "Deep Analysis",
+          "tool": "oracle__deep_analyze_query",
+          "description": "Extract all semantic concepts",
+          "pass_to_next": ["analysis"]
+        },
+        {
+          "step": 2,
+          "name": "Schema Match",
+          "tool": "oracle__smart_schema_match",
+          "description": "Smart schema matching",
+          "use_from_previous": ["original_query"],
+          "pass_to_next": ["schema_matches"]
+        },
+        {
+          "step": 3,
+          "name": "Discover Data",
+          "tool": "oracle__discover_sample_data",
+          "description": "Get sample data for context",
+          "use_from_previous": ["schema_matches.tableMatches"],
+          "optional": true,
+          "pass_to_next": ["sample_data"]
+        },
+        {
+          "step": 4,
+          "name": "Generate SQL",
+          "tool": "oracle__generate_sql",
+          "description": "Create SQL with full context",
+          "use_from_previous": ["original_query", "schema_matches", "sample_data"],
+          "pass_to_next": ["generated_sql"],
+          "config": {
+            "constraint_level": "standard"
+          }
+        },
+        {
+          "step": 5,
+          "name": "Validate Schema",
+          "tool": "oracle__validate_schema_sql",
+          "description": "Validate SQL against actual schema",
+          "use_from_previous": ["generated_sql.sql", "schema_matches"],
+          "pass_to_next": ["validation"],
+          "on_error": "continue"
+        },
+        {
+          "step": 6,
+          "name": "Regenerate with Constraints Level 1",
+          "tool": "oracle__generate_sql",
+          "description": "Regenerate SQL with stricter constraints",
+          "condition": "validation.valid == false && retry_count == 0",
+          "use_from_previous": ["original_query", "schema_matches", "validation.suggestedCorrections"],
+          "pass_to_next": ["corrected_sql_1"],
+          "config": {
+            "constraint_level": "strict",
+            "additional_constraint": "STRICT MODE: Use ONLY the exact table and column names from validation.suggestedCorrections. Do NOT assume any columns exist unless explicitly listed."
+          }
+        },
+        {
+          "step": 7,
+          "name": "Revalidate Level 1",
+          "tool": "oracle__validate_schema_sql",
+          "description": "Validate corrected SQL",
+          "condition": "corrected_sql_1 != null",
+          "use_from_previous": ["corrected_sql_1.sql", "schema_matches"],
+          "pass_to_next": ["validation_1"]
+        },
+        {
+          "step": 8,
+          "name": "Regenerate with Constraints Level 2",
+          "tool": "oracle__generate_sql",
+          "description": "Final regeneration with ultra-strict constraints",
+          "condition": "validation_1.valid == false && retry_count == 1",
+          "use_from_previous": ["original_query", "schema_matches", "validation_1.suggestedCorrections"],
+          "pass_to_next": ["corrected_sql_2"],
+          "config": {
+            "constraint_level": "ultra_strict",
+            "additional_constraint": "ULTRA-STRICT MODE: First LIST each table and column you will use (e.g., Tables: ORDERS, CUSTOMERS; Columns: ORDERS.ORDER_ID, CUSTOMERS.CUSTOMER_NAME). Then write the SQL using ONLY those listed items."
+          }
+        },
+        {
+          "step": 9,
+          "name": "Execute Query",
+          "tool": "oracle__execute_query",
+          "description": "Run validated SQL",
+          "use_from_previous": ["corrected_sql_2", "corrected_sql_1", "generated_sql"],
+          "pass_to_next": ["results"],
+          "on_error": "analyze_and_feedback"
+        },
+        {
+          "step": 10,
+          "name": "Format Results",
+          "tool": "oracle__format_results",
+          "description": "Convert to natural language",
+          "use_from_previous": ["original_query", "results"],
+          "final": true
+        }
+      ],
+      "timeout_ms": 50000,
+      "retry_tracking": true,
+      "progressive_constraints": true,
+      "max_retries": 2
     }
   },
   
   "selection_rules": {
     "priority_order": [
       "oracle_simple_query",
+      "oracle_validated_pipeline",
+      "oracle_adaptive_pipeline",
+      "oracle_discovery_first",
+      "oracle_performance_focused",
       "oracle_discovery",
       "oracle_full_pipeline"
     ],
-    "default_strategy": "oracle_full_pipeline",
-    "fallback_on_error": true
+    "default_strategy": "oracle_validated_pipeline",
+    "fallback_on_error": true,
+    "selection_hints": {
+      "complex_aggregations": "oracle_adaptive_pipeline",
+      "unknown_schema": "oracle_discovery_first",
+      "large_tables": "oracle_performance_focused",
+      "simple_select": "oracle_simple_query"
+    }
   },
   
   "configuration": {

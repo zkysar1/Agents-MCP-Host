@@ -12,6 +12,8 @@ import io.vertx.core.eventbus.Message;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 import AgentsMCPHost.conversation.InterruptManager;
 import AgentsMCPHost.streaming.StreamingEventPublisher;
 
@@ -25,12 +27,28 @@ public class Conversation extends AbstractVerticle {
   private static int availableTools = 0;
   private static boolean systemFullyReady = false;
   
+  // Critical error tracking
+  private static final Map<String, JsonObject> criticalErrors = new ConcurrentHashMap<>();
+  
   @Override
   public void start(Promise<Void> startPromise) throws Exception {
     // Listen for complete system ready event
     vertx.eventBus().consumer("system.fully.ready", msg -> {
       systemFullyReady = true;
       System.out.println("[ConversationVerticle] System fully ready - accepting requests");
+    });
+    
+    // Listen for critical error events
+    vertx.eventBus().consumer("critical.error", msg -> {
+      JsonObject error = (JsonObject) msg.body();
+      System.err.println("[CRITICAL ERROR] " + error.encode());
+      
+      // Store critical error with timestamp-based ID
+      String errorId = "error_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString();
+      criticalErrors.put(errorId, error);
+      
+      // Clean up after 5 minutes to prevent memory leak
+      vertx.setTimer(300000, id -> criticalErrors.remove(errorId));
     });
     
     // Listen for MCP system ready events
@@ -183,6 +201,25 @@ public class Conversation extends AbstractVerticle {
    * Handle conversation with unified tool selection
    */
   private static void handleWithUnifiedSelection(Vertx vertx, String streamId, String userMessage, JsonArray messages) {
+    // Check for critical errors before processing
+    if (!criticalErrors.isEmpty()) {
+      JsonObject firstError = criticalErrors.values().iterator().next();
+      String userErrorMessage = firstError.getString("userMessage", 
+          "System critical error occurred. Please restart the system or contact support.");
+      
+      System.err.println("[Conversation] Blocking request due to critical error: " + 
+          firstError.getString("error"));
+      
+      // Send error response immediately
+      vertx.eventBus().publish("conversation." + streamId + ".error",
+          new JsonObject()
+              .put("error", userErrorMessage)
+              .put("severity", "CRITICAL")
+              .put("requiresAction", true));
+      
+      return; // Don't process further
+    }
+    
     // Create streaming event publisher
     StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
     
@@ -432,8 +469,9 @@ public class Conversation extends AbstractVerticle {
           System.out.println("[Conversation] WARNING: No streamId for response delivery!");
         }
       } else {
-        String error = "Orchestration failed: " + ar.cause().getMessage();
-        System.err.println("[Conversation] " + error);
+        // Don't add prefix - the orchestration error already has context
+        String error = ar.cause().getMessage();
+        System.err.println("[Conversation] Orchestration failed: " + error);
         
         if (streamId != null) {
           vertx.eventBus().publish("conversation." + streamId + ".error",
@@ -540,6 +578,25 @@ public class Conversation extends AbstractVerticle {
    * Handle standard LLM processing - unified streaming version
    */
   private static void handleStandardLLM(Vertx vertx, String streamId, JsonArray messages) {
+    // Check for critical errors before processing
+    if (!criticalErrors.isEmpty()) {
+      JsonObject firstError = criticalErrors.values().iterator().next();
+      String userErrorMessage = firstError.getString("userMessage", 
+          "System critical error occurred. Please restart the system or contact support.");
+      
+      System.err.println("[Conversation] Blocking LLM request due to critical error: " + 
+          firstError.getString("error"));
+      
+      // Send error response immediately
+      vertx.eventBus().publish("conversation." + streamId + ".error",
+          new JsonObject()
+              .put("error", userErrorMessage)
+              .put("severity", "CRITICAL")
+              .put("requiresAction", true));
+      
+      return; // Don't process further
+    }
+    
     LlmAPIService llmService = LlmAPIService.getInstance();
     
     if (!llmService.isInitialized()) {

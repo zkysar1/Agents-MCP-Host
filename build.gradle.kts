@@ -63,8 +63,8 @@ dependencies {
   implementation("com.vladsch.flexmark:flexmark-all:0.64.8")
   
   // Oracle JDBC dependencies
-  implementation("com.oracle.database.jdbc:ojdbc11:23.3.0.23.09")
-  implementation("com.oracle.database.jdbc:ucp:23.3.0.23.09")
+  implementation("com.oracle.database.jdbc:ojdbc11:21.11.0.0")
+  implementation("com.oracle.database.jdbc:ucp:21.11.0.0")
   
   // SQL parsing and manipulation
   implementation("com.github.jsqlparser:jsqlparser:4.7")
