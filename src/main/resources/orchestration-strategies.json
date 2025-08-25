@@ -12,14 +12,14 @@
         {
           "step": 1,
           "name": "Analyze Query",
-          "tool": "oracle__analyze_query",
+          "tool": "oracle__deep_analyze_query",
           "description": "Extract intent and entities from natural language",
           "pass_to_next": ["analysis"]
         },
         {
           "step": 2,
           "name": "Match Schema",
-          "tool": "oracle__match_schema",
+          "tool": "oracle__smart_schema_match",
           "description": "Find relevant tables and columns",
           "use_from_previous": ["analysis.entities"],
           "pass_to_next": ["schema_matches"]
@@ -45,7 +45,7 @@
         {
           "step": 5,
           "name": "Optimize SQL",
-          "tool": "oracle__optimize_sql",
+          "tool": "oracle__optimize_sql_smart",
           "description": "Optimize the generated query",
           "use_from_previous": ["generated_sql"],
           "optional": true,

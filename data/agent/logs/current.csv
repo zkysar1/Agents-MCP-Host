@@ -1,17 +1,33 @@
 Message,Level,Class,Category,Character,SequenceReceived,EpochTimeMillis
-Oracle Orchestration deployed,3,Driver,StartUp,Orchestration,1,1756083307217
-Tool Selection Verticle deployed,3,Driver,StartUp,System,2,1756083307407
-LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System,3,1756083307407
-Deployed OracleServer,2,McpHostManager,Deployment,MCP,4,1756083307411
-Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,5,1756083311685
-OracleClient discovered 32 tools via HTTP,2,OracleClient,Discovery,MCP,6,1756083312881
-OracleClient ready with HTTP transport,2,OracleClient,Registration,MCP,7,1756083312888
-OracleClient ready with 32 tools,1,OracleClient,StartUp,MCP,8,1756083312888
-Deployed OracleClient,2,McpHostManager,Deployment,MCP,9,1756083312888
-MCP Host Manager deployed,3,Driver,StartUp,MCP,10,1756083312888
-McpHostManager received tools.discovered from oracle with 32 tools,2,McpHostManager,Discovery,MCP,11,1756083312888
-McpHostManager received client.ready from oracle with 32 tools,2,McpHostManager,Registration,MCP,12,1756083312889
-MCP infrastructure ready,1,McpHostManager,StartUp,MCP,13,1756083312889
-ZAK-Agent startup complete,0,Driver,StartUp,System,14,1756083312890
-Host API server started on HTTP port 8080 - Access at http://localhost:8080,0,HostAPIVerticle,StartUp,System,15,1756083312894
-Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,16,1756083313646
+Oracle Orchestration deployed,3,Driver,StartUp,Orchestration,1,1756158025702
+Tool Selection Verticle deployed,3,Driver,StartUp,System,2,1756158025874
+LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System,3,1756158025874
+Deployed OracleServer,2,McpHostManager,Deployment,MCP,4,1756158025874
+OracleClient discovered 32 tools via HTTP,2,OracleClient,Discovery,MCP,5,1756158031565
+OracleClient ready with HTTP transport,2,OracleClient,Registration,MCP,6,1756158031588
+OracleClient ready with 32 tools,1,OracleClient,StartUp,MCP,7,1756158031589
+Deployed OracleClient,2,McpHostManager,Deployment,MCP,8,1756158031589
+MCP Host Manager deployed,3,Driver,StartUp,MCP,9,1756158031590
+McpHostManager received tools.discovered from oracle with 32 tools,2,McpHostManager,Discovery,MCP,10,1756158031590
+McpHostManager received client.ready from oracle with 32 tools,2,McpHostManager,Registration,MCP,11,1756158031591
+MCP infrastructure ready,1,McpHostManager,StartUp,MCP,12,1756158031591
+ZAK-Agent startup complete,0,Driver,StartUp,System,13,1756158031594
+Host API server started on HTTP port 8080 - Access at http://localhost:8080,0,HostAPIVerticle,StartUp,System,14,1756158031609
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,15,1756158032782
+Oracle UCP pool initialized - gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com (min=5, max=20),1,OracleConnectionManager,StartUp,Database,16,1756158034989
+OpenAI API call successful,2,LlmAPIService,API,Success,17,1756158113340
+OpenAI API call successful,2,LlmAPIService,API,Success,18,1756158115516
+OpenAI API call successful,2,LlmAPIService,API,Success,19,1756158129188
+OpenAI API call successful,2,LlmAPIService,API,Success,20,1756158131222
+Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool,21,1756158131249
+Args for Analyze Query: {   "query" : "What is the total revenue by product category for orders shipped to the UK last month?" },3,OrchestrationStrategy,Arguments,Tool,22,1756158131249
+Orchestration routing oracle__deep_analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool,23,1756158131249
+Tool deep_analyze_query returned error: Tool execution failed: Unknown tool: deep_analyze_query,0,OracleClient,Error,Tool,24,1756158131266
+Tool oracle__deep_analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool,25,1756158131275
+OpenAI API call successful,2,LlmAPIService,API,Success,26,1756158149092
+OpenAI API call successful,2,LlmAPIService,API,Success,27,1756158151821
+Building args for Analyze Query step,3,OrchestrationStrategy,Arguments,Tool,28,1756158151825
+Args for Analyze Query: {   "query" : "How many customers do we have?" },3,OrchestrationStrategy,Arguments,Tool,29,1756158151825
+Orchestration routing oracle__deep_analyze_query via MCP,3,OrchestrationStrategy,Routing,Tool,30,1756158151825
+Tool deep_analyze_query returned error: Tool execution failed: Unknown tool: deep_analyze_query,0,OracleClient,Error,Tool,31,1756158151832
+Tool oracle__deep_analyze_query routed successfully,2,OrchestrationStrategy,Success,Tool,32,1756158151833

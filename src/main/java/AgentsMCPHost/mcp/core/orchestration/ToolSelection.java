@@ -291,7 +291,7 @@ public class ToolSelection extends AbstractVerticle {
                     return validateToolSelection(query, analysis, candidates);
                 } else {
                     // Fallback to score-based selection
-                    return Future.succeededFuture(selectByScore(candidates, analysis));
+                    return Future.succeededFuture(selectByScore(candidates, analysis, query));
                 }
             });
     }
@@ -346,7 +346,7 @@ public class ToolSelection extends AbstractVerticle {
         QueryAnalysis analysis = new QueryAnalysis();
         String lower = query.toLowerCase();
         
-        // Detect intent
+        // Detect intent - enhanced
         if (lower.contains("list") || lower.contains("show")) {
             analysis.intent = "list";
         } else if (lower.contains("count") || lower.contains("how many")) {
@@ -355,29 +355,59 @@ public class ToolSelection extends AbstractVerticle {
             analysis.intent = "describe";
         } else if (lower.contains("find") || lower.contains("search") || lower.contains("get")) {
             analysis.intent = "search";
+        } else if (lower.contains("what kind") || lower.contains("what data")) {
+            analysis.intent = "explore";
+        } else if (lower.contains("discover")) {
+            analysis.intent = "discover";
+        } else if (lower.contains("sum") || lower.contains("total") || lower.contains("aggregate")) {
+            analysis.intent = "aggregate";
         } else {
             analysis.intent = "query";
         }
         
-        // Extract entities
+        // Extract entities - enhanced
         if (lower.contains("table")) analysis.entities.add("table");
-        if (lower.contains("orders")) analysis.entities.add("orders");
-        if (lower.contains("customers")) analysis.entities.add("customers");
-        if (lower.contains("products")) analysis.entities.add("products");
+        if (lower.contains("order")) analysis.entities.add("orders");
+        if (lower.contains("customer")) analysis.entities.add("customers");
+        if (lower.contains("product")) analysis.entities.add("products");
+        if (lower.contains("employee")) analysis.entities.add("employees");
+        if (lower.contains("supplier")) analysis.entities.add("suppliers");
         if (lower.contains("pending")) analysis.entities.add("pending");
+        if (lower.contains("active")) analysis.entities.add("active");
         if (lower.contains("california")) analysis.entities.add("california");
+        if (lower.contains("high") && lower.contains("priority")) analysis.entities.add("high_priority");
         
-        // Detect capabilities needed
+        // Detect capabilities needed - enhanced
         if (lower.contains("join") || (analysis.entities.size() > 1)) {
             analysis.capabilities.add("multi_table");
         }
         if (lower.contains("sql") || lower.contains("query")) {
             analysis.capabilities.add("query");
         }
+        if (lower.contains("sum") || lower.contains("total") || lower.contains("average") ||
+            lower.contains("count") || lower.contains("group by")) {
+            analysis.capabilities.add("aggregate");
+        }
+        if (lower.contains("where") || lower.contains("filter") || lower.contains("only") ||
+            lower.contains("pending") || lower.contains("active")) {
+            analysis.capabilities.add("filter");
+        }
+        if (lower.contains("pending") || lower.contains("active") || lower.contains("status") ||
+            lower.contains("priority") || lower.contains("category")) {
+            analysis.capabilities.add("business_terms");
+        }
+        if (lower.contains("between") || lower.contains("relationship") || 
+            lower.contains("connected") || lower.contains("related")) {
+            analysis.capabilities.add("relationship");
+        }
         
-        // Set complexity
-        analysis.complexity = analysis.entities.size() > 2 || 
-                             analysis.capabilities.contains("multi_table") ? 
+        // Set complexity - enhanced logic
+        analysis.complexity = (analysis.entities.size() > 2 || 
+                             analysis.capabilities.contains("multi_table") ||
+                             analysis.capabilities.contains("business_terms") ||
+                             analysis.capabilities.contains("relationship") ||
+                             analysis.capabilities.contains("aggregate") ||
+                             lower.contains("top ") || lower.contains("complex")) ? 
                              "complex" : "simple";
         
         analysis.confidence = 0.7; // Pattern matching confidence
@@ -512,22 +542,22 @@ public class ToolSelection extends AbstractVerticle {
                     } catch (Exception e) {
                         System.err.println("[ToolSelection] Failed to parse LLM response, using score-based: " + e.getMessage());
                         // Fallback to score-based selection
-                        return selectByScore(candidates, analysis);
+                        return selectByScore(candidates, analysis, query);
                     }
                 }
                 System.out.println("[ToolSelection] No LLM response, using score-based selection");
-                return selectByScore(candidates, analysis);
+                return selectByScore(candidates, analysis, query);
             })
             .recover(err -> {
                 System.err.println("[ToolSelection] LLM validation failed, using score-based: " + err.getMessage());
-                return Future.succeededFuture(selectByScore(candidates, analysis));
+                return Future.succeededFuture(selectByScore(candidates, analysis, query));
             });
     }
     
     /**
      * Select tool by score (fallback when LLM validation fails)
      */
-    private ToolDecision selectByScore(List<ToolCandidate> candidates, QueryAnalysis analysis) {
+    private ToolDecision selectByScore(List<ToolCandidate> candidates, QueryAnalysis analysis, String query) {
         ToolDecision decision = new ToolDecision();
         
         if (candidates.isEmpty()) {
@@ -540,10 +570,10 @@ public class ToolSelection extends AbstractVerticle {
         
         // Check if this is the oracle_agent which should trigger orchestration
         if (best.toolName.equals("oracle_agent")) {
-            // Oracle agent now means use the orchestration strategy
+            // Select appropriate Oracle strategy based on query characteristics
             decision.strategy = ToolStrategy.ORCHESTRATION;
-            decision.orchestrationName = "oracle_full_pipeline";
-            decision.reasoning = "Database query requiring Oracle orchestration pipeline";
+            decision.orchestrationName = selectOracleOrchestrationPipeline(query, analysis);
+            decision.reasoning = "Database query requiring Oracle " + decision.orchestrationName;
         } else if (best.toolName.startsWith("_orchestration_")) {
             // This is an explicit orchestration strategy marker
             JsonObject strategyDef = toolRegistry.getJsonObject("tools").getJsonObject(best.toolName);
@@ -564,8 +594,8 @@ public class ToolSelection extends AbstractVerticle {
             
             if (isDatabaseQuery) {
                 decision.strategy = ToolStrategy.ORCHESTRATION;
-                decision.orchestrationName = "oracle_full_pipeline";
-                decision.reasoning = "Complex database query requiring full pipeline orchestration";
+                decision.orchestrationName = selectOracleOrchestrationPipeline(query, analysis);
+                decision.reasoning = "Complex database query requiring " + decision.orchestrationName;
             } else {
                 // Not database related, use standard LLM
                 decision.strategy = ToolStrategy.STANDARD_LLM;
@@ -582,6 +612,57 @@ public class ToolSelection extends AbstractVerticle {
         decision.analysis = analysis;
         
         return decision;
+    }
+    
+    /**
+     * Select the appropriate Oracle orchestration pipeline based on query characteristics
+     */
+    private String selectOracleOrchestrationPipeline(String query, QueryAnalysis analysis) {
+        String lowerQuery = query.toLowerCase();
+        
+        // Check for discovery intent
+        if (lowerQuery.contains("what kind of") || lowerQuery.contains("show me data") || 
+            lowerQuery.contains("what data") || lowerQuery.contains("describe") ||
+            analysis.intent.equals("explore") || analysis.intent.equals("discover")) {
+            System.out.println("[ToolSelection] Selected oracle_discovery_first - discovery intent detected");
+            return "oracle_discovery_first";
+        }
+        
+        // Check for performance-critical queries
+        if (lowerQuery.contains("top ") || lowerQuery.contains("bottom ") ||
+            lowerQuery.contains("large") || lowerQuery.contains("performance") ||
+            (analysis.capabilities.contains("aggregate") && analysis.complexity.equals("complex"))) {
+            System.out.println("[ToolSelection] Selected oracle_performance_focused - performance-critical query");
+            return "oracle_performance_focused";
+        }
+        
+        // Check for simple queries
+        if (analysis.complexity.equals("simple") && 
+            !analysis.capabilities.contains("multi_table") &&
+            !analysis.capabilities.contains("aggregate")) {
+            System.out.println("[ToolSelection] Selected oracle_simple_query - simple query detected");
+            return "oracle_simple_query";
+        }
+        
+        // Check for complex relationship queries
+        if (lowerQuery.contains("relationship") || lowerQuery.contains("between") ||
+            lowerQuery.contains("join") || lowerQuery.contains("connected") ||
+            analysis.capabilities.contains("multi_table")) {
+            System.out.println("[ToolSelection] Selected oracle_adaptive_pipeline - relationship query detected");
+            return "oracle_adaptive_pipeline";
+        }
+        
+        // Check for queries needing business term mapping
+        if (lowerQuery.contains("pending") || lowerQuery.contains("active") ||
+            lowerQuery.contains("status") || lowerQuery.contains("priority") ||
+            lowerQuery.contains("category")) {
+            System.out.println("[ToolSelection] Selected oracle_adaptive_pipeline - business terms detected");
+            return "oracle_adaptive_pipeline";
+        }
+        
+        // Default to validated pipeline for accuracy
+        System.out.println("[ToolSelection] Selected oracle_validated_pipeline - default for accuracy");
+        return "oracle_validated_pipeline";
     }
     
     /**
@@ -604,10 +685,10 @@ public class ToolSelection extends AbstractVerticle {
         }
         
         prompt.append("Extract the following in JSON format:\n");
-        prompt.append("1. intent: Primary action (list, count, search, describe, aggregate, compare)\n");
-        prompt.append("2. entities: Business entities and concepts mentioned\n");
-        prompt.append("3. capabilities: Required capabilities (query, multi_table, aggregate, filter)\n");
-        prompt.append("4. complexity: 'simple' or 'complex'\n");
+        prompt.append("1. intent: Primary action (list, count, search, describe, aggregate, compare, explore, discover)\n");
+        prompt.append("2. entities: Business entities and concepts mentioned (include status values like 'pending', 'active')\n");
+        prompt.append("3. capabilities: Required capabilities (query, multi_table, aggregate, filter, relationship, business_terms)\n");
+        prompt.append("4. complexity: 'simple' or 'complex' (complex if: multiple tables, aggregations, business terms, relationships)\n");
         prompt.append("5. confidence: Your confidence level (0.0 to 1.0)\n\n");
         prompt.append("Return ONLY valid JSON.");
         

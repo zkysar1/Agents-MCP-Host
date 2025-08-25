@@ -2,7 +2,7 @@ package AgentsMCPHost;
 
 import AgentsMCPHost.api.*;
 import AgentsMCPHost.mcp.core.McpHostManager;
-import AgentsMCPHost.mcp.servers.oracle.orchestration.OracleOrchestrationStrategy;
+import AgentsMCPHost.mcp.core.orchestration.GenericOrchestrationVerticle;
 import AgentsMCPHost.mcp.core.orchestration.ToolSelection;
 import AgentsMCPHost.llm.LlmAPIService;
 import AgentsMCPHost.logging.Logger;
@@ -212,16 +212,17 @@ public class Driver {
   }
   
   private void setOracleOrchestrationStrategy() {
-    // Deploy Oracle Orchestration Strategy - coordinates tool calls
-    System.out.println("Deploying Oracle Orchestration Strategy...");
+    // Deploy Generic Orchestration Verticle - handles all orchestration strategies
+    System.out.println("Deploying Generic Orchestration Strategies...");
     
-    vertx.deployVerticle(new OracleOrchestrationStrategy(), res -> {
+    vertx.deployVerticle(new GenericOrchestrationVerticle(), res -> {
       if (res.succeeded()) {
-        System.out.println("Oracle Orchestration deployed - pure coordination, no hidden logic");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Oracle Orchestration deployed,3,Driver,StartUp,Orchestration");
+        System.out.println("Generic Orchestration deployed - all strategies available");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Generic Orchestration deployed,3,Driver,StartUp,Orchestration");
       } else {
-        System.err.println("Oracle Orchestration deployment failed: " + res.cause().getMessage());
-        System.err.println("Complex query orchestration will not be available");
+        System.err.println("Generic Orchestration deployment failed: " + res.cause().getMessage());
+        System.err.println("Orchestration strategies will not be available");
+        res.cause().printStackTrace();
       }
     });
   }
