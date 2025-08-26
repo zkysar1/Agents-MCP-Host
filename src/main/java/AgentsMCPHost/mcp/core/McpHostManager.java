@@ -331,30 +331,23 @@ public class McpHostManager extends AbstractVerticle {
         System.out.println("[DEBUG] McpHostManager.handleToolsDiscovered - Client " + clientId + 
                          " discovered " + tools.size() + " tools from " + serverName);
         
-        // Aggregate tools with server prefixing (OpenCode pattern)
+        // Store tools WITHOUT prefixing for clean names
         int toolsAdded = 0;
         for (int i = 0; i < tools.size(); i++) {
             JsonObject tool = tools.getJsonObject(i);
-            String originalToolName = tool.getString("name");
+            String toolName = tool.getString("name");
             
-            // Create prefixed tool name: serverName__toolName
-            String prefixedToolName = serverName + "__" + originalToolName;
-            
-            // Store tool with metadata
+            // Store tool with metadata for routing (no prefix needed!)
             JsonObject toolWithMeta = tool.copy()
-                .put("name", prefixedToolName)  // Use prefixed name
-                .put("_originalName", originalToolName)  // Store original name
+                .put("name", toolName)  // Keep original clean name
                 .put("_client", clientId)
                 .put("_server", serverName);
             
-            allTools.put(prefixedToolName, toolWithMeta);
-            toolToClient.put(prefixedToolName, clientId);
+            allTools.put(toolName, toolWithMeta);
+            toolToClient.put(toolName, clientId);
             
-            // Also store by original name for backward compatibility
-            toolToClient.put(originalToolName, clientId);
-            
-            System.out.println("[DEBUG]   Added tool: " + prefixedToolName + 
-                             " (original: " + originalToolName + ")");
+            System.out.println("[DEBUG]   Added tool: " + toolName + 
+                             " (from " + serverName + " via " + clientId + ")");
             toolsAdded++;
         }
         
@@ -432,20 +425,8 @@ public class McpHostManager extends AbstractVerticle {
             return;
         }
         
-        // Try to find client by tool name (supports both prefixed and non-prefixed)
+        // Find client by tool name - simple lookup now!
         String clientId = toolToClient.get(toolName);
-        
-        // If not found and doesn't contain __, try adding server prefixes
-        if (clientId == null && !toolName.contains("__")) {
-            // Try to find with any server prefix
-            for (String key : allTools.keySet()) {
-                if (key.endsWith("__" + toolName)) {
-                    clientId = toolToClient.get(key);
-                    toolName = key; // Use the prefixed name
-                    break;
-                }
-            }
-        }
         
         if (clientId == null) {
             msg.fail(404, "Tool not found: " + toolName);
@@ -455,12 +436,6 @@ public class McpHostManager extends AbstractVerticle {
                     new JsonObject().put("error", "Tool not found: " + toolName));
             }
             return;
-        }
-        
-        // Extract original tool name if prefixed
-        String originalToolName = toolName;
-        if (toolName.contains("__")) {
-            originalToolName = toolName.substring(toolName.indexOf("__") + 2);
         }
         
         // Make toolName and clientId final for lambda
@@ -485,10 +460,9 @@ public class McpHostManager extends AbstractVerticle {
                     .put("status", "routing"));
         }
         
-        // Update request with original tool name for client
+        // Forward request as-is (no more prefix manipulation!)
         JsonObject clientRequest = request.copy()
-            .put("tool", originalToolName)  // Use original name for client
-            .put("_prefixedName", finalToolName)  // Keep prefixed name for reference
+            .put("tool", toolName)  // Clean tool name
             .put("requestTime", String.valueOf(System.currentTimeMillis()));  // Track timing
         
         // Forward to appropriate client via event bus

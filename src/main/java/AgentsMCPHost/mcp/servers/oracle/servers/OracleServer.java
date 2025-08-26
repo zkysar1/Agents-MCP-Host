@@ -416,7 +416,7 @@ public class OracleServer extends AbstractVerticle {
         
         // ============ INTELLIGENCE TOOLS ============
         .add(new JsonObject()
-            .put("name", "oracle__deep_analyze_query")
+            .put("name", "deep_analyze_query")
             .put("description", "Deeply analyze query to extract ALL semantic concepts, not just entities")
             .put("category", "intelligence")
             .put("inputSchema", new JsonObject()
@@ -431,7 +431,7 @@ public class OracleServer extends AbstractVerticle {
                 .put("required", new JsonArray().add("query"))))
         
         .add(new JsonObject()
-            .put("name", "oracle__discover_column_semantics")
+            .put("name", "discover_column_semantics")
             .put("description", "Discover what columns contain based on data patterns and query needs")
             .put("category", "intelligence")
             .put("inputSchema", new JsonObject()
@@ -447,7 +447,7 @@ public class OracleServer extends AbstractVerticle {
                 .put("required", new JsonArray().add("tables").add("query_analysis"))))
         
         .add(new JsonObject()
-            .put("name", "oracle__map_business_terms")
+            .put("name", "map_business_terms")
             .put("description", "Map business language to technical database terms")
             .put("category", "intelligence")
             .put("inputSchema", new JsonObject()
@@ -463,7 +463,7 @@ public class OracleServer extends AbstractVerticle {
                 .put("required", new JsonArray().add("business_terms").add("schema_context"))))
         
         .add(new JsonObject()
-            .put("name", "oracle__infer_relationships")
+            .put("name", "infer_relationships")
             .put("description", "Discover relationships between tables even without foreign keys")
             .put("category", "intelligence")
             .put("inputSchema", new JsonObject()
@@ -479,7 +479,7 @@ public class OracleServer extends AbstractVerticle {
                 .put("required", new JsonArray().add("tables"))))
         
         .add(new JsonObject()
-            .put("name", "oracle__smart_schema_match")
+            .put("name", "smart_schema_match")
             .put("description", "Intelligently match schema using deep analysis and all discovery tools")
             .put("category", "intelligence")
             .put("inputSchema", new JsonObject()
@@ -494,7 +494,7 @@ public class OracleServer extends AbstractVerticle {
                 .put("required", new JsonArray().add("query"))))
         
         .add(new JsonObject()
-            .put("name", "oracle__optimize_sql_smart")
+            .put("name", "optimize_sql_smart")
             .put("description", "Intelligently optimize SQL using EXPLAIN PLAN and complexity analysis")
             .put("category", "intelligence")
             .put("inputSchema", new JsonObject()
@@ -788,23 +788,20 @@ public class OracleServer extends AbstractVerticle {
                 break;
                 
             // Intelligence tools
-            case "oracle__deep_analyze_query":
+            case "deep_analyze_query":
                 resultFuture = deepAnalyzeQuery(arguments);
                 break;
-            case "oracle__discover_column_semantics":
+            case "discover_column_semantics":
                 resultFuture = discoverColumnSemantics(arguments);
                 break;
-            case "oracle__map_business_terms":
+            case "map_business_terms":
                 resultFuture = mapBusinessTerms(arguments);
                 break;
-            case "oracle__infer_relationships":
+            case "infer_relationships":
                 resultFuture = inferRelationships(arguments);
                 break;
-            case "oracle__smart_schema_match":
+            case "smart_schema_match":
                 resultFuture = smartSchemaMatch(arguments);
-                break;
-            case "oracle__optimize_sql_smart":
-                resultFuture = optimizeSqlSmart(arguments);
                 break;
                 
             default:
@@ -1319,32 +1316,13 @@ public class OracleServer extends AbstractVerticle {
         String sql = arguments.getString("sql");
         String streamId = arguments.getString("_streamId"); // Extract streamId if present
         
-        // Null check and try alternatives
+        // Null check
         if (sql == null || sql.trim().isEmpty()) {
-            // Try from generated_sql object
-            JsonObject generatedSql = arguments.getJsonObject("generated_sql");
-            if (generatedSql != null) {
-                sql = generatedSql.getString("sql");
-            }
-            
-            if (sql == null || sql.trim().isEmpty()) {
-                // Try from optimized_sql object
-                JsonObject optimizedSql = arguments.getJsonObject("optimized_sql");
-                if (optimizedSql != null) {
-                    sql = optimizedSql.getString("optimized_sql");
-                    if (sql == null || sql.trim().isEmpty()) {
-                        sql = optimizedSql.getString("sql");
-                    }
-                }
-            }
-            
-            if (sql == null || sql.trim().isEmpty()) {
-                String error = "Missing required argument: sql";
-                vertx.eventBus().publish("log",
-                    "executeQuery missing sql argument,0,Oracle,Error,Validation");
-                System.err.println("[Oracle] executeQuery: " + error);
-                return Future.failedFuture(error);
-            }
+            String error = "Missing required argument: sql";
+            vertx.eventBus().publish("log",
+                "executeQuery missing sql argument,0,Oracle,Error,Validation");
+            System.err.println("[Oracle] executeQuery: " + error);
+            return Future.failedFuture(error);
         }
         
         // Clean markdown if present

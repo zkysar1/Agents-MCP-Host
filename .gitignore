@@ -163,6 +163,9 @@ buildNumber.properties
 /.gradle/
 /build/
 
+## Custom data not needed to upload
+/data/agent/logs/current.csv
+
 
 # Ignore Gradle GUI config
 gradle-app.setting

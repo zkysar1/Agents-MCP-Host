@@ -84,33 +84,15 @@ public class OracleClient extends AbstractVerticle {
                 return oracleTransport.listTools();
             })
             .onSuccess(tools -> {
-                // Store discovered tools with oracle__ prefix for namespacing
+                // Store discovered tools WITHOUT any prefix manipulation
                 for (int i = 0; i < tools.size(); i++) {
                     JsonObject tool = tools.getJsonObject(i);
-                    String originalName = tool.getString("name");
-                    String prefixedName;
+                    String toolName = tool.getString("name");
                     
-                    // Check if tool already has oracle__ prefix (intelligence tools)
-                    if (originalName.startsWith("oracle__")) {
-                        // Already prefixed - don't add another prefix
-                        prefixedName = originalName;
-                        System.out.println("[OracleClient]   Discovered intelligence tool: " + prefixedName);
-                    } else {
-                        // Regular tool - add prefix
-                        prefixedName = "oracle__" + originalName;
-                        System.out.println("[OracleClient]   Discovered tool: " + prefixedName);
-                    }
+                    // Store tool as-is - no prefixing!
+                    availableTools.put(toolName, tool);
                     
-                    // Store with prefixed name for McpHostManager
-                    JsonObject toolWithPrefix = tool.copy();
-                    toolWithPrefix.put("name", prefixedName);
-                    toolWithPrefix.put("originalName", originalName);
-                    availableTools.put(prefixedName, toolWithPrefix);
-                    
-                    // Edge case: detect and warn about double prefixing
-                    if (prefixedName.startsWith("oracle__oracle__")) {
-                        System.err.println("[OracleClient] WARNING: Double prefix detected: " + prefixedName);
-                    }
+                    System.out.println("[OracleClient]   Discovered tool: " + toolName);
                 }
                 
                 // Publish discovered tools to event bus for McpHostManager
@@ -150,30 +132,8 @@ public class OracleClient extends AbstractVerticle {
         
         System.out.println("[OracleClient] Received tool call request: " + toolName);
         
-        // Determine server tool name based on tool type
-        String serverToolName;
-        if (isIntelligenceTool(toolName)) {
-            // Intelligence tools - preserve the original name structure
-            if (toolName.startsWith("oracle__oracle__")) {
-                // Fix double prefix by removing one
-                serverToolName = toolName.substring("oracle__".length());
-                System.out.println("[OracleClient] Fixing double prefix: " + toolName + " -> " + serverToolName);
-            } else if (toolName.startsWith("oracle__")) {
-                // Already has correct prefix for intelligence tool - keep it
-                serverToolName = toolName;
-                System.out.println("[OracleClient] Intelligence tool with correct prefix: " + serverToolName);
-            } else {
-                // No prefix - shouldn't happen but add it
-                serverToolName = "oracle__" + toolName;
-                System.out.println("[OracleClient] Adding prefix to intelligence tool: " + serverToolName);
-            }
-        } else {
-            // Regular tools - strip prefix
-            serverToolName = toolName.startsWith("oracle__") 
-                ? toolName.substring("oracle__".length()) 
-                : toolName;
-            System.out.println("[OracleClient] Regular tool, stripped to: " + serverToolName);
-        }
+        // No more prefix manipulation - send tool name as-is!
+        String serverToolName = toolName;
         
         // Add streamId to arguments if present
         if (streamId != null) {
@@ -299,31 +259,12 @@ public class OracleClient extends AbstractVerticle {
                     availableTools.clear();
                     for (int i = 0; i < tools.size(); i++) {
                         JsonObject tool = tools.getJsonObject(i);
-                        String prefixedName = "oracle__" + tool.getString("name");
-                        availableTools.put(prefixedName, tool);
+                        String toolName = tool.getString("name");
+                        availableTools.put(toolName, tool);
                     }
                     publishToolsDiscovered(tools);
                 });
         }
-    }
-    
-    /**
-     * Helper method to identify intelligence tools
-     */
-    private boolean isIntelligenceTool(String toolName) {
-        // Remove any prefixes for checking
-        String baseName = toolName;
-        while (baseName.startsWith("oracle__")) {
-            baseName = baseName.substring("oracle__".length());
-        }
-        
-        // List of intelligence tool patterns
-        return baseName.equals("deep_analyze_query") ||
-               baseName.equals("smart_schema_match") ||
-               baseName.equals("map_business_terms") ||
-               baseName.equals("discover_column_semantics") ||
-               baseName.equals("infer_relationships") ||
-               baseName.equals("optimize_sql_smart");
     }
     
     @Override

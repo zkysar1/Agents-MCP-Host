@@ -51,6 +51,11 @@ public class GenericOrchestrationVerticle extends AbstractVerticle {
                             "GenericOrchestration deployed " + count + " strategies,2,GenericOrchestration,StartUp,Orchestration");
                     }
                     
+                    // Publish the oracle orchestration ready event that Driver expects
+                    vertx.eventBus().publish("oracle.orchestration.ready", new JsonObject()
+                        .put("message", "All orchestration strategies deployed")
+                        .put("count", count));
+                    
                     startPromise.complete();
                 })
                 .onFailure(err -> {

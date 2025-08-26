@@ -45,8 +45,16 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 }
                 
                 System.out.println("[Orchestration] " + strategyName + " strategy initialized");
-                System.out.println("[Orchestration] Steps: " + 
-                    strategyConfig.getJsonArray("steps", new JsonArray()).size());
+                
+                // Handle both JsonArray steps and "dynamic" steps
+                Object stepsValue = strategyConfig.getValue("steps");
+                if (stepsValue instanceof JsonArray) {
+                    System.out.println("[Orchestration] Steps: " + ((JsonArray) stepsValue).size());
+                } else if ("dynamic".equals(stepsValue)) {
+                    System.out.println("[Orchestration] Steps: dynamic");
+                } else {
+                    System.out.println("[Orchestration] Steps: unknown format");
+                }
                 
                 // Register event bus handler for this strategy
                 vertx.eventBus().consumer("orchestration." + strategyName, this::handleOrchestrationRequest);
@@ -106,7 +114,30 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
         context.stepResults = new HashMap<>();
         
         // Get strategy steps
-        JsonArray steps = strategyConfig.getJsonArray("steps", new JsonArray());
+        JsonArray steps;
+        Object stepsValue = strategyConfig.getValue("steps");
+        if (stepsValue instanceof String && "dynamic".equals(stepsValue)) {
+            // Handle dynamic steps for multi_tool_sequential
+            // Extract tools from request
+            JsonArray tools = request.getJsonArray("tools", new JsonArray());
+            if (tools.isEmpty()) {
+                msg.fail(400, "No tools provided for dynamic strategy");
+                return;
+            }
+            // Convert tools to steps format
+            steps = new JsonArray();
+            for (int i = 0; i < tools.size(); i++) {
+                JsonObject tool = tools.getJsonObject(i);
+                steps.add(new JsonObject()
+                    .put("step", i + 1)
+                    .put("name", "Execute " + tool.getString("tool"))
+                    .put("tool", tool.getString("tool"))
+                    .put("arguments", tool.getJsonObject("arguments", new JsonObject())));
+            }
+        } else {
+            steps = strategyConfig.getJsonArray("steps", new JsonArray());
+        }
+        
         long timeoutMs = strategyConfig.getLong("timeout_ms", 30000L);
         
         // Start progress updates if streaming
@@ -467,6 +498,34 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 // Map original_query to query parameter
                 arguments.put("query", context.originalQuery);
                 System.out.println("[Orchestration] Mapped original_query -> query: " + context.originalQuery);
+            } else if (key.contains("->")) {
+                // Handle explicit field mapping like "optimized_sql->sql"
+                String[] parts = key.split("->", 2);
+                String sourceKey = parts[0].trim();
+                String targetKey = parts[1].trim();
+                
+                if (context.dataToPass.containsKey(sourceKey)) {
+                    Object value = context.dataToPass.get(sourceKey);
+                    
+                    // Validate the value is not an error
+                    if (value instanceof String && ((String)value).startsWith("Error:")) {
+                        System.out.println("[Orchestration] Skipping error value for mapping: " + sourceKey + " -> " + targetKey);
+                        continue;
+                    }
+                    
+                    // Only set if target doesn't already have a value (first non-null wins)
+                    if (!arguments.containsKey(targetKey) || arguments.getValue(targetKey) == null) {
+                        arguments.put(targetKey, value);
+                        System.out.println("[Orchestration] Mapped " + sourceKey + " -> " + targetKey + 
+                                         " (type: " + (value != null ? value.getClass().getSimpleName() : "null") + ")");
+                    } else {
+                        System.out.println("[Orchestration] Skipped mapping " + sourceKey + " -> " + targetKey + 
+                                         " (target already has value)");
+                    }
+                } else {
+                    System.out.println("[Orchestration] Source key not found for mapping: " + sourceKey + 
+                                     " (will try next fallback)");
+                }
             } else if (key.contains(".")) {
                 // Handle nested references like "analysis.entities"
                 String[] parts = key.split("\\.", 2);
