@@ -1,5 +1,37 @@
 # Context for AI Agents
 
+## ⚡ Quick Onboarding (Read This First!)
+
+### What You're Working On
+A Java 21 Vert.x server implementing the Model Context Protocol (MCP) with an intelligent Intent Engine for orchestrating Oracle database queries through natural language.
+
+### Most Important Things to Know
+1. **Intent Engine**: Orchestrator intelligently provides context to tools that need it
+2. **Thread Safety**: Use ONLY Vert.x JsonObject/JsonArray, NEVER Java collections (HashMap, Set, etc.)
+3. **No Blocking**: All operations must be async (no readFileBlocking, no Thread.sleep)
+4. **Context Structure**: Tools expect specific fields from OrchestrationContext
+5. **Tool Naming**: serverName__toolName pattern (e.g., `oracle__list_tables` is now just `list_tables`)
+6. **Test First**: Run `./test-all.sh` before making changes to understand current state
+7. **Oracle Password**: ARmy0320-- milk (in test-common.sh)
+
+### Quick Commands
+```bash
+# Build and test
+./gradlew compileJava      # Check compilation
+./gradlew shadowJar        # Build JAR
+./test-all.sh              # Run all tests
+
+# Start server
+java -jar build/libs/Agents-MCP-Host-1.0.0-fat.jar
+```
+
+### Where to Look for Issues
+- **Tool Communication**: OrchestrationStrategy.java (Intent Engine)
+- **Context Management**: OrchestrationContext.java
+- **Tool Implementations**: OracleServer.java (check context handling)
+- **Thread Safety**: Look for Set, Map, List - should be JsonArray, JsonObject
+- **Blocking Operations**: Search for "readFileBlocking", "Thread.sleep", ".get()"
+
 ## 🎯 Project Overview
 
 **Agents-MCP-Host** is a Java 21 Vert.x-based REST API server that implements the complete Model Context Protocol (MCP) specification with full server/client/host architecture. The system includes an enterprise-grade Oracle SQL agent with natural language processing, replacing placeholder servers with sophisticated database intelligence capabilities.
@@ -61,7 +93,9 @@ java -jar build/libs/Agents-MCP-Host-1.0.0-fat.jar
 - ✅ **Oracle Cloud Database integration with TLS**
 - ✅ **OracleConnectionManager with UCP pooling**
 - ✅ **Enumeration table support for business translations**
-- ✅ **Fixed Oracle client deployment** (Aug 2025) - Corrected configuration check in McpHostManagerVerticle
+- ✅ **Intent Engine Implementation** - Intelligent orchestration with context management
+- ✅ **Thread-Safe Vert.x Collections** - Replaced Java collections with JsonObject/JsonArray
+- ✅ **Context-Aware Oracle Tools** - All intelligence tools now handle orchestration context
 
 🚧 **Future Enhancements**:
 - Elicitation workflow (partially implemented)
@@ -85,6 +119,28 @@ HTTP Request → HostAPIVerticle → ConversationVerticle → [Auto-Detection]
                                            ↓
                                     No Tool? → LlmAPIService → OpenAI
 ```
+
+### Intent Engine Architecture (NEW)
+
+```
+User Query → ConversationVerticle → ToolSelection → Orchestration Strategy
+                                                              ↓
+                                                    OrchestrationContext Created
+                                                              ↓
+                                                    For Each Tool in Pipeline:
+                                                              ↓
+                                              Tool Needs Context? → Add Context to Args
+                                                              ↓
+                                                    Tool Execution → Update Context
+                                                              ↓
+                                                        Final Result
+```
+
+**Key Components:**
+- **OrchestrationContext**: Stores query, accumulated knowledge, execution history
+- **OrchestrationStrategy**: Base class acting as Intent Engine
+- **Context-Aware Tools**: Tools that declare need for context receive full orchestration state
+- **Automatic Context Injection**: No manual mapping - tools get context when needed
 
 ### SSE Streaming Architecture
 
@@ -190,6 +246,58 @@ When adding new features:
 3. **Document changes** - Update relevant .md files
 4. **Test thoroughly** - All endpoints should work
 5. **Prepare for MCP SDK** - Structure allows future integration
+
+## 🧠 Intent Engine - Critical Understanding
+
+### What is the Intent Engine?
+The Intent Engine is our intelligent orchestration system that manages context and tool communication. Instead of tools talking directly to each other, they communicate THROUGH the orchestrator, which acts as an intelligent mediator.
+
+### Key Principles
+1. **Context is First-Class**: The OrchestrationContext travels through the pipeline
+2. **No Manual Mapping**: Tools that need context declare it and receive it automatically
+3. **Smart Tool Selection**: Tools are selected based on query intent and complexity
+4. **Accumulated Knowledge**: Each tool execution updates the context for subsequent tools
+
+### How It Works
+
+```java
+// OrchestrationContext structure
+public class OrchestrationContext {
+    String originalQuery;           // User's original question
+    JsonObject deepAnalysis;        // Analysis results
+    JsonObject schemaKnowledge;     // Schema matching results
+    JsonObject lastGeneratedSql;    // Generated SQL
+    JsonArray executionHistory;     // Full execution trail
+    // ... more accumulated knowledge
+}
+```
+
+### Context-Aware Tools
+These tools automatically receive context when called through orchestration:
+- `analyze_query` / `deep_analyze_query`
+- `match_schema` / `smart_schema_match`
+- `generate_sql`
+- `execute_query`
+- `format_results`
+- `optimize_sql` / `optimize_sql_smart`
+- `validate_schema_sql`
+- `discover_sample_data`
+- `discover_column_semantics`
+- `map_business_terms`
+- `infer_relationships`
+
+### Critical Implementation Details
+
+1. **Thread Safety**: ONLY use Vert.x JsonObject/JsonArray, never Java collections
+2. **Context Extraction**: Tools check for context first, fall back to direct args
+3. **No Blocking**: All file operations must be async (no readFileBlocking)
+4. **Event Bus**: All communication goes through Vert.x event bus
+
+### Common Pitfalls
+- Using `Set.of()` or `HashMap` instead of JsonArray/JsonObject
+- Forgetting to check for context in tool implementations
+- Expecting old context structure (e.g., `analysisData` instead of `deepAnalysis`)
+- Blocking the event loop with synchronous operations
 
 ## 🗄️ Oracle Integration
 

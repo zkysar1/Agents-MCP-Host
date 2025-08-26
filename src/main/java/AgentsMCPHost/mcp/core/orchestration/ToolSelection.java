@@ -114,7 +114,7 @@ public class ToolSelection extends AbstractVerticle {
         return new JsonObject()
             .put("tools", new JsonObject()
                 // Oracle tools
-                .put("oracle__list_tables", new JsonObject()
+                .put("list_tables", new JsonObject()
                     .put("capabilities", new JsonArray()
                         .add("list").add("tables").add("schema").add("metadata"))
                     .put("intents", new JsonArray()
@@ -124,7 +124,7 @@ public class ToolSelection extends AbstractVerticle {
                     .put("confidence_threshold", 0.7)
                     .put("description", "List all database tables"))
                 
-                .put("oracle__describe_table", new JsonObject()
+                .put("describe_table", new JsonObject()
                     .put("capabilities", new JsonArray()
                         .add("describe").add("structure").add("columns").add("metadata"))
                     .put("intents", new JsonArray()
@@ -134,7 +134,7 @@ public class ToolSelection extends AbstractVerticle {
                     .put("confidence_threshold", 0.7)
                     .put("description", "Get table structure and column details"))
                 
-                .put("oracle__execute_query", new JsonObject()
+                .put("execute_query", new JsonObject()
                     .put("capabilities", new JsonArray()
                         .add("query").add("select").add("retrieve").add("filter"))
                     .put("intents", new JsonArray()
@@ -534,7 +534,23 @@ public class ToolSelection extends AbstractVerticle {
                     System.out.println("[ToolSelection] LLM validation response: " + content);
                     
                     try {
-                        JsonObject decisionJson = new JsonObject(content);
+                        // Strip markdown code blocks if present
+                        String jsonContent = content;
+                        if (content.contains("```json")) {
+                            int start = content.indexOf("```json") + 7;
+                            int end = content.lastIndexOf("```");
+                            if (end > start) {
+                                jsonContent = content.substring(start, end).trim();
+                            }
+                        } else if (content.contains("```")) {
+                            int start = content.indexOf("```") + 3;
+                            int end = content.lastIndexOf("```");
+                            if (end > start) {
+                                jsonContent = content.substring(start, end).trim();
+                            }
+                        }
+                        
+                        JsonObject decisionJson = new JsonObject(jsonContent);
                         ToolDecision decision = ToolDecision.fromJson(decisionJson);
                         System.out.println("[ToolSelection] LLM decision parsed: " + decision.strategy + 
                             " (tool: " + decision.primaryTool + ", orchestration: " + decision.orchestrationName + ")");
@@ -652,16 +668,32 @@ public class ToolSelection extends AbstractVerticle {
             return "oracle_adaptive_pipeline";
         }
         
-        // Check for queries needing business term mapping
+        // Check for queries needing business term mapping or semantic understanding
         if (lowerQuery.contains("pending") || lowerQuery.contains("active") ||
             lowerQuery.contains("status") || lowerQuery.contains("priority") ||
-            lowerQuery.contains("category")) {
-            System.out.println("[ToolSelection] Selected oracle_adaptive_pipeline - business terms detected");
-            return "oracle_adaptive_pipeline";
+            lowerQuery.contains("category") || lowerQuery.contains("high") ||
+            lowerQuery.contains("urgent") || lowerQuery.contains("important")) {
+            // Use the new intelligent pipeline for queries that need semantic understanding
+            System.out.println("[ToolSelection] Selected oracle_truly_intelligent - business concepts need semantic understanding");
+            return "oracle_truly_intelligent";
         }
         
-        // Default to validated pipeline for accuracy
-        System.out.println("[ToolSelection] Selected oracle_validated_pipeline - default for accuracy");
+        // Check for queries with location concepts that might need mapping
+        if ((lowerQuery.contains("california") || lowerQuery.contains("state") || 
+             lowerQuery.contains("location") || lowerQuery.contains("region")) &&
+            analysis.complexity.equals("complex")) {
+            System.out.println("[ToolSelection] Selected oracle_truly_intelligent - location concepts need semantic mapping");
+            return "oracle_truly_intelligent";
+        }
+        
+        // Default to intelligent pipeline for complex queries
+        if (analysis.complexity.equals("complex")) {
+            System.out.println("[ToolSelection] Selected oracle_truly_intelligent - complex query benefits from intelligent handling");
+            return "oracle_truly_intelligent";
+        }
+        
+        // Fall back to validated pipeline for simpler queries
+        System.out.println("[ToolSelection] Selected oracle_validated_pipeline - standard query handling");
         return "oracle_validated_pipeline";
     }
     

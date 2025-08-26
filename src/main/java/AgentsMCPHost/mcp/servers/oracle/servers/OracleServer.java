@@ -1,7 +1,6 @@
 package AgentsMCPHost.mcp.servers.oracle.servers;
 
 import AgentsMCPHost.mcp.servers.oracle.orchestration.SchemaMatcher;
-import AgentsMCPHost.mcp.servers.oracle.orchestration.QueryTokenExtractor;
 import AgentsMCPHost.mcp.servers.oracle.utils.OracleConnectionManager;
 import AgentsMCPHost.mcp.servers.oracle.utils.EnumerationMapper;
 import AgentsMCPHost.mcp.servers.oracle.tools.intelligence.SmartSQLOptimizer;
@@ -488,10 +487,17 @@ public class OracleServer extends AbstractVerticle {
                     .put("query", new JsonObject()
                         .put("type", "string")
                         .put("description", "Natural language query"))
+                    .put("context", new JsonObject()
+                        .put("type", "object")
+                        .put("description", "Orchestration context with original query and accumulated knowledge"))
                     .put("conversation_history", new JsonObject()
                         .put("type", "array")
-                        .put("description", "Optional conversation context")))
-                .put("required", new JsonArray().add("query"))))
+                        .put("description", "Optional conversation context"))
+                    .put("acceptsContext", new JsonObject()
+                        .put("type", "boolean")
+                        .put("description", "Indicates this tool accepts orchestration context")
+                        .put("default", true)))
+                .put("required", new JsonArray())))
         
         .add(new JsonObject()
             .put("name", "optimize_sql_smart")
@@ -693,7 +699,16 @@ public class OracleServer extends AbstractVerticle {
         
         JsonObject arguments = params.getJsonObject("arguments", new JsonObject());
         
-        System.out.println("[Oracle] Executing tool: " + toolName);
+        // Log tool execution with context info
+        boolean hasContext = arguments.containsKey("context");
+        System.out.println("[Oracle] Executing tool: " + toolName + 
+            " (context: " + (hasContext ? "present" : "absent") + ")");
+        
+        if (hasContext && (toolName.equals("deep_analyze_query") || toolName.equals("smart_schema_match"))) {
+            JsonObject context = arguments.getJsonObject("context");
+            System.out.println("[Oracle] Context contains originalQuery: " + 
+                (context.containsKey("originalQuery") ? "yes" : "no"));
+        }
         
         Future<JsonObject> resultFuture;
         
@@ -833,7 +848,21 @@ public class OracleServer extends AbstractVerticle {
      * Analyze a natural language query using LLM
      */
     private Future<JsonObject> analyzeQuery(JsonObject arguments) {
-        String query = arguments.getString("query");
+        // Check if we have context from Intent Engine
+        JsonObject intentContext = arguments.getJsonObject("context");
+        String query;
+        JsonArray conversationContext;
+        
+        if (intentContext != null) {
+            // Extract query from Intent Engine context
+            query = intentContext.getString("originalQuery");
+            // Convert conversation history if available
+            conversationContext = intentContext.getJsonArray("conversationHistory", new JsonArray());
+        } else {
+            // Fall back to standard parameters
+            query = arguments.getString("query");
+            conversationContext = arguments.getJsonArray("context", new JsonArray());
+        }
         
         // Null check for required parameter
         if (query == null || query.trim().isEmpty()) {
@@ -844,9 +873,7 @@ public class OracleServer extends AbstractVerticle {
             return Future.failedFuture(error);
         }
         
-        JsonArray context = arguments.getJsonArray("context", new JsonArray());
-        
-        String prompt = buildAnalysisPrompt(query, context);
+        String prompt = buildAnalysisPrompt(query, conversationContext);
         
         JsonArray messages = new JsonArray()
             .add(new JsonObject()
@@ -876,7 +903,24 @@ public class OracleServer extends AbstractVerticle {
      * Match tokens against database schema
      */
     private Future<JsonObject> matchSchema(JsonObject arguments) {
-        JsonArray tokensArray = arguments.getJsonArray("tokens");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        JsonArray tokensArray;
+        
+        if (context != null) {
+            // Extract from Intent Engine context - check deepAnalysis for entities
+            JsonObject deepAnalysis = context.getJsonObject("deepAnalysis");
+            if (deepAnalysis != null) {
+                tokensArray = deepAnalysis.getJsonArray("entities", arguments.getJsonArray("tokens"));
+                System.out.println("[OracleServer] match_schema using entities from deepAnalysis: " + tokensArray);
+            } else {
+                // No deep analysis yet, fall back to tokens parameter
+                tokensArray = arguments.getJsonArray("tokens");
+            }
+        } else {
+            // Fall back to standard parameter
+            tokensArray = arguments.getJsonArray("tokens");
+        }
         
         // Null check for required parameter
         if (tokensArray == null || tokensArray.isEmpty()) {
@@ -949,7 +993,34 @@ public class OracleServer extends AbstractVerticle {
             return connectionCheck;
         }
         
-        JsonArray tableNames = arguments.getJsonArray("table_names");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        JsonArray tableNames = null;
+        
+        if (context != null) {
+            // Extract from Intent Engine context
+            JsonObject schemaKnowledge = context.getJsonObject("schemaKnowledge");
+            if (schemaKnowledge != null && schemaKnowledge.containsKey("tables")) {
+                JsonArray tables = schemaKnowledge.getJsonArray("tables");
+                if (tables != null && !tables.isEmpty()) {
+                    tableNames = new JsonArray();
+                    for (int i = 0; i < Math.min(3, tables.size()); i++) {
+                        JsonObject table = tables.getJsonObject(i);
+                        if (table != null) {
+                            String tableName = table.getString("table", table.getString("name"));
+                            if (tableName != null) {
+                                tableNames.add(tableName);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fall back to standard parameters if not found in context
+        if (tableNames == null) {
+            tableNames = arguments.getJsonArray("table_names");
+        }
         
         // Distinguish between null (missing) and empty array
         if (tableNames == null) {
@@ -1045,50 +1116,44 @@ public class OracleServer extends AbstractVerticle {
      * Generate SQL from natural language
      */
     private Future<JsonObject> generateSql(JsonObject arguments) {
-        String query = arguments.getString("query");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        final String query;
+        final JsonObject schemaContext;
+        final JsonObject discoveredData;  // Will be initialized in both branches below
         
-        // Try both schema_context and schema_matches (orchestration passes schema_matches)
-        JsonObject schemaContext = arguments.getJsonObject("schema_context");
-        if (schemaContext == null || schemaContext.isEmpty()) {
-            schemaContext = arguments.getJsonObject("schema_matches", new JsonObject());
-            if (!schemaContext.isEmpty()) {
-                System.out.println("[Oracle] Using schema_matches for SQL generation");
+        if (context != null) {
+            // Extract data from Intent Engine context with safe defaults
+            query = context.getString("originalQuery", "");
+            schemaContext = context.getJsonObject("schemaKnowledge", new JsonObject());
+            discoveredData = context.getJsonObject("sampleData", new JsonObject());
+            System.out.println("[Oracle] generate_sql using Intent Engine context");
+        } else {
+            // Fall back to direct parameters with safe defaults
+            query = arguments.getString("query", "");
+            
+            // Try schema_context first, then schema_matches
+            JsonObject schema = arguments.getJsonObject("schema_context");
+            if (schema == null || schema.isEmpty()) {
+                schema = arguments.getJsonObject("schema_matches", new JsonObject());
+                if (!schema.isEmpty()) {
+                    System.out.println("[Oracle] Using schema_matches for SQL generation");
+                }
             }
+            schemaContext = schema != null ? schema : new JsonObject();
+            
+            // Initialize discoveredData from arguments
+            JsonObject discovered = arguments.getJsonObject("discovered_data", new JsonObject());
+            if (discovered.isEmpty()) {
+                discovered = arguments.getJsonObject("sample_data", new JsonObject());
+            }
+            discoveredData = discovered;
         }
         
-        // Try both discovered_data and sample_data (orchestration passes sample_data)
-        JsonObject discoveredData = arguments.getJsonObject("discovered_data");
-        if (discoveredData == null || discoveredData.isEmpty()) {
-            // Handle both JsonObject and String types for sample_data
-            Object sampleDataObj = arguments.getValue("sample_data");
-            if (sampleDataObj instanceof JsonObject) {
-                discoveredData = (JsonObject) sampleDataObj;
-                if (!discoveredData.isEmpty()) {
-                    System.out.println("[Oracle] Using sample_data (JsonObject) for SQL generation");
-                }
-            } else if (sampleDataObj instanceof String) {
-                String sampleDataStr = (String) sampleDataObj;
-                System.out.println("[Oracle] sample_data is String: " + sampleDataStr);
-                // If it's an error string, log it but use empty JsonObject
-                if (sampleDataStr.startsWith("Error:")) {
-                    System.out.println("[Oracle] Ignoring error in sample_data: " + sampleDataStr);
-                    discoveredData = new JsonObject();
-                } else {
-                    // Try to parse as JSON if it's not an error
-                    try {
-                        discoveredData = new JsonObject(sampleDataStr);
-                        System.out.println("[Oracle] Parsed sample_data from String to JsonObject");
-                    } catch (Exception e) {
-                        System.out.println("[Oracle] Could not parse sample_data String as JSON: " + e.getMessage());
-                        discoveredData = new JsonObject();
-                    }
-                }
-            } else {
-                discoveredData = new JsonObject();
-                if (sampleDataObj != null) {
-                    System.out.println("[Oracle] Unexpected type for sample_data: " + sampleDataObj.getClass().getName());
-                }
-            }
+        // Validate query
+        if (query == null || query.trim().isEmpty()) {
+            System.err.println("[Oracle] Missing query in generate_sql");
+            return Future.failedFuture("Missing required argument: query (not found in context or arguments)");
         }
         
         // Log what we're working with
@@ -1219,7 +1284,23 @@ public class OracleServer extends AbstractVerticle {
             return connectionCheck;
         }
         
-        String sql = arguments.getString("sql");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        String sql;
+        
+        if (context != null) {
+            // Extract from Intent Engine context - check lastGeneratedSql
+            JsonObject lastGeneratedSql = context.getJsonObject("lastGeneratedSql");
+            if (lastGeneratedSql != null && lastGeneratedSql.containsKey("sql")) {
+                sql = lastGeneratedSql.getString("sql");
+                System.out.println("[OracleServer] optimize_sql_smart using SQL from context");
+            } else {
+                sql = arguments.getString("sql");
+            }
+        } else {
+            // Fall back to standard parameter
+            sql = arguments.getString("sql");
+        }
         
         // Null check
         if (sql == null || sql.trim().isEmpty()) {
@@ -1262,12 +1343,30 @@ public class OracleServer extends AbstractVerticle {
      * Validate SQL against database schema
      */
     private Future<JsonObject> validateSchemaSql(JsonObject arguments) {
-        String sql = arguments.getString("sql");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        String sql;
+        JsonObject schemaContext;
+        
+        if (context != null) {
+            // Extract from Intent Engine context
+            JsonObject lastGeneratedSql = context.getJsonObject("lastGeneratedSql");
+            if (lastGeneratedSql != null) {
+                sql = lastGeneratedSql.getString("sql", arguments.getString("sql"));
+            } else {
+                sql = arguments.getString("sql");
+            }
+            // Use schema knowledge from context
+            schemaContext = context.getJsonObject("schemaKnowledge", arguments.getJsonObject("schema_context", new JsonObject()));
+        } else {
+            // Fall back to standard parameters
+            sql = arguments.getString("sql");
+            schemaContext = arguments.getJsonObject("schema_context", new JsonObject());
+        }
+        
         if (sql == null || sql.trim().isEmpty()) {
             return Future.failedFuture("Missing required argument: sql");
         }
-        
-        JsonObject schemaContext = arguments.getJsonObject("schema_context", new JsonObject());
         
         return sqlSchemaValidator.validateSQL(sql, schemaContext)
             .recover(err -> {
@@ -1313,7 +1412,30 @@ public class OracleServer extends AbstractVerticle {
                 .put("row_count", 0));
         }
         
-        String sql = arguments.getString("sql");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        String sql;
+        JsonObject schemaData = null;
+        
+        if (context != null) {
+            // Extract from Intent Engine context - check lastGeneratedSql
+            JsonObject lastGeneratedSql = context.getJsonObject("lastGeneratedSql");
+            if (lastGeneratedSql != null && lastGeneratedSql.containsKey("sql")) {
+                sql = lastGeneratedSql.getString("sql");
+                System.out.println("[OracleServer] execute_query using SQL from lastGeneratedSql in context");
+            } else {
+                sql = arguments.getString("sql");
+            }
+            schemaData = context.getJsonObject("schemaKnowledge");
+            // Store schema data for error handling
+            if (schemaData != null) {
+                sessions.put("lastSchemaContext", schemaData);
+            }
+        } else {
+            // Fall back to standard parameter
+            sql = arguments.getString("sql");
+        }
+        
         String streamId = arguments.getString("_streamId"); // Extract streamId if present
         
         // Null check
@@ -1415,8 +1537,22 @@ public class OracleServer extends AbstractVerticle {
      * Format results to natural language
      */
     private Future<JsonObject> formatResults(JsonObject arguments) {
-        String originalQuery = arguments.getString("original_query", arguments.getString("query", ""));
-        String sqlExecuted = arguments.getString("sql_executed", arguments.getString("generated_sql", ""));
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        String originalQuery = "";
+        String sqlExecuted = "";
+        JsonObject analysisData = null;
+        
+        if (context != null) {
+            // Extract from Intent Engine context
+            originalQuery = context.getString("originalQuery", "");
+            sqlExecuted = context.getString("generatedSql", arguments.getString("sql_executed", ""));
+            analysisData = context.getJsonObject("analysisData");
+        } else {
+            // Fall back to standard parameters
+            originalQuery = arguments.getString("original_query", arguments.getString("query", ""));
+            sqlExecuted = arguments.getString("sql_executed", arguments.getString("generated_sql", ""));
+        }
         
         // Check for critical errors in arguments
         boolean hasCriticalError = arguments.getBoolean("isError", false) && 
@@ -1426,17 +1562,51 @@ public class OracleServer extends AbstractVerticle {
         JsonArray results = null;
         String error = arguments.getString("error");
         
-        // Check if results is a String (error message)
-        Object resultsObj = arguments.getValue("results");
-        if (resultsObj instanceof String) {
-            // Results is an error string
-            error = (String) resultsObj;
-            System.out.println("[Oracle] formatResults: results is error string: " + error);
-        } else if (resultsObj instanceof JsonArray) {
-            results = (JsonArray) resultsObj;
-        } else if (resultsObj == null) {
-            results = new JsonArray();
-            System.out.println("[Oracle] formatResults: no results provided");
+        // First, try to get results from context if available
+        if (context != null) {
+            // Look for execute_query results in execution history
+            JsonArray executionHistory = context.getJsonArray("executionHistory");
+            if (executionHistory != null) {
+                // Search backward through history for most recent execute_query
+                for (int i = executionHistory.size() - 1; i >= 0; i--) {
+                    JsonObject execution = executionHistory.getJsonObject(i);
+                    String toolName = execution.getString("toolName");
+                    if ("execute_query".equals(toolName)) {
+                        JsonObject queryResult = execution.getJsonObject("result");
+                        if (queryResult != null && !queryResult.containsKey("error")) {
+                            // Found successful query result
+                            results = queryResult.getJsonArray("results");
+                            sqlExecuted = queryResult.getString("sql_executed", sqlExecuted);
+                            System.out.println("[Oracle] formatResults: found results in context from execute_query: " + 
+                                             (results != null ? results.size() + " rows" : "null"));
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Also check for errors in context
+            JsonArray errors = context.getJsonArray("errors");
+            if (errors != null && errors.size() > 0 && results == null) {
+                // Get the most recent error
+                JsonObject lastError = errors.getJsonObject(errors.size() - 1);
+                error = lastError.getString("error", error);
+            }
+        }
+        
+        // If no results from context, fall back to checking arguments directly
+        if (results == null) {
+            Object resultsObj = arguments.getValue("results");
+            if (resultsObj instanceof String) {
+                // Results is an error string
+                error = (String) resultsObj;
+                System.out.println("[Oracle] formatResults: results is error string: " + error);
+            } else if (resultsObj instanceof JsonArray) {
+                results = (JsonArray) resultsObj;
+                System.out.println("[Oracle] formatResults: found results in arguments");
+            } else if (resultsObj == null) {
+                System.out.println("[Oracle] formatResults: no results in arguments or context");
+            }
         }
         
         // Check for database connection errors specifically
@@ -1459,11 +1629,16 @@ public class OracleServer extends AbstractVerticle {
         // Ensure we have results
         if (results == null) {
             results = new JsonArray();
+            System.out.println("[Oracle] formatResults: results was null, initialized to empty array");
         }
+        
+        System.out.println("[Oracle] formatResults: final results size = " + results.size() + 
+                         ", error = " + error);
         
         // Check if results are truly empty (not an error condition)
         if (results.isEmpty() && error == null) {
             // This is a valid empty result set, not an error
+            System.out.println("[Oracle] formatResults: returning 'No data found' for empty results");
             return Future.succeededFuture(new JsonObject()
                 .put("formatted", "No data found matching your query.")
                 .put("success", true)
@@ -2262,12 +2437,27 @@ public class OracleServer extends AbstractVerticle {
      * Deep analyze query using AI
      */
     private Future<JsonObject> deepAnalyzeQuery(JsonObject arguments) {
-        String query = arguments.getString("query");
-        if (query == null || query.trim().isEmpty()) {
-            return Future.failedFuture("Missing required argument: query");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        String query;
+        JsonArray history;
+        
+        if (context != null) {
+            // Extract from Intent Engine context
+            query = context.getString("originalQuery");
+            history = context.getJsonArray("conversationHistory", new JsonArray());
+            System.out.println("[OracleServer] deep_analyze_query received context with query: " + query);
+        } else {
+            // Fall back to standard parameters
+            query = arguments.getString("query");
+            history = arguments.getJsonArray("conversation_history", new JsonArray());
         }
         
-        JsonArray history = arguments.getJsonArray("conversation_history", new JsonArray());
+        if (query == null || query.trim().isEmpty()) {
+            System.err.println("[OracleServer] deep_analyze_query missing query - context: " + 
+                (context != null ? "present" : "absent") + ", arguments: " + arguments.encodePrettily());
+            return Future.failedFuture("Missing required argument: query");
+        }
         
         return deepQueryAnalyzer.analyze(query, history)
             .recover(err -> {
@@ -2283,12 +2473,30 @@ public class OracleServer extends AbstractVerticle {
      * Discover column semantics
      */
     private Future<JsonObject> discoverColumnSemantics(JsonObject arguments) {
-        JsonArray tables = arguments.getJsonArray("tables");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        JsonArray tables;
+        JsonObject queryAnalysis;
+        
+        if (context != null) {
+            // Extract from Intent Engine context - use actual context structure
+            JsonObject schemaKnowledge = context.getJsonObject("schemaKnowledge");
+            if (schemaKnowledge != null) {
+                tables = schemaKnowledge.getJsonArray("tables", arguments.getJsonArray("tables"));
+            } else {
+                tables = arguments.getJsonArray("tables");
+            }
+            // Get deep analysis if available
+            queryAnalysis = context.getJsonObject("deepAnalysis", arguments.getJsonObject("query_analysis", new JsonObject()));
+        } else {
+            // Fall back to standard parameters
+            tables = arguments.getJsonArray("tables");
+            queryAnalysis = arguments.getJsonObject("query_analysis", new JsonObject());
+        }
+        
         if (tables == null || tables.isEmpty()) {
             return Future.failedFuture("Missing required argument: tables");
         }
-        
-        JsonObject queryAnalysis = arguments.getJsonObject("query_analysis", new JsonObject());
         
         return columnSemanticsDiscoverer.discoverSemantics(tables, queryAnalysis)
             .recover(err -> {
@@ -2302,12 +2510,25 @@ public class OracleServer extends AbstractVerticle {
      * Map business terms to database terms
      */
     private Future<JsonObject> mapBusinessTerms(JsonObject arguments) {
-        JsonArray businessTerms = arguments.getJsonArray("business_terms");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        JsonArray businessTerms;
+        JsonObject schemaContext;
+        
+        if (context != null) {
+            // Extract from Intent Engine context
+            JsonObject analysisData = context.getJsonObject("analysisData", new JsonObject());
+            businessTerms = analysisData.getJsonArray("businessTerms", arguments.getJsonArray("business_terms"));
+            schemaContext = context.getJsonObject("schemaData", arguments.getJsonObject("schema_context", new JsonObject()));
+        } else {
+            // Fall back to standard parameters
+            businessTerms = arguments.getJsonArray("business_terms");
+            schemaContext = arguments.getJsonObject("schema_context", new JsonObject());
+        }
+        
         if (businessTerms == null || businessTerms.isEmpty()) {
             return Future.failedFuture("Missing required argument: business_terms");
         }
-        
-        JsonObject schemaContext = arguments.getJsonObject("schema_context", new JsonObject());
         
         return businessTermMapper.mapTerms(businessTerms, schemaContext)
             .recover(err -> {
@@ -2322,12 +2543,25 @@ public class OracleServer extends AbstractVerticle {
      * Infer relationships between tables
      */
     private Future<JsonObject> inferRelationships(JsonObject arguments) {
-        JsonArray tables = arguments.getJsonArray("tables");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        JsonArray tables;
+        JsonObject queryAnalysis;
+        
+        if (context != null) {
+            // Extract from Intent Engine context
+            JsonObject schemaData = context.getJsonObject("schemaData", new JsonObject());
+            tables = schemaData.getJsonArray("matchedTables", arguments.getJsonArray("tables"));
+            queryAnalysis = context.getJsonObject("analysisData", arguments.getJsonObject("query_analysis", new JsonObject()));
+        } else {
+            // Fall back to standard parameters
+            tables = arguments.getJsonArray("tables");
+            queryAnalysis = arguments.getJsonObject("query_analysis", new JsonObject());
+        }
+        
         if (tables == null || tables.isEmpty()) {
             return Future.failedFuture("Missing required argument: tables");
         }
-        
-        JsonObject queryAnalysis = arguments.getJsonObject("query_analysis", new JsonObject());
         
         return relationshipInferrer.inferRelationships(tables, queryAnalysis)
             .recover(err -> {
@@ -2342,9 +2576,21 @@ public class OracleServer extends AbstractVerticle {
      * Smart schema matching using all intelligence tools
      */
     private Future<JsonObject> smartSchemaMatch(JsonObject arguments) {
-        String query = arguments.getString("query");
+        // Check if we have context from Intent Engine
+        JsonObject context = arguments.getJsonObject("context");
+        final String query;
+        
+        if (context != null) {
+            // Extract query from context
+            query = context.getString("originalQuery");
+            System.out.println("[OracleServer] smart_schema_match received context with query: " + query);
+        } else {
+            // Fall back to direct query parameter
+            query = arguments.getString("query");
+        }
+        
         if (query == null || query.trim().isEmpty()) {
-            return Future.failedFuture("Missing required argument: query");
+            return Future.failedFuture("Missing required argument: query (neither in direct parameter nor context)");
         }
         
         JsonArray history = arguments.getJsonArray("conversation_history", new JsonArray());

@@ -1,6 +1,6 @@
 {
   "tools": {
-    "oracle__list_tables": {
+    "list_tables": {
       "capabilities": ["list", "tables", "schema", "metadata", "discovery"],
       "intents": ["list", "show", "discover", "explore", "what"],
       "entities": ["table", "tables", "schema", "database", "structure"],
@@ -14,7 +14,7 @@
       ]
     },
     
-    "oracle__describe_table": {
+    "describe_table": {
       "capabilities": ["describe", "structure", "columns", "metadata", "schema"],
       "intents": ["describe", "show", "structure", "what"],
       "entities": ["table", "column", "field", "structure", "schema"],
@@ -28,7 +28,7 @@
       ]
     },
     
-    "oracle__execute_query": {
+    "execute_query": {
       "capabilities": ["query", "select", "retrieve", "filter", "simple_sql"],
       "intents": ["get", "find", "search", "select", "retrieve", "show"],
       "entities": ["data", "records", "rows", "query", "sql"],
@@ -43,7 +43,7 @@
       ]
     },
     
-    "oracle__explain_plan": {
+    "explain_plan": {
       "capabilities": ["analyze", "performance", "optimization", "explain"],
       "intents": ["explain", "analyze", "optimize", "performance"],
       "entities": ["plan", "performance", "query", "optimization"],

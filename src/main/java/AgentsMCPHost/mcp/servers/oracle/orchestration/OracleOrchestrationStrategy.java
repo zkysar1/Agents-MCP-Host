@@ -1,6 +1,7 @@
 package AgentsMCPHost.mcp.servers.oracle.orchestration;
 
 import AgentsMCPHost.mcp.core.orchestration.OrchestrationStrategy;
+import AgentsMCPHost.mcp.core.orchestration.OrchestrationContext;
 
 import io.vertx.core.Promise;
 import io.vertx.core.json.JsonObject;
@@ -39,12 +40,13 @@ public class OracleOrchestrationStrategy extends OrchestrationStrategy {
      * Override to add Oracle-specific step skipping logic if needed
      */
     @Override
-    protected boolean shouldSkipStep(ExecutionContext context, JsonObject step) {
+    protected boolean shouldSkipStep(OrchestrationContext context, JsonObject step) {
         String stepName = step.getString("name");
         
         // Skip data discovery if we already have good schema matches
         if ("Discover Data".equals(stepName)) {
-            JsonObject schemaMatches = context.getStepResults().get("Match Schema");
+            JsonObject stepResults = context.getStepResults();
+            JsonObject schemaMatches = stepResults.getJsonObject("Match Schema");
             if (schemaMatches != null && schemaMatches.getDouble("confidence", 0.0) > 0.8) {
                 System.out.println("[OracleOrchestration] Skipping data discovery - high confidence schema match");
                 return true;
@@ -53,7 +55,8 @@ public class OracleOrchestrationStrategy extends OrchestrationStrategy {
         
         // Skip optimization if query is simple
         if ("Optimize SQL".equals(stepName)) {
-            JsonObject analysis = context.getStepResults().get("Analyze Query");
+            JsonObject stepResults = context.getStepResults();
+            JsonObject analysis = stepResults.getJsonObject("Analyze Query");
             if (analysis != null && "simple".equals(analysis.getString("complexity"))) {
                 System.out.println("[OracleOrchestration] Skipping optimization - simple query");
                 return true;

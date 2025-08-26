@@ -9,6 +9,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.eventbus.Message;
+import io.vertx.core.eventbus.DeliveryOptions;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import java.util.UUID;
@@ -443,8 +444,10 @@ public class Conversation extends AbstractVerticle {
       .put("sessionId", UUID.randomUUID().toString())
       .put("streamId", streamId);
     
-    // Send to orchestration handler
-    vertx.eventBus().request("orchestration." + orchestrationName, orchestrationRequest, ar -> {
+    // Send to orchestration handler with 10-minute timeout
+    vertx.eventBus().request("orchestration." + orchestrationName, orchestrationRequest, 
+      new DeliveryOptions().setSendTimeout(600000), // 10 minutes
+      ar -> {
       if (ar.succeeded()) {
         JsonObject result = (JsonObject) ar.result().body();
         
@@ -469,15 +472,18 @@ public class Conversation extends AbstractVerticle {
           System.out.println("[Conversation] WARNING: No streamId for response delivery!");
         }
       } else {
-        // Don't add prefix - the orchestration error already has context
+        // Add orchestration context to error
         String error = ar.cause().getMessage();
-        System.err.println("[Conversation] Orchestration failed: " + error);
+        System.err.println("[Conversation] Orchestration '" + orchestrationName + "' failed: " + error);
         
         if (streamId != null) {
+          // Include orchestration name in error for better debugging
+          String errorMessage = "Orchestration '" + orchestrationName + "' failed: " + error;
           vertx.eventBus().publish("conversation." + streamId + ".error",
             new JsonObject()
-              .put("error", error)
-              .put("orchestration", orchestrationName));
+              .put("error", errorMessage)
+              .put("orchestration", orchestrationName)
+              .put("rawError", error));
         }
       }
     });

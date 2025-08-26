@@ -5,10 +5,12 @@ import AgentsMCPHost.mcp.servers.oracle.utils.EnumerationMapper;
 import io.vertx.core.Vertx;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
+import io.vertx.core.CompositeFuture;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -28,8 +30,10 @@ public class SchemaMatcher {
     private final EnumerationMapper enumMapper;
     private Vertx vertx;
     
-    // Cache for schema information (with TTL)
-    private final Map<String, CachedSchema> schemaCache = new HashMap<>();
+    // Cache for schema information (with TTL) - thread-safe for Vert.x
+    private final Map<String, CachedSchema> schemaCache = new ConcurrentHashMap<>();
+    private volatile JsonArray cachedTablesList = null;
+    private volatile long cachedTablesTimestamp = 0;
     private static final long CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
     
     public SchemaMatcher() {
@@ -43,7 +47,61 @@ public class SchemaMatcher {
     public Future<Void> initialize(Vertx vertx) {
         this.vertx = vertx;
         // Ensure OracleConnectionManager is initialized
-        return oracleManager.initialize(vertx);
+        return oracleManager.initialize(vertx)
+            .compose(v -> preloadSchema());
+    }
+    
+    /**
+     * Preload schema into cache
+     */
+    private Future<Void> preloadSchema() {
+        System.out.println("[SchemaMatcher] Preloading database schema...");
+        
+        return oracleManager.listTables()
+            .compose(tables -> {
+                System.out.println("[SchemaMatcher] Found " + tables.size() + " tables");
+                
+                // Cache table list (not using CachedSchema since it expects TableMetadata)
+                cachedTablesList = tables;
+                cachedTablesTimestamp = System.currentTimeMillis();
+                
+                // Preload metadata for important tables
+                List<Future> metadataFutures = new ArrayList<>();
+                for (int i = 0; i < tables.size(); i++) {
+                    JsonObject table = tables.getJsonObject(i);
+                    String tableName = table.getString("TABLE_NAME");
+                    if (tableName != null && 
+                        (tableName.contains("ORDER") || 
+                         tableName.contains("CUSTOMER") || 
+                         tableName.contains("PRODUCT") ||
+                         tableName.contains("ENUM"))) {
+                        metadataFutures.add(
+                            getTableMetadata(tableName)
+                                .onFailure(err -> {
+                                    System.err.println("[SchemaMatcher] Failed to cache " + tableName + ": " + err.getMessage());
+                                })
+                        );
+                    }
+                }
+                
+                return metadataFutures.isEmpty() ? Future.succeededFuture() : CompositeFuture.all(metadataFutures);
+            })
+            .compose(v -> {
+                // Also preload enumerations
+                return enumMapper.detectEnumerationTables()
+                    .onSuccess(enums -> {
+                        System.out.println("[SchemaMatcher] Cached " + enums.size() + " enumeration tables");
+                    });
+            })
+            .<Void>map(v -> {
+                System.out.println("[SchemaMatcher] Schema preload complete");
+                return (Void) null;
+            })
+            .recover(err -> {
+                System.err.println("[SchemaMatcher] Schema preload failed: " + err.getMessage());
+                // Don't fail initialization if preload fails
+                return Future.succeededFuture((Void) null);
+            });
     }
     
     /**
@@ -68,7 +126,25 @@ public class SchemaMatcher {
             }
         });
         
-        oracleManager.listTables()
+        // Check cache first
+        Future<JsonArray> tablesFuture;
+        if (cachedTablesList != null && (System.currentTimeMillis() - cachedTablesTimestamp) < CACHE_TTL_MS) {
+            System.out.println("[SchemaMatcher] Using cached table list (" + cachedTablesList.size() + " tables)");
+            tablesFuture = Future.succeededFuture(cachedTablesList);
+        } else {
+            System.out.println("[SchemaMatcher] Loading table list from database");
+            tablesFuture = oracleManager.listTables()
+                .map(tables -> {
+                    // Cache the result atomically
+                    synchronized (this) {
+                        cachedTablesList = tables;
+                        cachedTablesTimestamp = System.currentTimeMillis();
+                    }
+                    return tables;
+                });
+        }
+        
+        tablesFuture
             .compose(tables -> {
                 // Match tokens against tables
                 List<TableMatch> tableMatches = matchTables(tokens, tables);

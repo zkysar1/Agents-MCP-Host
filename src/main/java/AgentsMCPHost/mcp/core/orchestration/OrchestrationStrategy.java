@@ -3,26 +3,30 @@ package AgentsMCPHost.mcp.core.orchestration;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Promise;
 import io.vertx.core.Future;
+import io.vertx.core.CompositeFuture;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.file.FileSystem;
 import AgentsMCPHost.streaming.StreamingEventPublisher;
+import AgentsMCPHost.llm.LlmAPIService;
 
-import java.util.*;
+import java.util.UUID;
+import java.util.List;
+import java.util.ArrayList;
 
 /**
- * Base class for orchestration strategies - coordinates tool execution patterns.
+ * Base class for orchestration strategies - acts as the Intent Engine.
  * 
- * This is the foundation of the unified architecture where orchestration is just
- * a configuration of tool usage. Each strategy defines a sequence of tool calls
- * with data passing between steps.
+ * This is the intelligent orchestrator that understands intent, manages context,
+ * and ensures each tool gets exactly what it needs. Tools communicate through
+ * this Intent Engine, not directly with each other.
  * 
  * Key principles:
- * - Orchestrators have NO business logic - they only coordinate
- * - All capabilities are exposed as tools
- * - Strategies are configurations, not code
- * - Maximum reusability and composability
+ * - The orchestrator IS the intelligence (Intent Engine)
+ * - Context is a first-class argument to tools that need it
+ * - No complex mappings or side channels - just smart orchestration
+ * - Tools remain simple functions with clear contracts
  */
 public abstract class OrchestrationStrategy extends AbstractVerticle {
     
@@ -104,14 +108,8 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
         
         System.out.println("[Orchestration] Starting " + strategyName + " for: " + query);
         
-        // Create execution context
-        ExecutionContext context = new ExecutionContext();
-        context.originalQuery = query;
-        context.sessionId = sessionId;
-        context.streamId = streamId;
-        context.startTime = System.currentTimeMillis();
-        context.currentStep = 0;
-        context.stepResults = new HashMap<>();
+        // Create orchestration context (Intent Engine's brain)
+        OrchestrationContext context = new OrchestrationContext(query, sessionId, streamId);
         
         // Get strategy steps
         JsonArray steps;
@@ -189,23 +187,23 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
     }
     
     /**
-     * Execute strategy steps recursively
+     * Execute strategy steps recursively with intelligent retry
      */
-    private Future<JsonObject> executeStrategy(ExecutionContext context, JsonArray steps, int stepIndex) {
+    private Future<JsonObject> executeStrategy(OrchestrationContext context, JsonArray steps, int stepIndex) {
         if (stepIndex >= steps.size()) {
             // All steps complete - return final result
             return Future.succeededFuture(buildFinalResult(context));
         }
         
         JsonObject step = steps.getJsonObject(stepIndex);
-        context.currentStep = stepIndex + 1;
+        context.setCurrentStep(stepIndex + 1);
         
         // Send progress update
         sendStepProgress(context, step);
         
         // Check if step is optional and should be skipped
         if (step.getBoolean("optional", false) && shouldSkipStep(context, step)) {
-            System.out.println("[Orchestration] Skipping optional step " + context.currentStep);
+            System.out.println("[Orchestration] Skipping optional step " + context.getCurrentStep());
             return executeStrategy(context, steps, stepIndex + 1);
         }
         
@@ -214,23 +212,54 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
         
         // Call the tool
         String toolName = step.getString("tool");
-        System.out.println("[Orchestration] Step " + context.currentStep + ": Calling " + toolName);
+        System.out.println("[Orchestration] Step " + context.getCurrentStep() + ": Calling " + toolName);
         
-        return callTool(toolName, toolArguments, context.streamId)
+        long toolStartTime = System.currentTimeMillis();
+        return callTool(toolName, toolArguments, context)
             .compose(result -> {
+                long toolDuration = System.currentTimeMillis() - toolStartTime;
+                
                 // Log raw result for debugging
                 System.out.println("[Orchestration] Raw result from " + toolName + ": " + 
                     result.encode().substring(0, Math.min(200, result.encode().length())));
                 
-                // Store raw result
-                String resultKey = step.getString("name", "step_" + context.currentStep);
-                context.stepResults.put(resultKey, result);
+                // Extract actual data from MCP response format
+                Object extractedData = extractDataFromMcpResponse(result);
+                JsonObject cleanResult;
+                
+                if (extractedData instanceof JsonObject) {
+                    cleanResult = (JsonObject) extractedData;
+                } else if (extractedData instanceof String) {
+                    // Wrap string results in a proper structure
+                    cleanResult = new JsonObject().put("result", extractedData);
+                } else if (extractedData instanceof JsonArray) {
+                    // Wrap array results properly
+                    cleanResult = new JsonObject().put("results", extractedData);
+                } else if (extractedData == null) {
+                    // If extraction returned null, check if original has error
+                    if (result.containsKey("error")) {
+                        cleanResult = result; // Keep error info
+                    } else {
+                        // Empty successful result
+                        cleanResult = new JsonObject().put("success", true);
+                    }
+                } else {
+                    // Fallback to original for unexpected types
+                    cleanResult = result;
+                }
+                
+                // Log extracted result for debugging
+                System.out.println("[Orchestration] Extracted result from " + toolName + ": " + 
+                    cleanResult.encode().substring(0, Math.min(200, cleanResult.encode().length())));
+                
+                // Record tool execution in context with CLEAN data
+                context.recordExecution(toolName, toolArguments, cleanResult, toolDuration);
                 
                 // Check for critical errors FIRST
-                if (result.containsKey("severity") && "CRITICAL".equals(result.getString("severity"))) {
-                    String errorMsg = result.getString("error", "Critical error occurred");
-                    String stepName = step.getString("name", "step_" + context.currentStep);
-                    System.err.println("[Orchestration] CRITICAL ERROR in step " + context.currentStep + 
+                if (cleanResult.containsKey("severity") && "CRITICAL".equals(cleanResult.getString("severity"))) {
+                    String errorMsg = cleanResult.getString("error", "Critical error occurred");
+                    String stepName = step.getString("name", "step_" + context.getCurrentStep());
+                    System.err.println("[Orchestration] CRITICAL ERROR in step " + context.getCurrentStep() + 
                         " (" + toolName + "): " + errorMsg);
                     
                     // Publish critical error event
@@ -242,7 +271,7 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                         .put("error", errorMsg)
                         .put("severity", "CRITICAL")
                         .put("timestamp", java.time.Instant.now().toString())
-                        .put("streamId", context.streamId));
+                        .put("streamId", context.getStreamId()));
                     
                     // Always stop orchestration for critical errors
                     return Future.failedFuture("CRITICAL: " + errorMsg);
@@ -250,15 +279,15 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                 
                 // Check for regular errors
                 boolean isCriticalStep = step.getBoolean("critical", true); // Default to critical
-                if (result.containsKey("error") || result.getBoolean("isError", false)) {
-                    String errorMsg = result.getString("error", "Unknown error");
-                    System.err.println("[Orchestration] Step " + context.currentStep + " (" + toolName + ") failed with error: " + errorMsg);
+                if (cleanResult.containsKey("error") || cleanResult.getBoolean("isError", false)) {
+                    String errorMsg = cleanResult.getString("error", "Unknown error");
+                    System.err.println("[Orchestration] Step " + context.getCurrentStep() + " (" + toolName + ") failed with error: " + errorMsg);
                     
                     // Check if this is a database connection error (treat as critical)
                     if (errorMsg.contains("Database connection") || 
                         errorMsg.contains("UCP-0") ||
                         errorMsg.contains("connection pool")) {
-                        String stepName = step.getString("name", "step_" + context.currentStep);
+                        String stepName = step.getString("name", "step_" + context.getCurrentStep());
                         System.err.println("[Orchestration] Database connection error detected - treating as critical");
                         
                         // Publish critical error
@@ -270,9 +299,56 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                             .put("error", errorMsg)
                             .put("severity", "CRITICAL")
                             .put("timestamp", java.time.Instant.now().toString())
-                            .put("streamId", context.streamId));
+                            .put("streamId", context.getStreamId()));
                         
                         return Future.failedFuture("CRITICAL: " + errorMsg);
+                    }
+                    
+                    // NEW: Intelligent error handling for semantic understanding
+                    // Check if we have error feedback and haven't exceeded retry limit
+                    JsonObject errorFeedback = cleanResult.getJsonObject("error_feedback");
+                    int stepRetries = context.getStepRetries(stepIndex);
+                    
+                    if (errorFeedback != null && stepRetries < 3) {
+                        // Perform semantic error analysis
+                        System.out.println("[Orchestration] Analyzing error semantically for step " + context.getCurrentStep());
+                        
+                        // Publish user-friendly progress
+                        StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, context.getStreamId());
+                        publisher.publishProgress("semantic_analysis", 
+                            "I encountered an issue. Let me analyze what went wrong and try a different approach...",
+                            new JsonObject()
+                                .put("phase", "error_analysis")
+                                .put("attempt", stepRetries + 1)
+                                .put("error_type", errorFeedback.getString("error_type", "unknown")));
+                        
+                        // Perform intelligent semantic analysis
+                        return analyzeErrorSemantically(context, errorMsg, errorFeedback, cleanResult)
+                            .compose(analysis -> {
+                                String recommendedAction = analysis.getString("recommended_action");
+                                
+                                switch (recommendedAction) {
+                                    case "RETRY_WITH_UNDERSTANDING":
+                                        return retryWithDeeperUnderstanding(context, steps, stepIndex, analysis);
+                                        
+                                    case "EXPLORE_SCHEMA":
+                                        return exploreSchemaIntelligently(context, analysis)
+                                            .compose(schemaKnowledge -> {
+                                                context.updateSchemaKnowledge(schemaKnowledge);
+                                                return executeStrategy(context, steps, stepIndex);
+                                            });
+                                        
+                                    case "BACKTRACK":
+                                        int targetStep = analysis.getInteger("target_step", 0);
+                                        return executeStrategy(context, steps, targetStep);
+                                        
+                                    default:
+                                        // Continue with original error handling
+                                        break;
+                                }
+                                
+                                return Future.succeededFuture(cleanResult);
+                            });
                     }
                     
                     if (isCriticalStep) {
@@ -287,74 +363,15 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                     }
                 }
                 
-                // Extract data from MCP format FIRST
-                Object extractedData = extractDataFromMcpResponse(result);
-                System.out.println("[Orchestration] Extracted data type: " + 
-                    (extractedData == null ? "null" : extractedData.getClass().getSimpleName()));
-                
-                // Store data to pass to next steps
-                JsonArray passToNext = step.getJsonArray("pass_to_next", new JsonArray());
-                for (int i = 0; i < passToNext.size(); i++) {
-                    String key = passToNext.getString(i);
-                    Object valueToPass = null;
-                    
-                    // Extract the specific field from the extracted data
-                    if (extractedData instanceof JsonObject) {
-                        JsonObject dataObj = (JsonObject) extractedData;
-                        valueToPass = dataObj.getValue(key);
-                        
-                        // If specific key not found but only one key requested, store whole object
-                        if (valueToPass == null && passToNext.size() == 1) {
-                            valueToPass = dataObj;
-                            System.out.println("[Orchestration] Storing entire extracted object for " + key);
-                        }
-                    } else if (extractedData instanceof String) {
-                        // If extracted data is a string (error or plain text)
-                        valueToPass = extractedData;
-                        System.out.println("[Orchestration] Storing string data for " + key + ": " + valueToPass);
-                    }
-                    
-                    if (valueToPass != null) {
-                        context.dataToPass.put(key, valueToPass);
-                        System.out.println("[Orchestration] Stored for next step: " + key + " = " + 
-                            (valueToPass instanceof JsonObject || valueToPass instanceof JsonArray ? 
-                             "JSON data" : valueToPass.toString()));
-                        
-                        vertx.eventBus().publish("log",
-                            "Step " + resultKey + " passing " + key + ",3,OrchestrationStrategy,DataFlow,Tool");
-                    } else {
-                        System.out.println("[Orchestration] WARNING: Could not extract " + key + " from result");
-                        vertx.eventBus().publish("log",
-                            "Failed to extract " + key + " from " + resultKey + ",1,OrchestrationStrategy,Warning,DataFlow");
-                    }
-                }
+                // In the Intent Engine model, the context automatically manages data flow
+                // The context.recordExecution() already stored the tool result
+                // Tools that need previous results can access them from context
                 
                 // Check if this is the final step
                 if (step.getBoolean("final", false)) {
-                    // Extract from MCP format for final result
-                    Object finalExtracted = extractDataFromMcpResponse(result);
-                    
-                    // For format_results tool, preserve the formatted field
-                    if (finalExtracted instanceof JsonObject) {
-                        JsonObject extractedObj = (JsonObject) finalExtracted;
-                        // Check if this is from format_results tool
-                        if (extractedObj.containsKey("formatted")) {
-                            // Preserve the entire response from format_results
-                            context.finalResult = extractedObj;
-                            System.out.println("[Orchestration] Final step - preserved formatted response");
-                        } else {
-                            context.finalResult = extractedObj;
-                        }
-                    } else if (finalExtracted instanceof String) {
-                        // Wrap string in a result object
-                        context.finalResult = new JsonObject()
-                            .put("formatted", finalExtracted)
-                            .put("success", !finalExtracted.toString().startsWith("Error:"));
-                    } else {
-                        context.finalResult = result; // Fallback to raw result
-                    }
-                    System.out.println("[Orchestration] Final result extracted: " + 
-                        (context.finalResult != null ? context.finalResult.encode().substring(0, Math.min(200, context.finalResult.encode().length())) : "null"));
+                    // In Intent Engine model, context already has all results
+                    // buildFinalResult will extract what's needed
+                    System.out.println("[Intent Engine] Final step completed - building result from context");
                     return Future.succeededFuture(buildFinalResult(context));
                 }
                 
@@ -363,7 +380,7 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
             })
             .recover(err -> {
                 String errorMessage = err.getMessage();
-                System.err.println("[Orchestration] Step " + context.currentStep + " failed: " + errorMessage);
+                System.err.println("[Orchestration] Step " + context.getCurrentStep() + " failed: " + errorMessage);
                 
                 // Check if step is critical
                 boolean isCriticalStep = step.getBoolean("critical", true);
@@ -384,16 +401,53 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
     }
     
     /**
-     * Call a tool via event bus
+     * Check if a tool needs context based on its name
+     * This is a simple implementation - could be enhanced to read from tool metadata
      */
-    private Future<JsonObject> callTool(String toolName, JsonObject arguments, String streamId) {
+    private boolean toolNeedsContext(String toolName) {
+        // Tools that need the full orchestration context
+        // Generally, "smart" or "intelligent" tools need context
+        // Using JsonArray for thread-safety in Vert.x
+        JsonArray contextAwareTools = new JsonArray()
+            .add("smart_schema_match")
+            .add("match_schema")  // Both variants
+            .add("generate_sql")
+            .add("analyze_query")  // Both variants
+            .add("deep_analyze_query")
+            .add("format_results")
+            .add("optimize_sql")  // Both variants
+            .add("optimize_sql_smart")
+            .add("discover_column_semantics")
+            .add("map_business_terms")
+            .add("infer_relationships")
+            .add("execute_query")  // Needs generated SQL from context
+            .add("validate_schema_sql")  // Needs schema context
+            .add("discover_sample_data")  // May need schema matches from context
+            .add("parse_oracle_error");  // Error context is important
+        
+        return contextAwareTools.contains(toolName);
+    }
+    
+    /**
+     * Call a tool via event bus - Intent Engine provides context when needed
+     */
+    private Future<JsonObject> callTool(String toolName, JsonObject arguments, OrchestrationContext context) {
         Promise<JsonObject> promise = Promise.promise();
+        String streamId = context.getStreamId();
+        
+        // Intent Engine logic: Add context if tool needs it
+        JsonObject finalArguments = arguments.copy();
+        if (toolNeedsContext(toolName)) {
+            // Add the full context to arguments for tools that need it
+            finalArguments.put("context", context.toJson());
+            System.out.println("[Intent Engine] Adding context for " + toolName);
+        }
         
         // Log tool call attempt
         vertx.eventBus().publish("log",
-            "Orchestration routing " + toolName + " via MCP,3,OrchestrationStrategy,Routing,Tool");
+            "Intent Engine routing " + toolName + ",3,OrchestrationStrategy,Routing,Tool");
         
-        System.out.println("[Orchestration] Routing tool: " + toolName + " through MCP host");
+        System.out.println("[Intent Engine] Routing tool: " + toolName + " through MCP host");
         
         // Publish streaming event for tool execution start
         if (streamId != null) {
@@ -403,13 +457,13 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                     .put("phase", "tool_execution")
                     .put("tool", toolName)
                     .put("status", "routing")
-                    .put("arguments", arguments));
+                    .put("has_context", toolNeedsContext(toolName)));
         }
         
         // Build tool request
         JsonObject toolRequest = new JsonObject()
             .put("tool", toolName)
-            .put("arguments", arguments);
+            .put("arguments", finalArguments);
         
         if (streamId != null) {
             toolRequest.put("streamId", streamId);
@@ -466,169 +520,67 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
     
     
     /**
-     * Build tool arguments from context and step configuration
+     * Build tool arguments - Intent Engine provides context when needed
+     * 
+     * In the Intent Engine model, tools that need context get it automatically.
+     * This method now only handles explicit arguments from the orchestration.
      */
-    private JsonObject buildToolArguments(ExecutionContext context, JsonObject step) {
+    private JsonObject buildToolArguments(OrchestrationContext context, JsonObject step) {
+        // In the Intent Engine model, argument building is simple:
+        // 1. Take any explicit arguments from the orchestration config
+        // 2. The Intent Engine (callTool) will add context if the tool needs it
+        
         JsonObject arguments = new JsonObject();
         String stepName = step.getString("name", "Unknown");
-        int stepNum = step.getInteger("step", 0);
+        String toolName = step.getString("tool", "");
         
-        // Log what we're building
-        vertx.eventBus().publish("log",
-            "Building args for " + stepName + " step,3,OrchestrationStrategy,Arguments,Tool");
-        
-        // ALWAYS add original query for the first step
-        if (stepNum == 1) {
-            arguments.put("query", context.originalQuery);
-            System.out.println("[Orchestration] Step 1: Auto-adding original query: " + context.originalQuery);
-        }
-        
-        // Add original query if needed (backward compatibility)
-        if (step.getBoolean("use_original_query", false)) {
-            arguments.put("query", context.originalQuery);
-            System.out.println("[Orchestration] Added original query to arguments");
-        }
-        
-        // Add data from previous steps
-        JsonArray useFromPrevious = step.getJsonArray("use_from_previous", new JsonArray());
-        for (int i = 0; i < useFromPrevious.size(); i++) {
-            String key = useFromPrevious.getString(i);
-            
-            if ("original_query".equals(key)) {
-                // Map original_query to query parameter
-                arguments.put("query", context.originalQuery);
-                System.out.println("[Orchestration] Mapped original_query -> query: " + context.originalQuery);
-            } else if (key.contains("->")) {
-                // Handle explicit field mapping like "optimized_sql->sql"
-                String[] parts = key.split("->", 2);
-                String sourceKey = parts[0].trim();
-                String targetKey = parts[1].trim();
-                
-                if (context.dataToPass.containsKey(sourceKey)) {
-                    Object value = context.dataToPass.get(sourceKey);
-                    
-                    // Validate the value is not an error
-                    if (value instanceof String && ((String)value).startsWith("Error:")) {
-                        System.out.println("[Orchestration] Skipping error value for mapping: " + sourceKey + " -> " + targetKey);
-                        continue;
-                    }
-                    
-                    // Only set if target doesn't already have a value (first non-null wins)
-                    if (!arguments.containsKey(targetKey) || arguments.getValue(targetKey) == null) {
-                        arguments.put(targetKey, value);
-                        System.out.println("[Orchestration] Mapped " + sourceKey + " -> " + targetKey + 
-                                         " (type: " + (value != null ? value.getClass().getSimpleName() : "null") + ")");
-                    } else {
-                        System.out.println("[Orchestration] Skipped mapping " + sourceKey + " -> " + targetKey + 
-                                         " (target already has value)");
-                    }
-                } else {
-                    System.out.println("[Orchestration] Source key not found for mapping: " + sourceKey + 
-                                     " (will try next fallback)");
-                }
-            } else if (key.contains(".")) {
-                // Handle nested references like "analysis.entities"
-                String[] parts = key.split("\\.", 2);
-                String topKey = parts[0];
-                String nestedKey = parts[1];
-                
-                Object topValue = context.dataToPass.get(topKey);
-                if (topValue instanceof JsonObject) {
-                    JsonObject topObj = (JsonObject) topValue;
-                    Object nestedValue = topObj.getValue(nestedKey);
-                    if (nestedValue != null) {
-                        // Special handling for schema_matches.tables -> table_names
-                        if ("schema_matches".equals(topKey) && "tables".equals(nestedKey)) {
-                            // Extract table names from array of table objects
-                            if (nestedValue instanceof JsonArray) {
-                                JsonArray tables = (JsonArray) nestedValue;
-                                JsonArray tableNames = new JsonArray();
-                                for (int j = 0; j < tables.size(); j++) {
-                                    JsonObject table = tables.getJsonObject(j);
-                                    if (table != null && table.containsKey("table")) {
-                                        tableNames.add(table.getString("table"));
-                                    }
-                                }
-                                arguments.put("table_names", tableNames);
-                                System.out.println("[Orchestration] Extracted table_names from schema_matches.tables: " + tableNames.encode());
-                            }
-                        } else {
-                            // Map nested key to simpler key for the tool
-                            String targetKey = nestedKey.equals("entities") ? "tokens" : nestedKey;
-                            
-                            // Convert to proper JSON type if needed
-                            if (nestedValue instanceof List) {
-                                // Convert List/LinkedHashMap to JsonArray
-                                arguments.put(targetKey, new JsonArray((List<?>) nestedValue));
-                                System.out.println("[Orchestration] Added nested " + key + " as " + targetKey + " (converted List to JsonArray)");
-                            } else if (nestedValue instanceof Map) {
-                                // Convert Map to JsonObject with safe casting
-                                if (nestedValue instanceof Map<?, ?>) {
-                                    @SuppressWarnings("unchecked")
-                                    Map<String, Object> mapValue = (Map<String, Object>) nestedValue;
-                                    arguments.put(targetKey, new JsonObject(mapValue));
-                                    System.out.println("[Orchestration] Added nested " + key + " as " + targetKey + " (converted Map to JsonObject)");
-                                } else {
-                                    System.out.println("[Orchestration] WARNING: Unexpected Map type for " + key);
-                                }
-                            } else {
-                                // Already a proper type or primitive
-                                arguments.put(targetKey, nestedValue);
-                                System.out.println("[Orchestration] Added nested " + key + " as " + targetKey + " (type: " + 
-                                                 (nestedValue != null ? nestedValue.getClass().getSimpleName() : "null") + ")");
-                            }
-                        }
-                    } else {
-                        System.out.println("[Orchestration] WARNING: Could not find nested value: " + key);
-                    }
-                } else {
-                    System.out.println("[Orchestration] WARNING: Top-level key not a JsonObject: " + topKey);
-                }
-            } else if (context.dataToPass.containsKey(key)) {
-                Object value = context.dataToPass.get(key);
-                
-                // Validate and potentially convert the value type
-                if (value instanceof String && ((String)value).startsWith("Error:")) {
-                    // Skip error strings or convert to empty object for tools expecting objects
-                    System.out.println("[Orchestration] WARNING: Skipping error value for " + key + ": " + value);
-                    // Don't add error strings to arguments - let the tool handle missing data
-                } else {
-                    // Safe to add the value
-                    arguments.put(key, value);
-                    System.out.println("[Orchestration] Added from dataToPass: " + key + 
-                                     " (type: " + (value != null ? value.getClass().getSimpleName() : "null") + ")");
-                }
-            } else {
-                // Try to extract from step results
-                boolean found = false;
-                for (Map.Entry<String, JsonObject> entry : context.stepResults.entrySet()) {
-                    JsonObject stepResult = entry.getValue();
-                    if (stepResult != null && stepResult.containsKey(key)) {
-                        Object value = stepResult.getValue(key);
-                        arguments.put(key, value);
-                        System.out.println("[Orchestration] Added from step " + entry.getKey() + ": " + key);
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    System.out.println("[Orchestration] WARNING: Could not find data for: " + key);
-                    vertx.eventBus().publish("log",
-                        "Missing data for " + key + " in step " + stepName + ",1,OrchestrationStrategy,Warning,Tool");
-                }
-            }
-        }
-        
-        // Add any static arguments from step config
+        // Add any explicit arguments from step configuration
         JsonObject staticArgs = step.getJsonObject("arguments", new JsonObject());
         arguments.mergeIn(staticArgs);
         
-        // Log the final arguments
-        String argsLog = arguments.encodePrettily().replace("\n", " ").substring(0, Math.min(200, arguments.encodePrettily().length()));
-        vertx.eventBus().publish("log",
-            "Args for " + stepName + ": " + argsLog + ",3,OrchestrationStrategy,Arguments,Tool");
+        // Special handling for tools that need table names
+        if (toolName.equals("discover_sample_data") && !arguments.containsKey("table_names")) {
+            // Try multiple ways to get table names from context
+            JsonArray tableNames = new JsonArray();
+            
+            // 1. Try schema knowledge from smart_schema_match result
+            JsonObject schemaKnowledge = context.getSchemaKnowledge();
+            if (schemaKnowledge != null) {
+                // Check if it has the standard schema match format
+                if (schemaKnowledge.containsKey("tableMatches")) {
+                    JsonArray tableMatches = schemaKnowledge.getJsonArray("tableMatches", new JsonArray());
+                    for (int i = 0; i < Math.min(3, tableMatches.size()); i++) {
+                        JsonObject match = tableMatches.getJsonObject(i);
+                        if (match != null) {
+                            String tableName = match.getString("tableName");
+                            if (tableName != null) {
+                                tableNames.add(tableName);
+                            }
+                        }
+                    }
+                }
+                // Also check if we stored available_tables from exploration
+                else if (schemaKnowledge.containsKey("available_tables")) {
+                    tableNames = schemaKnowledge.getJsonArray("available_tables");
+                }
+            }
+            
+            // If we found tables, use them
+            if (tableNames.size() > 0) {
+                arguments.put("table_names", tableNames);
+            }
+            
+            // If still no tables, try common tables
+            if (!arguments.containsKey("table_names")) {
+                arguments.put("table_names", new JsonArray()
+                    .add("ORDERS")
+                    .add("CUSTOMERS")
+                    .add("ORDER_STATUS_ENUM"));
+            }
+        }
         
-        System.out.println("[Orchestration] Final arguments for " + stepName + ": " + arguments.encode());
+        // Log what we're sending
+        System.out.println("[Intent Engine] Arguments for " + stepName + " (" + toolName + "): " + arguments.encode());
         
         return arguments;
     }
@@ -636,7 +588,7 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
     /**
      * Check if optional step should be skipped
      */
-    protected boolean shouldSkipStep(ExecutionContext context, JsonObject step) {
+    protected boolean shouldSkipStep(OrchestrationContext context, JsonObject step) {
         // Override in subclasses for custom logic
         return false;
     }
@@ -671,8 +623,37 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
                         return parsed;
                     } catch (Exception e) {
                         // Not JSON, check if it looks like a SQL query
-                        if (text.trim().toUpperCase().startsWith("SELECT") || 
-                            text.trim().toUpperCase().startsWith("WITH")) {
+                        // Improved SQL detection - handle comments and various SQL statements
+                        String trimmedUpper = text.trim().toUpperCase();
+                        // Remove leading comments (limit iterations to prevent infinite loops)
+                        int maxCommentIterations = 10;
+                        int iterations = 0;
+                        while ((trimmedUpper.startsWith("--") || trimmedUpper.startsWith("/*")) && 
+                               iterations < maxCommentIterations) {
+                            iterations++;
+                            if (trimmedUpper.startsWith("--")) {
+                                int newlineIdx = trimmedUpper.indexOf('\n');
+                                if (newlineIdx > 0) {
+                                    trimmedUpper = trimmedUpper.substring(newlineIdx + 1).trim();
+                                } else {
+                                    break; // Single line comment only
+                                }
+                            } else if (trimmedUpper.startsWith("/*")) {
+                                int endIdx = trimmedUpper.indexOf("*/");
+                                if (endIdx > 0) {
+                                    trimmedUpper = trimmedUpper.substring(endIdx + 2).trim();
+                                } else {
+                                    break; // Unclosed comment
+                                }
+                            }
+                        }
+                        
+                        if (trimmedUpper.startsWith("SELECT") || 
+                            trimmedUpper.startsWith("WITH") ||
+                            trimmedUpper.startsWith("INSERT") ||
+                            trimmedUpper.startsWith("UPDATE") ||
+                            trimmedUpper.startsWith("DELETE") ||
+                            trimmedUpper.startsWith("MERGE")) {
                             // It's SQL, wrap it
                             JsonObject sqlWrapper = new JsonObject();
                             sqlWrapper.put("sql", text.trim());
@@ -696,50 +677,311 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
     /**
      * Build final result from context
      */
-    private JsonObject buildFinalResult(ExecutionContext context) {
-        if (context.finalResult != null) {
-            // Add metadata to the final result
-            JsonObject result = context.finalResult.copy();
-            result.put("strategy", strategyName)
-                  .put("execution_time", System.currentTimeMillis() - context.startTime)
-                  .put("steps_completed", context.currentStep);
-            
-            System.out.println("[Orchestration] Returning final result with formatted field: " + 
-                result.containsKey("formatted"));
-            return result;
-        }
+    private JsonObject buildFinalResult(OrchestrationContext context) {
+        // Get tool results from context
+        JsonObject toolResults = context.getToolResults();
         
-        // Aggregate results from all steps
+        // Build result with metadata
         JsonObject result = new JsonObject()
             .put("strategy", strategyName)
             .put("success", true)
-            .put("execution_time", System.currentTimeMillis() - context.startTime)
-            .put("steps_completed", context.currentStep);
+            .put("execution_time", System.currentTimeMillis() - context.getStartTime())
+            .put("steps_completed", context.getCurrentStep());
         
-        // Add the last meaningful result
-        if (!context.stepResults.isEmpty()) {
-            // Find the last step with actual results
-            for (int i = context.stepResults.size() - 1; i >= 0; i--) {
-                JsonObject stepResult = context.stepResults.get("step_" + (i + 1));
-                if (stepResult != null && !stepResult.isEmpty()) {
-                    result.mergeIn(stepResult);
-                    break;
+        // Find the last meaningful result (typically from format_results)
+        JsonArray history = context.getExecutionHistory();
+        if (history.size() > 0) {
+            // Look for format_results or the last successful tool
+            for (int i = history.size() - 1; i >= 0; i--) {
+                JsonObject execution = history.getJsonObject(i);
+                JsonObject toolResult = execution.getJsonObject("result");
+                
+                // Check if this is a meaningful result
+                if (toolResult != null && !toolResult.containsKey("error") && !toolResult.getBoolean("isError", false)) {
+                    // If it's format_results, use its output
+                    String toolName = execution.getString("toolName");
+                    if ("format_results".equals(toolName) && toolResult.containsKey("formatted")) {
+                        result.put("formatted", toolResult.getString("formatted"));
+                        result.put("confidence", toolResult.getDouble("confidence", 0.8));
+                    }
+                    // For other tools, check if they have results
+                    else if (toolResult.containsKey("results") || toolResult.containsKey("sql") || 
+                             toolResult.containsKey("data") || toolResult.containsKey("tables")) {
+                        result.mergeIn(toolResult);
+                    }
+                    
+                    // Stop at the first meaningful result when going backwards
+                    if (result.containsKey("formatted") || result.containsKey("results")) {
+                        break;
+                    }
                 }
             }
         }
+        
+        System.out.println("[Intent Engine] Final result has formatted field: " + result.containsKey("formatted"));
         
         return result;
     }
     
     /**
+     * Analyze error semantically using LLM
+     */
+    private Future<JsonObject> analyzeErrorSemantically(OrchestrationContext context, 
+                                                      String errorMsg, 
+                                                      JsonObject errorFeedback,
+                                                      JsonObject toolResult) {
+        // Build comprehensive prompt for semantic analysis
+        JsonObject analysisRequest = new JsonObject()
+            .put("original_query", context.getOriginalQuery())
+            .put("error_message", errorMsg)
+            .put("error_feedback", errorFeedback)
+            .put("failed_sql", toolResult.getString("sql_executed", ""))
+            .put("deep_analysis", context.getDeepAnalysis())
+            .put("schema_knowledge", context.getSchemaKnowledge())
+            .put("error_history", context.getErrors())
+            .put("accumulated_knowledge", context.getSemanticUnderstandings());
+        
+        String prompt = buildSemanticAnalysisPrompt(analysisRequest);
+        
+        // Use LLM to analyze the error semantically
+        return LlmAPIService.getInstance().chatCompletion(
+            new JsonArray().add(new JsonObject()
+                .put("role", "system")
+                .put("content", "You are helping debug database queries by understanding user intent, not just fixing syntax.")
+            ).add(new JsonObject()
+                .put("role", "user")
+                .put("content", prompt))
+        ).map(response -> {
+            try {
+                JsonArray choices = response.getJsonArray("choices");
+                if (choices != null && !choices.isEmpty()) {
+                    String content = choices.getJsonObject(0)
+                        .getJsonObject("message")
+                        .getString("content");
+                    
+                    // Parse the semantic analysis (strip markdown if present)
+                    String jsonContent = content;
+                    if (content.contains("```json")) {
+                        int start = content.indexOf("```json") + 7;
+                        int end = content.lastIndexOf("```");
+                        if (end > start) {
+                            jsonContent = content.substring(start, end).trim();
+                        }
+                    } else if (content.contains("```")) {
+                        // Handle case where LLM uses just ``` without json
+                        int start = content.indexOf("```") + 3;
+                        int end = content.lastIndexOf("```");
+                        if (end > start) {
+                            jsonContent = content.substring(start, end).trim();
+                        }
+                    }
+                    return new JsonObject(jsonContent);
+                }
+            } catch (Exception e) {
+                System.err.println("[Orchestration] Failed to parse semantic analysis: " + e.getMessage());
+            }
+            
+            // Default fallback
+            return new JsonObject()
+                .put("recommended_action", "CONTINUE")
+                .put("reason", "Unable to perform semantic analysis");
+        });
+    }
+    
+    /**
+     * Build prompt for semantic error analysis
+     */
+    private String buildSemanticAnalysisPrompt(JsonObject request) {
+        return String.format(
+            "You are helping debug a database query. Think deeply about user intent, not just syntax.\n\n" +
+            "User's Original Request: \"%s\"\n" +
+            "What We Tried: %s\n" +
+            "Error Received: %s\n" +
+            "Error Details: %s\n\n" +
+            "Current Understanding:\n" +
+            "- User Intent: %s\n" +
+            "- Schema Knowledge: %s\n" +
+            "- Past Attempts: %s\n\n" +
+            "DO NOT suggest simple fixes like dropping columns or string replacements.\n\n" +
+            "Instead, think:\n" +
+            "1. What is the user REALLY asking for?\n" +
+            "2. What concept does \"high priority\" represent in their mind?\n" +
+            "3. How might this business concept be modeled in the database?\n" +
+            "4. What additional discovery would help us understand?\n\n" +
+            "Provide a response that seeks to understand, not just fix:\n" +
+            "{\n" +
+            "  \"semantic_analysis\": {\n" +
+            "    \"user_intent\": \"What they really want\",\n" +
+            "    \"missing_concept\": \"What business concept we need to map\",\n" +
+            "    \"possible_interpretations\": [\"list of ways this could be modeled\"]\n" +
+            "  },\n" +
+            "  \"recommended_action\": \"EXPLORE_SCHEMA|RETRY_WITH_UNDERSTANDING|BACKTRACK\",\n" +
+            "  \"exploration_strategy\": {\n" +
+            "    \"what_to_look_for\": \"Specific patterns or relationships\",\n" +
+            "    \"tools_to_use\": [\"list_tables\", \"describe_table\", \"discover_enums\", \"discover_column_semantics\"],\n" +
+            "    \"questions_to_answer\": [\"what would resolve the ambiguity\"]\n" +
+            "  },\n" +
+            "  \"target_step\": 0\n" +
+            "}",
+            request.getString("original_query"),
+            request.getString("failed_sql", "N/A"),
+            request.getString("error_message"),
+            request.getJsonObject("error_feedback", new JsonObject()).encodePrettily(),
+            request.getJsonObject("deep_analysis", new JsonObject()).encodePrettily(),
+            request.getJsonObject("schema_knowledge", new JsonObject()).encodePrettily(),
+            request.getJsonArray("error_history", new JsonArray()).encodePrettily()
+        );
+    }
+    
+    /**
+     * Retry with deeper understanding from semantic analysis
+     */
+    private Future<JsonObject> retryWithDeeperUnderstanding(OrchestrationContext context,
+                                                          JsonArray steps,
+                                                          int stepIndex,
+                                                          JsonObject analysis) {
+        // Update context with new understanding
+        JsonObject semanticAnalysis = analysis.getJsonObject("semantic_analysis");
+        if (semanticAnalysis != null) {
+            String missingConcept = semanticAnalysis.getString("missing_concept");
+            context.recordSemanticLearning(missingConcept, semanticAnalysis);
+            
+            // Publish progress update
+            StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, context.getStreamId());
+            publisher.publishProgress("understanding_gained",
+                "I understand better now. " + semanticAnalysis.getString("user_intent") + 
+                ". Let me try again with this understanding.",
+                new JsonObject()
+                    .put("phase", "retry_with_understanding")
+                    .put("concept", missingConcept)
+                    .put("new_understanding", semanticAnalysis));
+        }
+        
+        // Increment retry count
+        context.incrementStepRetry(stepIndex);
+        
+        // Retry the same step with new understanding
+        return executeStrategy(context, steps, stepIndex);
+    }
+    
+    /**
+     * Explore schema intelligently based on error analysis
+     */
+    private Future<JsonObject> exploreSchemaIntelligently(OrchestrationContext context, 
+                                                        JsonObject analysis) {
+        JsonObject explorationStrategy = analysis.getJsonObject("exploration_strategy");
+        String missingConcept = analysis.getJsonObject("semantic_analysis")
+            .getString("missing_concept");
+        
+        StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, context.getStreamId());
+        publisher.publishProgress("schema_exploration",
+            "I need to understand how '" + missingConcept + 
+            "' is represented in this database. Let me explore the schema more deeply.",
+            new JsonObject()
+                .put("phase", "intelligent_exploration")
+                .put("exploring_concept", missingConcept));
+        
+        // Use multiple tools to understand the concept
+        JsonArray toolsToUse = explorationStrategy.getJsonArray("tools_to_use", 
+            new JsonArray().add("list_tables").add("discover_enums").add("discover_column_semantics"));
+        
+        List<Future> futures = new ArrayList<>();
+        
+        // First, get table list if we need it
+        Future<JsonObject> tableListFuture = callTool("list_tables", new JsonObject(), context);
+        
+        return tableListFuture.compose(tableResult -> {
+            // Extract table names for tools that need them
+            JsonArray tables = new JsonArray();
+            if (tableResult.containsKey("tables")) {
+                JsonArray allTables = tableResult.getJsonArray("tables");
+                // Focus on relevant tables based on concept or common patterns
+                for (int i = 0; i < allTables.size(); i++) {
+                    JsonObject table = allTables.getJsonObject(i);
+                    String tableName = table.getString("name");
+                    if (tableName != null) {
+                        // Always include tables that might be relevant
+                        String upperName = tableName.toUpperCase();
+                        if (upperName.contains("ORDER") || 
+                            upperName.contains("CUSTOMER") || 
+                            upperName.contains("PRODUCT") ||
+                            upperName.contains("ENUM") ||
+                            upperName.contains("STATUS") ||
+                            upperName.contains("TYPE") ||
+                            // Also include if concept is mentioned in table name
+                            (missingConcept != null && upperName.contains(missingConcept.toUpperCase()))) {
+                            tables.add(tableName);
+                        }
+                    }
+                }
+            }
+            
+            // Store tables in context for other tools
+            context.updateSchemaKnowledge(new JsonObject().put("available_tables", tables));
+            
+            // Now call exploration tools with proper arguments
+            for (int i = 0; i < toolsToUse.size(); i++) {
+                String tool = toolsToUse.getString(i);
+                JsonObject args = new JsonObject();
+                
+                // Add appropriate arguments based on tool
+                if (tool.equals("discover_sample_data") && tables.size() > 0) {
+                    args.put("table_names", tables);
+                    args.put("limit", 5);
+                } else if (tool.equals("discover_column_semantics") && tables.size() > 0) {
+                    args.put("table_names", tables);
+                } else {
+                    args.put("concept", missingConcept);
+                }
+                
+                futures.add(callTool(tool, args, context));
+            }
+            
+            return CompositeFuture.all(futures);
+        }).map(compositeFuture -> {
+            JsonObject schemaKnowledge = new JsonObject();
+            
+            // Synthesize all findings
+            for (int i = 0; i < compositeFuture.size(); i++) {
+                JsonObject result = compositeFuture.resultAt(i);
+                schemaKnowledge.mergeIn(result);
+            }
+            
+            // Add synthesis
+            schemaKnowledge.put("synthesis", synthesizeFindings(schemaKnowledge, missingConcept));
+            
+            publisher.publishProgress("exploration_complete",
+                "I've discovered how the database models this concept. " +
+                schemaKnowledge.getJsonObject("synthesis").getString("summary"),
+                new JsonObject()
+                    .put("phase", "exploration_complete")
+                    .put("findings", schemaKnowledge));
+            
+            return schemaKnowledge;
+        });
+    }
+    
+    /**
+     * Synthesize exploration findings
+     */
+    private JsonObject synthesizeFindings(JsonObject findings, String concept) {
+        // For now, return a structured summary
+        // In a full implementation, this would use LLM to synthesize
+        return new JsonObject()
+            .put("concept", concept)
+            .put("summary", "Discovered mappings and relationships for " + concept)
+            .put("confidence", 0.8);
+    }
+    
+    /**
      * Start progress updates for streaming
      */
-    private Long startProgressUpdates(ExecutionContext context) {
+    private Long startProgressUpdates(OrchestrationContext context) {
         long intervalMs = orchestrationStrategies.getJsonObject("configuration", new JsonObject())
             .getLong("progress_update_interval_ms", 5000L);
         
         return vertx.setPeriodic(intervalMs, id -> {
-            if (context.streamId != null) {
+            if (context.getStreamId() != null) {
                 sendProgressUpdate(context);
             }
         });
@@ -748,13 +990,13 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
     /**
      * Send progress update via event bus
      */
-    private void sendProgressUpdate(ExecutionContext context) {
-        long elapsed = System.currentTimeMillis() - context.startTime;
+    private void sendProgressUpdate(OrchestrationContext context) {
+        long elapsed = System.currentTimeMillis() - context.getStartTime();
         int totalSteps = strategyConfig.getJsonArray("steps", new JsonArray()).size();
         
-        vertx.eventBus().publish("conversation." + context.streamId + ".progress",
+        vertx.eventBus().publish("conversation." + context.getStreamId() + ".progress",
             new JsonObject()
-                .put("step", context.currentStep + "/" + totalSteps)
+                .put("step", context.getCurrentStep() + "/" + totalSteps)
                 .put("message", "Processing " + strategyName + "...")
                 .put("elapsed", elapsed)
                 .put("strategy", strategyName));
@@ -763,47 +1005,27 @@ public abstract class OrchestrationStrategy extends AbstractVerticle {
     /**
      * Send step-specific progress
      */
-    private void sendStepProgress(ExecutionContext context, JsonObject step) {
-        if (context.streamId != null) {
+    private void sendStepProgress(OrchestrationContext context, JsonObject step) {
+        if (context.getStreamId() != null) {
             int totalSteps = strategyConfig.getJsonArray("steps", new JsonArray()).size();
-            String stepName = step.getString("name", "Step " + context.currentStep);
+            String stepName = step.getString("name", "Step " + context.getCurrentStep());
             String description = step.getString("description", "Processing...");
             
             // Send detailed progress update
             JsonObject progressUpdate = new JsonObject()
-                .put("step", stepName + " (" + context.currentStep + "/" + totalSteps + ")")
+                .put("step", stepName + " (" + context.getCurrentStep() + "/" + totalSteps + ")")
                 .put("message", "[PROCESSING] " + description)
-                .put("current", context.currentStep)
+                .put("current", context.getCurrentStep())
                 .put("total", totalSteps)
-                .put("elapsed", System.currentTimeMillis() - context.startTime);
+                .put("elapsed", System.currentTimeMillis() - context.getStartTime());
             
-            vertx.eventBus().publish("conversation." + context.streamId + ".progress", progressUpdate);
+            vertx.eventBus().publish("conversation." + context.getStreamId() + ".progress", progressUpdate);
             
-            System.out.println("[Orchestration] Progress update sent: " + stepName + " to address: conversation." + context.streamId + ".progress");
-            System.out.println("[Orchestration]   Step: " + context.currentStep + "/" + totalSteps + ", Elapsed: " + (System.currentTimeMillis() - context.startTime) + "ms");
+            System.out.println("[Orchestration] Progress update sent: " + stepName + " to address: conversation." + context.getStreamId() + ".progress");
+            System.out.println("[Orchestration]   Step: " + context.getCurrentStep() + "/" + totalSteps + ", Elapsed: " + (System.currentTimeMillis() - context.getStartTime()) + "ms");
         }
     }
     
-    /**
-     * Execution context for strategy
-     */
-    protected static class ExecutionContext {
-        String originalQuery;
-        String sessionId;
-        String streamId;
-        long startTime;
-        int currentStep;
-        private Map<String, JsonObject> stepResults;
-        Map<String, Object> dataToPass;
-        JsonObject finalResult;
-        
-        ExecutionContext() {
-            stepResults = new HashMap<>();
-            dataToPass = new HashMap<>();
-        }
-        
-        public Map<String, JsonObject> getStepResults() {
-            return stepResults;
-        }
-    }
+    // OrchestrationContext replaced by OrchestrationContext for Intent Engine
+    // See OrchestrationContext.java for the enhanced context implementation
 }

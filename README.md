@@ -5,8 +5,11 @@
 [![Vert.x](https://img.shields.io/badge/Vert.x-4.5.7-purple.svg)](https://vertx.io/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 🎯 What's New (August 2025)
+## 🎯 What's New (January 2025)
 
+- **🧠 Intent Engine Implementation** - Intelligent orchestration with automatic context management
+- **🔒 Thread-Safe Architecture** - All collections use Vert.x JsonObject/JsonArray for safety
+- **🔄 Context-Aware Tools** - Oracle intelligence tools automatically receive orchestration context
 - **🔧 Fixed Oracle Client Deployment** - Corrected configuration check for proper Oracle tool registration
 - **🚀 Stdio Transport Support** - Run local MCP servers as separate processes
 - **🏷️ Tool Name Prefixing** - Clear `serverName__toolName` pattern for all tools
@@ -34,7 +37,7 @@ cd ~/Agents-MCP-Host/
 - **Gradle 8.8** - Included via wrapper (`./gradlew`)
 - **OpenAI API Key** (optional) - For LLM responses when tools aren't needed
 - **Oracle Cloud Database** (optional) - For Oracle SQL agent features
-  - Password is hardcoded in test scripts: `ADmin12345--`
+  - Password is hardcoded in test scripts: `ARmy0320-- milk`
   - Configure TLS authentication (not mTLS) in Oracle Cloud Console
 
 ### Build & Run (30 seconds)
@@ -303,6 +306,52 @@ The conversation endpoint supports Server-Sent Events for real-time streaming:
 - FileSystem tools include roots/resources security workflows
 - Local servers discovered dynamically on startup
 
+## 🧠 Intent Engine - Advanced Orchestration
+
+### Overview
+The Intent Engine is an intelligent orchestration system that manages complex tool pipelines with automatic context management. Instead of tools communicating directly, they communicate THROUGH the orchestrator.
+
+### Key Features
+- **Automatic Context Injection**: Tools that need context receive it without manual configuration
+- **Accumulated Knowledge**: Each tool's output enriches the context for subsequent tools
+- **Thread-Safe Design**: All data structures use Vert.x JsonObject/JsonArray
+- **Smart Tool Selection**: Analyzes query complexity to choose appropriate orchestration strategy
+
+### How It Works
+
+```
+User Query → Intent Analysis → Strategy Selection → Tool Pipeline Execution
+                                           ↓
+                                  OrchestrationContext Created
+                                           ↓
+                            For Each Tool: Check if Context Needed
+                                           ↓
+                                    Add Context if Required
+                                           ↓
+                                      Execute Tool
+                                           ↓
+                                    Update Context
+```
+
+### Available Orchestration Strategies
+
+| Strategy | Description | When Used |
+|----------|-------------|-----------||
+| `oracle_full_pipeline` | Complete Oracle query pipeline with all intelligence tools | Complex business questions |
+| `oracle_simple_query` | Direct SQL execution for simple queries | Basic SELECT statements |
+| `oracle_discovery` | Schema exploration and data discovery | "What data do you have?" |
+| `oracle_adaptive_pipeline` | Adapts based on query complexity | General Oracle queries |
+| `multi_tool_sequential` | Dynamic tool chaining | Custom tool sequences |
+
+### Context-Aware Oracle Tools
+These tools automatically receive orchestration context:
+- **Analysis**: `deep_analyze_query`, `analyze_query`
+- **Schema**: `smart_schema_match`, `match_schema`
+- **Generation**: `generate_sql`, `optimize_sql_smart`
+- **Execution**: `execute_query`, `validate_schema_sql`
+- **Intelligence**: `discover_column_semantics`, `map_business_terms`, `infer_relationships`
+- **Formatting**: `format_results`
+
 ## 🔧 Configuration
 
 ### Environment Variables
@@ -391,7 +440,12 @@ curl http://localhost:8080/health
 | No LLM responses | Set OPENAI_API_KEY environment variable |
 | Compilation errors | Ensure Java 21: `java --version` |
 | Gradle issues | Use wrapper: `./gradlew` not `gradle` |
-| MCP tools not working | Check enhanced endpoint: `/host/v1/enhanced-conversations` |
+| Tool error: "Missing required argument" | Tool needs context - ensure it's in `toolNeedsContext()` list |
+| Context not reaching tools | Check MCP transport chain and logging |
+| Oracle connection fails | Verify TLS (not mTLS) in Oracle Cloud Console |
+| "Cannot cast to PoolDataSource" | Oracle pool corruption - restart server |
+| Thread safety errors | Use JsonObject/JsonArray, never Java collections |
+| File operations blocking | Use async methods (readFile not readFileBlocking) |
 
 ## 🚦 Development Workflow
 
@@ -448,6 +502,17 @@ If you're an AI agent working on this project, start with:
 1. Read [CLAUDE.md](CLAUDE.md) for full context
 2. Review [MCP-IMPLEMENTATION.md](MCP-IMPLEMENTATION.md) for architecture
 3. Check [DEVELOPMENT.md](DEVELOPMENT.md) for technical details
+
+### Critical Things to Know
+
+1. **Intent Engine**: The orchestrator IS the intelligence - tools communicate through it
+2. **Thread Safety**: ONLY use Vert.x JsonObject/JsonArray, NEVER Java collections
+3. **Context Structure**: Tools expect specific fields (originalQuery, deepAnalysis, schemaKnowledge)
+4. **Tool Naming**: All tools use serverName__toolName pattern (no oracle__ prefix anymore)
+5. **Event Bus**: All communication is async through Vert.x event bus
+6. **No Blocking**: Never use blocking operations in event loop threads
+7. **Test Scripts**: Use consolidated test scripts, don't create new ones
+8. **Oracle Password**: ARmy0320-- milk (hardcoded in test-common.sh)
 4. Run `./gradlew compileJava` to verify setup
 5. Test with `./test-mcp-endpoints.sh`
 
