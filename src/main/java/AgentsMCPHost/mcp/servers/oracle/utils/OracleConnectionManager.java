@@ -108,7 +108,7 @@ public class OracleConnectionManager {
                 if (password == null || password.isEmpty()) {
                     // Only use hardcoded password in test/development mode
                     System.out.println("[WARNING] Using default test password - not for production!");
-                    password = "ARmy0320-- milk";
+                    password = "Violet2.Barnstorm_A9";
                 }
                 
                 // Build JDBC URL with TLS

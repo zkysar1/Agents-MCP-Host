@@ -29,7 +29,7 @@ public class OracleConnectionTest {
         String password = System.getenv("ORACLE_TESTING_DATABASE_PASSWORD");
         if (password == null || password.isEmpty()) {
             System.out.println("[WARNING] Using default test password - not for production!");
-            password = "ARmy0320-- milk";
+            password = "Violet2.Barnstorm_A9";
         }
         
         // Test 1: Network connectivity
@@ -150,6 +150,7 @@ public class OracleConnectionTest {
                 "(security=(ssl_server_dn_match=yes)))",
                 DB_PORT, DB_HOST, DB_SERVICE
             );
+
             
             poolDataSource.setURL(jdbcUrl);
             poolDataSource.setUser(DB_USER);
