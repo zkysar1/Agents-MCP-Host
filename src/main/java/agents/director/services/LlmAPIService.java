@@ -11,6 +11,9 @@ import io.vertx.ext.web.client.HttpResponse;
 import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
 
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+
 import static agents.director.Driver.logLevel;
 
 /**
@@ -52,8 +55,8 @@ public class LlmAPIService {
     this.apiKey = System.getenv("OPENAI_API_KEY");
     
     if (apiKey == null || apiKey.trim().isEmpty()) {
-      System.err.println("WARNING: OPENAI_API_KEY environment variable not set");
-      System.err.println("The conversation API will not function without a valid OpenAI API key");
+      vertx.eventBus().publish("log", "WARNING: OPENAI_API_KEY environment variable not set" + ",0,LlmAPIService,Service,System");
+      vertx.eventBus().publish("log", "The conversation API will not function without a valid OpenAI API key" + ",0,LlmAPIService,Service,System");
       vertx.eventBus().publish("log", 
         "OPENAI_API_KEY not configured - LLM service disabled,0,LlmAPIService,Configuration,Error");
       return false;
@@ -68,7 +71,7 @@ public class LlmAPIService {
     
     this.webClient = WebClient.create(vertx, options);
     
-    System.out.println("LlmAPIService initialized with OpenAI API");
+    vertx.eventBus().publish("log", "LlmAPIService initialized with OpenAI API" + ",2,LlmAPIService,Service,System");
     vertx.eventBus().publish("log", 
       "LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System");
     
@@ -99,7 +102,7 @@ public class LlmAPIService {
    * @return Future containing the OpenAI response
    */
   public Future<JsonObject> chatCompletion(JsonArray messages, String streamId) {
-    Promise<JsonObject> promise = Promise.promise();
+    Promise<JsonObject> promise = Promise.<JsonObject>promise();
     
     if (!isInitialized()) {
       promise.fail("LlmAPIService not properly initialized - check OPENAI_API_KEY");
@@ -114,7 +117,7 @@ public class LlmAPIService {
       .put("max_tokens", 2000);
     
     if (logLevel >= 3) {
-      System.out.println("[DEBUG] Sending request to OpenAI: " + requestBody.encodePrettily());
+      vertx.eventBus().publish("log", "[DEBUG] Sending request to OpenAI: " + requestBody.encodePrettily() + ",2,LlmAPIService,Service,System");
     }
     
     // Publish LLM request event if streaming
@@ -136,7 +139,7 @@ public class LlmAPIService {
         HttpResponse<Buffer> response = ar.result();
         
         if (logLevel >= 3) {
-          System.out.println("[DEBUG] OpenAI response status: " + response.statusCode());
+          vertx.eventBus().publish("log", "[DEBUG] OpenAI response status: " + response.statusCode() + ",2,LlmAPIService,Service,System");
         }
         
         if (response.statusCode() == 200) {
@@ -144,7 +147,7 @@ public class LlmAPIService {
             JsonObject responseBody = response.bodyAsJsonObject();
             
             if (logLevel >= 4) {
-              System.out.println("[DEBUG] OpenAI response body: " + responseBody.encodePrettily());
+              vertx.eventBus().publish("log", "[DEBUG] OpenAI response body: " + responseBody.encodePrettily() + ",2,LlmAPIService,Service,System");
             }
             
             vertx.eventBus().publish("log", 
@@ -222,6 +225,78 @@ public class LlmAPIService {
     });
     
     return promise.future();
+  }
+  
+  /**
+   * Make a chat completion request to OpenAI with custom parameters
+   * @param messages The messages as a List of encoded JSON strings
+   * @param temperature The temperature parameter (0.0 - 1.0)
+   * @param maxTokens Maximum tokens in response
+   * @return CompletableFuture containing the OpenAI response
+   */
+  public CompletableFuture<JsonObject> chatCompletion(List<String> messages, double temperature, int maxTokens) {
+    // Convert List<String> to JsonArray
+    JsonArray messageArray = new JsonArray();
+    for (String msgStr : messages) {
+      try {
+        messageArray.add(new JsonObject(msgStr));
+      } catch (Exception e) {
+        // If parsing fails, assume it's a simple content string
+        messageArray.add(new JsonObject().put("role", "user").put("content", msgStr));
+      }
+    }
+    
+    // Build the request body
+    JsonObject requestBody = new JsonObject()
+      .put("model", MODEL)
+      .put("messages", messageArray)
+      .put("temperature", temperature)
+      .put("max_tokens", maxTokens);
+    
+    // Use CompletableFuture to adapt Vert.x Future
+    CompletableFuture<JsonObject> future = new CompletableFuture<>();
+    
+    if (!isInitialized()) {
+      future.completeExceptionally(new IllegalStateException("LlmAPIService not properly initialized - check OPENAI_API_KEY"));
+      return future;
+    }
+    
+    // Create the HTTP request
+    HttpRequest<Buffer> request = webClient
+      .post(443, OPENAI_API_URL, CHAT_COMPLETIONS_PATH)
+      .timeout(REQUEST_TIMEOUT_MS)
+      .putHeader("Authorization", "Bearer " + apiKey)
+      .putHeader("Content-Type", "application/json");
+    
+    // Send the request
+    request.sendJsonObject(requestBody, ar -> {
+      if (ar.succeeded()) {
+        HttpResponse<Buffer> response = ar.result();
+        
+        if (response.statusCode() == 200) {
+          try {
+            JsonObject responseBody = response.bodyAsJsonObject();
+            future.complete(responseBody);
+          } catch (Exception e) {
+            future.completeExceptionally(new RuntimeException("Failed to parse OpenAI response: " + e.getMessage()));
+          }
+        } else {
+          String errorBody = "";
+          try {
+            JsonObject error = response.bodyAsJsonObject();
+            errorBody = error.getJsonObject("error", new JsonObject())
+              .getString("message", "Unknown error");
+          } catch (Exception e) {
+            errorBody = response.bodyAsString();
+          }
+          future.completeExceptionally(new RuntimeException("OpenAI API error (" + response.statusCode() + "): " + errorBody));
+        }
+      } else {
+        future.completeExceptionally(ar.cause());
+      }
+    });
+    
+    return future;
   }
 
 }

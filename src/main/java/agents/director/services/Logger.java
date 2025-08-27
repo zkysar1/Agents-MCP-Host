@@ -89,7 +89,7 @@ public class Logger extends AbstractVerticle {
       buffer.add(msg.body() + "," + sequenceCounter + "," + now + "\n");
 
       if (logLevel >= 2) {
-        System.out.println("[LOG] " + msg.body());
+        vertx.eventBus().publish("log", "[LOG] " + msg.body() + ",2,Logger,System,System");
       }
     });
 

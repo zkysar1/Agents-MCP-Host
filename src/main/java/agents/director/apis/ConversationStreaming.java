@@ -1,0 +1,987 @@
+package agents.director.apis;
+
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.Promise;
+import io.vertx.core.eventbus.EventBus;
+import io.vertx.core.eventbus.Message;
+import io.vertx.core.eventbus.MessageConsumer;
+import io.vertx.core.json.JsonObject;
+import io.vertx.core.json.JsonArray;
+import io.vertx.ext.web.Router;
+import io.vertx.ext.web.RoutingContext;
+import io.vertx.ext.web.handler.BodyHandler;
+import io.vertx.core.http.HttpServerResponse;
+import io.vertx.core.eventbus.DeliveryOptions;
+
+import agents.director.services.MCPRouterService;
+import agents.director.services.InterruptManager;
+import agents.director.services.LogUtil;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.stream.Collectors;
+
+/**
+ * Streaming Conversation API with host-based routing.
+ * This is the main entry point for all chat requests in the MCP architecture.
+ * It routes requests to the appropriate host (OracleDBAnswerer, OracleSQLBuilder, or ToolFreeDirectLLM).
+ */
+public class ConversationStreaming extends AbstractVerticle {
+    
+    
+    
+    private EventBus eventBus;
+    private Router router;
+    private InterruptManager interruptManager;
+    
+    // Track active streaming sessions
+    private final Map<String, StreamingSession> activeSessions = new ConcurrentHashMap<>();
+    
+    // Host availability tracking
+    private final Map<String, Boolean> hostAvailability = new ConcurrentHashMap<>();
+    
+    // Performance metrics
+    private final Map<String, Long> requestMetrics = new ConcurrentHashMap<>();
+    
+    // Configuration
+    private static final long DEFAULT_TIMEOUT = 120000; // 2 minutes
+    private static final String DEFAULT_HOST = "oracledbanswerer";
+    private static final long HEARTBEAT_INTERVAL = 8000; // 8 seconds
+    private static final int MAX_ACTIVE_SESSIONS = 100; // Limit active sessions
+    private static final int MAX_CRITICAL_ERRORS = 50; // Limit stored errors
+    
+    // Critical error tracking
+    private final Map<String, JsonObject> criticalErrors = new ConcurrentHashMap<>();
+    
+    // System readiness flag
+    private volatile boolean systemReady = false;
+    
+    // Inner class for enhanced streaming session management
+    private class EnhancedStreamingSession extends StreamingSession {
+        List<MessageConsumer<?>> consumers = new CopyOnWriteArrayList<>();
+        Long heartbeatTimerId;
+        Long timeoutTimerId;
+        volatile boolean responseEnded = false;
+        String host; // track which host is handling
+        HttpServerResponse response;
+        
+        EnhancedStreamingSession(String sessionId, String conversationId, RoutingContext context, String host) {
+            super(sessionId, conversationId, context);
+            this.host = host;
+            this.response = context.response();
+        }
+        
+        // Thread-safe SSE write
+        synchronized void sendSSEEvent(String eventType, JsonObject data) {
+            if (!responseEnded && response != null && !response.closed()) {
+                try {
+                    String event = "event: " + eventType + "\n" +
+                                  "data: " + data.encode() + "\n\n";
+                    response.write(event);
+                    // Force flush to ensure event is sent immediately
+                    response.drainHandler(null);
+                } catch (Exception e) {
+                    // Response closed during write
+                    responseEnded = true;
+                    LogUtil.logDebug(vertx, "SSE write failed - connection likely closed", "ConversationStreaming", "SSE", "Write");
+                }
+            }
+        }
+        
+        void cleanup() {
+            // Unregister all event consumers
+            consumers.forEach(consumer -> {
+                try {
+                    consumer.unregister();
+                } catch (Exception e) {
+                    // Ignore errors during cleanup
+                }
+            });
+            consumers.clear();
+            
+            // Cancel timers with error handling
+            if (heartbeatTimerId != null) {
+                try {
+                    vertx.cancelTimer(heartbeatTimerId);
+                } catch (Exception e) {
+                    // Ignore timer cancellation errors
+                }
+                heartbeatTimerId = null;
+            }
+            if (timeoutTimerId != null) {
+                try {
+                    vertx.cancelTimer(timeoutTimerId);
+                } catch (Exception e) {
+                    // Ignore timer cancellation errors
+                }
+                timeoutTimerId = null;
+            }
+            
+            // Mark as cleaned up
+            completed = true;
+            responseEnded = true;
+        }
+    }
+    
+    // Keep original StreamingSession for backward compatibility
+    private static class StreamingSession {
+        String sessionId;
+        String conversationId;
+        RoutingContext context;
+        long startTime;
+        boolean completed;
+        
+        StreamingSession(String sessionId, String conversationId, RoutingContext context) {
+            this.sessionId = sessionId;
+            this.conversationId = conversationId;
+            this.context = context;
+            this.startTime = System.currentTimeMillis();
+            this.completed = false;
+        }
+    }
+    
+    @Override
+    public void start(Promise<Void> startPromise) {
+        eventBus = vertx.eventBus();
+        interruptManager = new InterruptManager(vertx);
+        
+        // Listen for system ready event
+        eventBus.consumer("system.fully.ready", msg -> {
+            systemReady = true;
+            LogUtil.logInfo(vertx, "System fully ready - accepting requests", "ConversationStreaming", "System", "Ready", true);
+        });
+        
+        // Listen for critical error events
+        eventBus.consumer("critical.error", msg -> {
+            JsonObject error = (JsonObject) msg.body();
+            String errorId = "error_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString();
+            criticalErrors.put(errorId, error);
+            
+            LogUtil.logError(vertx, "[CRITICAL ERROR] " + error.encode(), "ConversationStreaming", "Error", "Critical", true);
+            
+            // Auto-cleanup after 5 minutes
+            vertx.setTimer(300000, id -> criticalErrors.remove(errorId));
+            
+            // Limit critical errors to prevent memory issues
+            if (criticalErrors.size() > MAX_CRITICAL_ERRORS) {
+                // Remove oldest errors
+                List<String> errorIds = new ArrayList<>(criticalErrors.keySet());
+                errorIds.sort(String::compareTo);
+                for (int i = 0; i < errorIds.size() - MAX_CRITICAL_ERRORS; i++) {
+                    criticalErrors.remove(errorIds.get(i));
+                }
+            }
+            
+            // Notify all active sessions
+            activeSessions.values().forEach(session -> {
+                if (session instanceof EnhancedStreamingSession) {
+                    EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
+                    enhancedSession.sendSSEEvent("critical_error", new JsonObject()
+                        .put("message", error.getString("userMessage", "System critical error occurred"))
+                        .put("severity", "CRITICAL"));
+                }
+            });
+        });
+        
+        // Create router
+        router = Router.router(vertx);
+        
+        // Add handlers
+        router.route().handler(BodyHandler.create());
+        
+        // Main conversation endpoint
+        router.post("/conversations").handler(this::handleConversation);
+        router.post("/conversations/streaming").handler(this::handleStreamingConversation);
+        
+        // Host status endpoint
+        router.get("/hosts/status").handler(this::handleHostStatus);
+        
+        // Session management
+        router.delete("/conversations/:sessionId").handler(this::handleSessionCancel);
+        
+        // Interrupt control endpoints
+        router.post("/conversations/:sessionId/interrupt").handler(this::handleInterrupt);
+        router.post("/conversations/:sessionId/feedback").handler(this::handleFeedback);
+        router.get("/conversations/:sessionId/status").handler(this::handleSessionStatus);
+        
+        // Health and status endpoints
+        router.get("/health").handler(this::handleHealth);
+        router.get("/mcp/status").handler(this::handleMcpStatus);
+        router.get("/mcp/tools").handler(this::handleMcpTools);
+        router.get("/mcp/clients").handler(this::handleMcpClients);
+        
+        // Register router with MCPRouterService
+        registerRouterWithMCPService();
+        
+        // Check host availability
+        checkHostAvailability();
+        
+        // Periodic cleanup
+        startSessionCleanup();
+        
+        LogUtil.logInfo(vertx, "ConversationStreaming API initialized", "ConversationStreaming", "API", "System", true);
+        startPromise.complete();
+    }
+    
+    /**
+     * Main conversation handler with host routing
+     */
+    private void handleConversation(RoutingContext context) {
+        // Check if system is ready
+        if (!systemReady) {
+            sendError(context, 503, "System is starting up. Please try again in a few seconds.");
+            LogUtil.logDebug(vertx, "Request rejected - system not ready", "ConversationStreaming", "Request", "Validation");
+            return;
+        }
+        
+        // Check for critical errors
+        if (!criticalErrors.isEmpty()) {
+            JsonObject firstError = criticalErrors.values().iterator().next();
+            String userErrorMessage = firstError.getString("userMessage", 
+                "System critical error occurred. Please restart the system or contact support.");
+            sendError(context, 503, userErrorMessage);
+            LogUtil.logError(vertx, "Request blocked due to critical error", "ConversationStreaming", "Request", "Critical", true);
+            return;
+        }
+        
+        JsonObject request = context.body().asJsonObject();
+        
+        // Validate request
+        if (request == null || !request.containsKey("messages")) {
+            sendError(context, 400, "Invalid request: messages array required");
+            return;
+        }
+        
+        JsonArray messages = request.getJsonArray("messages");
+        if (messages.isEmpty()) {
+            sendError(context, 400, "Invalid request: messages array cannot be empty");
+            return;
+        }
+        
+        // Extract parameters
+        String host = request.getString("host", DEFAULT_HOST);
+        String conversationId = request.getString("conversationId", UUID.randomUUID().toString());
+        JsonObject options = request.getJsonObject("options", new JsonObject());
+        boolean streaming = request.getBoolean("streaming", true);
+        
+        // Get the latest user message
+        JsonObject lastMessage = messages.size() > 0 ? messages.getJsonObject(messages.size() - 1) : null;
+        String query = lastMessage != null ? lastMessage.getString("content", "") : "";
+        
+        // Log request
+        vertx.eventBus().publish("log", "Processing conversation request - Host: " + host + ", ConvId: " + conversationId + ", Query: " + query + ",2,ConversationStreaming,API,System");
+        
+        // Track request
+        String requestId = UUID.randomUUID().toString();
+        requestMetrics.put(requestId, System.currentTimeMillis());
+        
+        // Route to appropriate host
+        routeToHost(context, host, conversationId, query, messages, options, streaming, requestId);
+    }
+    
+    /**
+     * Handle streaming conversation requests
+     */
+    private void handleStreamingConversation(RoutingContext context) {
+        // Set up SSE headers
+        context.response()
+            .putHeader("Content-Type", "text/event-stream")
+            .putHeader("Cache-Control", "no-cache")
+            .putHeader("Connection", "keep-alive")
+            .setChunked(true);
+        
+        // Process as streaming
+        JsonObject request = context.body().asJsonObject();
+        if (request != null) {
+            request.put("streaming", true);
+        }
+        
+        handleConversation(context);
+    }
+    
+    /**
+     * Route request to the appropriate host
+     */
+    private void routeToHost(RoutingContext context, 
+                           String host, 
+                           String conversationId, 
+                           String query,
+                           JsonArray messages,
+                           JsonObject options,
+                           boolean streaming,
+                           String requestId) {
+        
+        // Validate host availability
+        String selectedHost = host;
+        if (!isHostAvailable(selectedHost)) {
+            // Try fallback hosts
+            selectedHost = selectFallbackHost(selectedHost);
+            if (selectedHost == null) {
+                sendError(context, 503, "No available hosts to process request");
+                return;
+            }
+            LogUtil.logInfo(vertx, "Original host unavailable, falling back to: " + selectedHost, "ConversationStreaming", "API", "System", false);
+        }
+        final String finalHost = selectedHost;
+        
+        // Create session for streaming
+        String sessionId = null;
+        EnhancedStreamingSession enhancedSession = null;
+        
+        if (streaming) {
+            // Check session limit
+            if (activeSessions.size() >= MAX_ACTIVE_SESSIONS) {
+                sendError(context, 503, "Server at capacity - too many active sessions");
+                return;
+            }
+            
+            sessionId = UUID.randomUUID().toString();
+            
+            // Set up SSE headers FIRST
+            context.response()
+                .putHeader("Content-Type", "text/event-stream")
+                .putHeader("Cache-Control", "no-cache")
+                .putHeader("Connection", "keep-alive")
+                .putHeader("Access-Control-Allow-Origin", "*")
+                .setChunked(true);
+            
+            // Check session limit
+            if (activeSessions.size() >= MAX_ACTIVE_SESSIONS) {
+                sendError(context, 503, "Maximum concurrent sessions reached. Please try again later.");
+                return;
+            }
+            
+            // Create enhanced session
+            enhancedSession = new EnhancedStreamingSession(sessionId, conversationId, context, finalHost);
+            activeSessions.put(sessionId, enhancedSession);
+            
+            // Send initial connection event
+            enhancedSession.sendSSEEvent("connected", new JsonObject()
+                .put("sessionId", sessionId)
+                .put("conversationId", conversationId)
+                .put("host", finalHost)
+                .put("timestamp", System.currentTimeMillis()));
+            
+            // Set up event consumers BEFORE sending to host
+            try {
+                setupEventConsumers(enhancedSession, options);
+            } catch (Exception e) {
+                // Clean up on error
+                LogUtil.logError(vertx, "Failed to setup event consumers", e, "ConversationStreaming", "Session", "Setup", false);
+                activeSessions.remove(sessionId);
+                sendError(context, 500, "Failed to initialize streaming session");
+                return;
+            }
+            
+            // Set up cleanup handlers
+            final String finalSessionId = sessionId;
+            final EnhancedStreamingSession finalEnhancedSession = enhancedSession;
+            context.response().closeHandler(v -> {
+                finalEnhancedSession.responseEnded = true;
+                cleanupSession(finalSessionId);
+                LogUtil.logDebug(vertx, "Client closed connection for session: " + finalSessionId, "ConversationStreaming", "Session", "Cleanup");
+            });
+            
+            context.response().exceptionHandler(err -> {
+                finalEnhancedSession.responseEnded = true;
+                cleanupSession(finalSessionId);
+                LogUtil.logError(vertx, "Connection error for session: " + finalSessionId, err, "ConversationStreaming", "Session", "Error", false);
+            });
+        }
+        final String finalSessionId = sessionId;
+        
+        // Build message for host
+        JsonObject hostMessage = new JsonObject()
+            .put("query", query)
+            .put("conversationId", conversationId)
+            .put("history", messages)
+            .put("options", options)
+            .put("streaming", streaming)
+            .put("requestId", requestId);
+        
+        if (finalSessionId != null) {
+            hostMessage.put("sessionId", finalSessionId);
+        }
+        
+        // Send to host via event bus
+        String hostAddress = "host." + finalHost.toLowerCase() + ".process";
+        
+        eventBus.<JsonObject>request(hostAddress, hostMessage, ar -> {
+            long duration = System.currentTimeMillis() - requestMetrics.getOrDefault(requestId, System.currentTimeMillis());
+            requestMetrics.remove(requestId);
+            
+            if (ar.succeeded()) {
+                Message<JsonObject> result = ar.result();
+                if (result == null || result.body() == null) {
+                    // Handle null response
+                    if (streaming && finalSessionId != null) {
+                        sendSSEEvent(context, "error", new JsonObject()
+                            .put("error", "Null response from host")
+                            .put("host", finalHost));
+                        context.response().end();
+                        cleanupSession(finalSessionId);
+                    } else {
+                        sendError(context, 500, "Null response from host");
+                    }
+                    return;
+                }
+                
+                JsonObject response = result.body();
+                response.put("host", finalHost);
+                response.put("processingTime", duration);
+                
+                if (streaming && finalSessionId != null) {
+                    // Send as SSE event
+                    sendSSEEvent(context, "message", response);
+                    sendSSEEvent(context, "complete", new JsonObject().put("sessionId", finalSessionId));
+                    context.response().end();
+                    
+                    // Mark session complete and clean up
+                    StreamingSession session = activeSessions.get(finalSessionId);
+                    if (session != null) {
+                        session.completed = true;
+                        // Schedule cleanup
+                        vertx.setTimer(5000, id -> cleanupSession(finalSessionId));
+                    }
+                } else {
+                    // Send as regular JSON response
+                    sendJsonResponse(context, 200, response);
+                }
+            } else {
+                vertx.eventBus().publish("log", "Host processing failed for " + finalHost + ": " + ar.cause() + "" + ",0,ConversationStreaming,API,System");
+                
+                if (streaming) {
+                    sendSSEEvent(context, "error", new JsonObject()
+                        .put("error", ar.cause().getMessage())
+                        .put("host", finalHost));
+                    context.response().end();
+                } else {
+                    sendError(context, 500, "Processing failed: " + ar.cause().getMessage());
+                }
+                
+                // Clean up session
+                if (finalSessionId != null) {
+                    cleanupSession(finalSessionId);
+                }
+            }
+        });
+    }
+    
+    /**
+     * Handle host status request
+     */
+    private void handleHostStatus(RoutingContext context) {
+        JsonObject status = new JsonObject();
+        JsonArray hosts = new JsonArray();
+        
+        // Check each host
+        for (String hostName : Arrays.asList("oracledbanswerer", "oraclesqlbuilder", "toolfreedirectllm")) {
+            JsonObject hostInfo = new JsonObject()
+                .put("name", hostName)
+                .put("available", isHostAvailable(hostName));
+            
+            // Get additional status from host
+            String statusAddress = "host." + hostName + ".status";
+            eventBus.<JsonObject>request(statusAddress, new JsonObject(), ar -> {
+                if (ar.succeeded()) {
+                    hostInfo.mergeIn(ar.result().body());
+                }
+            });
+            
+            hosts.add(hostInfo);
+        }
+        
+        status.put("hosts", hosts);
+        status.put("activeSessions", activeSessions.size());
+        status.put("defaultHost", DEFAULT_HOST);
+        
+        sendJsonResponse(context, 200, status);
+    }
+    
+    /**
+     * Handle session cancellation
+     */
+    private void handleSessionCancel(RoutingContext context) {
+        String sessionId = context.pathParam("sessionId");
+        
+        StreamingSession session = activeSessions.remove(sessionId);
+        if (session != null) {
+            vertx.eventBus().publish("log", "Cancelled session: " + sessionId + "" + ",2,ConversationStreaming,API,System");
+            
+            // Notify host about cancellation
+            eventBus.publish("session.cancelled", new JsonObject()
+                .put("sessionId", sessionId)
+                .put("conversationId", session.conversationId));
+            
+            sendJsonResponse(context, 200, new JsonObject()
+                .put("cancelled", true)
+                .put("sessionId", sessionId));
+        } else {
+            sendError(context, 404, "Session not found");
+        }
+    }
+    
+    /**
+     * Register this router with the MCPRouterService
+     */
+    private void registerRouterWithMCPService() {
+        // Register our router with the MCPRouterService
+        // The static method handles both immediate mounting (if router service is ready)
+        // or deferred mounting (if router service starts later)
+        MCPRouterService.registerRouter("/host/v1", router);
+        vertx.eventBus().publish("log", "Registered ConversationStreaming router for path /host/v1,2,ConversationStreaming,API,System");
+    }
+    
+    /**
+     * Check host availability
+     */
+    private void checkHostAvailability() {
+        // Initial check
+        updateHostAvailability();
+        
+        // Periodic checks every 30 seconds
+        vertx.setPeriodic(30000, id -> updateHostAvailability());
+    }
+    
+    private void updateHostAvailability() {
+        for (String hostName : Arrays.asList("oracledbanswerer", "oraclesqlbuilder", "toolfreedirectllm")) {
+            String statusAddress = "host." + hostName + ".status";
+            
+            eventBus.<JsonObject>request(statusAddress, new JsonObject(), ar -> {
+                boolean available = ar.succeeded();
+                hostAvailability.put(hostName, available);
+                
+                if (!available) {
+                    vertx.eventBus().publish("log", "Host " + hostName + " is not available" + ",1,ConversationStreaming,API,System");
+                }
+            });
+        }
+    }
+    
+    private boolean isHostAvailable(String host) {
+        return hostAvailability.getOrDefault(host.toLowerCase(), false);
+    }
+    
+    /**
+     * Select fallback host based on availability
+     */
+    private String selectFallbackHost(String originalHost) {
+        // Fallback order based on original host
+        List<String> fallbackOrder;
+        
+        switch (originalHost.toLowerCase()) {
+            case "oracledbanswerer":
+                fallbackOrder = Arrays.asList("oraclesqlbuilder", "toolfreedirectllm");
+                break;
+            case "oraclesqlbuilder":
+                fallbackOrder = Arrays.asList("oracledbanswerer", "toolfreedirectllm");
+                break;
+            case "toolfreedirectllm":
+                fallbackOrder = Arrays.asList("oracledbanswerer", "oraclesqlbuilder");
+                break;
+            default:
+                fallbackOrder = Arrays.asList("oracledbanswerer", "oraclesqlbuilder", "toolfreedirectllm");
+        }
+        
+        for (String fallback : fallbackOrder) {
+            if (isHostAvailable(fallback)) {
+                return fallback;
+            }
+        }
+        
+        return null; // No available hosts
+    }
+    
+    /**
+     * Send SSE event
+     */
+    private void sendSSEEvent(RoutingContext context, String event, JsonObject data) {
+        String eventData = "event: " + event + "\n" +
+                          "data: " + data.encode() + "\n\n";
+        
+        context.response().write(eventData);
+    }
+    
+    /**
+     * Send JSON response
+     */
+    private void sendJsonResponse(RoutingContext context, int statusCode, JsonObject response) {
+        context.response()
+            .setStatusCode(statusCode)
+            .putHeader("Content-Type", "application/json")
+            .end(response.encode());
+    }
+    
+    /**
+     * Send error response
+     */
+    private void sendError(RoutingContext context, int statusCode, String message) {
+        JsonObject error = new JsonObject()
+            .put("error", message)
+            .put("timestamp", System.currentTimeMillis());
+        
+        sendJsonResponse(context, statusCode, error);
+    }
+    
+    /**
+     * Set up event consumers for a streaming session
+     */
+    private void setupEventConsumers(EnhancedStreamingSession session, JsonObject options) {
+        String conversationId = session.conversationId;
+        String sessionId = session.sessionId;
+        
+        // Progress events from hosts
+        MessageConsumer<JsonObject> progressConsumer = eventBus.consumer("streaming." + conversationId + ".progress", msg -> {
+            JsonObject progress = msg.body();
+            session.sendSSEEvent("progress", progress
+                .put("sessionId", sessionId)
+                .put("timestamp", System.currentTimeMillis()));
+        });
+        session.consumers.add(progressConsumer);
+        
+        // Tool start events
+        MessageConsumer<JsonObject> toolStartConsumer = eventBus.consumer("streaming." + conversationId + ".tool.start", msg -> {
+            JsonObject toolInfo = msg.body();
+            session.sendSSEEvent("tool_start", toolInfo
+                .put("sessionId", sessionId)
+                .put("timestamp", System.currentTimeMillis()));
+        });
+        session.consumers.add(toolStartConsumer);
+        
+        // Tool complete events
+        MessageConsumer<JsonObject> toolCompleteConsumer = eventBus.consumer("streaming." + conversationId + ".tool.complete", msg -> {
+            JsonObject toolResult = msg.body();
+            session.sendSSEEvent("tool_complete", toolResult
+                .put("sessionId", sessionId)
+                .put("timestamp", System.currentTimeMillis()));
+        });
+        session.consumers.add(toolCompleteConsumer);
+        
+        // Final response events
+        MessageConsumer<JsonObject> finalConsumer = eventBus.consumer("streaming." + conversationId + ".final", msg -> {
+            JsonObject finalResponse = msg.body();
+            session.sendSSEEvent("final", finalResponse
+                .put("sessionId", sessionId)
+                .put("timestamp", System.currentTimeMillis()));
+            
+            // Mark session as completed
+            session.completed = true;
+            
+            // Schedule cleanup after a short delay
+            vertx.setTimer(5000, id -> cleanupSession(sessionId));
+        });
+        session.consumers.add(finalConsumer);
+        
+        // Error events
+        MessageConsumer<JsonObject> errorConsumer = eventBus.consumer("streaming." + conversationId + ".error", msg -> {
+            JsonObject error = msg.body();
+            session.sendSSEEvent("error", error
+                .put("sessionId", sessionId)
+                .put("severity", error.getString("severity", "ERROR"))
+                .put("timestamp", System.currentTimeMillis()));
+        });
+        session.consumers.add(errorConsumer);
+        
+        // Interrupt events
+        MessageConsumer<JsonObject> interruptConsumer = eventBus.consumer("streaming." + conversationId + ".interrupt", msg -> {
+            JsonObject interrupt = msg.body();
+            session.sendSSEEvent("interrupt", interrupt
+                .put("sessionId", sessionId)
+                .put("timestamp", System.currentTimeMillis()));
+        });
+        session.consumers.add(interruptConsumer);
+        
+        // Agent question events (for user interaction)
+        MessageConsumer<JsonObject> questionConsumer = eventBus.consumer("streaming." + conversationId + ".agent_question", msg -> {
+            JsonObject question = msg.body();
+            session.sendSSEEvent("agent_question", question
+                .put("sessionId", sessionId)
+                .put("requiresResponse", true)
+                .put("timestamp", System.currentTimeMillis()));
+        });
+        session.consumers.add(questionConsumer);
+        
+        // Set up heartbeat timer
+        session.heartbeatTimerId = vertx.setPeriodic(HEARTBEAT_INTERVAL, id -> {
+            if (!session.responseEnded) {
+                session.sendSSEEvent("heartbeat", new JsonObject()
+                    .put("sessionId", sessionId)
+                    .put("timestamp", System.currentTimeMillis()));
+            }
+        });
+        
+        // Set up timeout timer
+        long timeout = options.getLong("timeout", DEFAULT_TIMEOUT);
+        session.timeoutTimerId = vertx.setTimer(timeout, id -> {
+            if (!session.completed && !session.responseEnded) {
+                // Check if interrupted
+                if (interruptManager != null && interruptManager.isInterrupted(sessionId)) {
+                    session.sendSSEEvent("interrupted", new JsonObject()
+                        .put("sessionId", sessionId)
+                        .put("message", "Request was interrupted")
+                        .put("timestamp", System.currentTimeMillis()));
+                    cleanupSession(sessionId);
+                    return;
+                }
+                session.sendSSEEvent("timeout", new JsonObject()
+                    .put("sessionId", sessionId)
+                    .put("message", "Request timed out after " + (timeout / 1000) + " seconds")
+                    .put("timestamp", System.currentTimeMillis()));
+                
+                // Clean up the session
+                cleanupSession(sessionId);
+                
+                // Notify host about timeout
+                eventBus.publish("session.timeout", new JsonObject()
+                    .put("sessionId", sessionId)
+                    .put("conversationId", conversationId)
+                    .put("host", session.host));
+            }
+        });
+        
+        LogUtil.logDebug(vertx, "Set up " + session.consumers.size() + " event consumers for session: " + sessionId, "ConversationStreaming", "Session", "Setup");
+    }
+    
+    /**
+     * Clean up a streaming session
+     */
+    private void cleanupSession(String sessionId) {
+        StreamingSession session = activeSessions.remove(sessionId);
+        if (session != null && session instanceof EnhancedStreamingSession) {
+            EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
+            enhancedSession.cleanup();
+            LogUtil.logDebug(vertx, "Cleaned up session: " + sessionId, "ConversationStreaming", "Session", "Cleanup");
+        }
+        
+        // Clean up interrupt manager state
+        if (interruptManager != null) {
+            interruptManager.clearInterrupt(sessionId);
+        }
+    }
+    
+    /**
+     * Handle interrupt request for a session
+     */
+    private void handleInterrupt(RoutingContext context) {
+        String sessionId = context.pathParam("sessionId");
+        JsonObject request = context.body().asJsonObject();
+        
+        StreamingSession session = activeSessions.get(sessionId);
+        if (session == null) {
+            sendError(context, 404, "Session not found");
+            return;
+        }
+        
+        // Extract interrupt details
+        String reason = request.getString("reason", "User requested interrupt");
+        boolean graceful = request.getBoolean("graceful", true);
+        
+        // Mark conversation as interrupted using InterruptManager
+        if (interruptManager != null) {
+            interruptManager.interrupt(sessionId, reason);
+        }
+        
+        // Publish interrupt event to the host using consistent addressing
+        eventBus.publish("streaming." + session.conversationId + ".interrupt", new JsonObject()
+            .put("sessionId", sessionId)
+            .put("conversationId", session.conversationId)
+            .put("reason", reason)
+            .put("graceful", graceful)
+            .put("timestamp", System.currentTimeMillis()));
+        
+        // Send interrupt confirmation
+        if (session instanceof EnhancedStreamingSession) {
+            EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
+            enhancedSession.sendSSEEvent("interrupt_acknowledged", new JsonObject()
+                .put("sessionId", sessionId)
+                .put("reason", reason)
+                .put("timestamp", System.currentTimeMillis()));
+        }
+        
+        sendJsonResponse(context, 200, new JsonObject()
+            .put("interrupted", true)
+            .put("sessionId", sessionId)
+            .put("graceful", graceful));
+        
+        LogUtil.logInfo(vertx, "Session interrupted: " + sessionId + " - " + reason, "ConversationStreaming", "Session", "Interrupt", false);
+    }
+    
+    /**
+     * Handle feedback submission for a session
+     */
+    private void handleFeedback(RoutingContext context) {
+        String sessionId = context.pathParam("sessionId");
+        JsonObject feedback = context.body().asJsonObject();
+        
+        StreamingSession session = activeSessions.get(sessionId);
+        if (session == null) {
+            // Session might have completed, but we can still accept feedback
+            LogUtil.logDebug(vertx, "Feedback received for completed session: " + sessionId, "ConversationStreaming", "Session", "Feedback");
+        }
+        
+        // Add metadata to feedback
+        feedback.put("sessionId", sessionId);
+        feedback.put("timestamp", System.currentTimeMillis());
+        
+        if (session != null) {
+            feedback.put("conversationId", session.conversationId);
+            feedback.put("sessionDuration", System.currentTimeMillis() - session.startTime);
+            
+            if (session instanceof EnhancedStreamingSession) {
+                EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
+                feedback.put("host", enhancedSession.host);
+            }
+        }
+        
+        // Store feedback using InterruptManager
+        if (interruptManager != null) {
+            interruptManager.storeFeedback(sessionId, feedback);
+        }
+        
+        // Publish feedback event
+        eventBus.publish("session.feedback", feedback);
+        
+        sendJsonResponse(context, 200, new JsonObject()
+            .put("received", true)
+            .put("sessionId", sessionId));
+    }
+    
+    /**
+     * Get session status
+     */
+    private void handleSessionStatus(RoutingContext context) {
+        String sessionId = context.pathParam("sessionId");
+        
+        StreamingSession session = activeSessions.get(sessionId);
+        if (session == null) {
+            sendError(context, 404, "Session not found");
+            return;
+        }
+        
+        JsonObject status = new JsonObject()
+            .put("sessionId", sessionId)
+            .put("conversationId", session.conversationId)
+            .put("startTime", session.startTime)
+            .put("duration", System.currentTimeMillis() - session.startTime)
+            .put("completed", session.completed);
+        
+        if (session instanceof EnhancedStreamingSession) {
+            EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
+            status.put("host", enhancedSession.host)
+                  .put("eventConsumers", enhancedSession.consumers.size())
+                  .put("connectionActive", !enhancedSession.responseEnded);
+        }
+        
+        sendJsonResponse(context, 200, status);
+    }
+    
+    /**
+     * Handle health check endpoint
+     */
+    private void handleHealth(RoutingContext context) {
+        JsonObject health = new JsonObject()
+            .put("status", systemReady ? "healthy" : "starting")
+            .put("systemReady", systemReady)
+            .put("activeSessions", activeSessions.size())
+            .put("criticalErrors", criticalErrors.size())
+            .put("timestamp", System.currentTimeMillis());
+        
+        sendJsonResponse(context, systemReady ? 200 : 503, health);
+    }
+    
+    /**
+     * Handle MCP status endpoint
+     */
+    private void handleMcpStatus(RoutingContext context) {
+        // Request MCP status via event bus
+        eventBus.<JsonObject>request("mcp.status", new JsonObject(), ar -> {
+            if (ar.succeeded()) {
+                sendJsonResponse(context, 200, ar.result().body());
+            } else {
+                sendError(context, 503, "MCP system not available");
+            }
+        });
+    }
+    
+    /**
+     * Handle MCP tools listing endpoint
+     */
+    private void handleMcpTools(RoutingContext context) {
+        // Request tools list via event bus
+        eventBus.<JsonObject>request("mcp.tools.list", new JsonObject(), ar -> {
+            if (ar.succeeded()) {
+                sendJsonResponse(context, 200, ar.result().body());
+            } else {
+                sendError(context, 503, "Unable to retrieve MCP tools");
+            }
+        });
+    }
+    
+    /**
+     * Handle MCP clients listing endpoint
+     */
+    private void handleMcpClients(RoutingContext context) {
+        // Request clients list via event bus
+        eventBus.<JsonObject>request("mcp.clients.list", new JsonObject(), ar -> {
+            if (ar.succeeded()) {
+                sendJsonResponse(context, 200, ar.result().body());
+            } else {
+                sendError(context, 503, "Unable to retrieve MCP clients");
+            }
+        });
+    }
+    
+    /**
+     * Start periodic session cleanup
+     */
+    private void startSessionCleanup() {
+        // Clean up old sessions every minute
+        vertx.setPeriodic(60000, id -> {
+            long cutoff = System.currentTimeMillis() - (5 * 60 * 1000); // 5 minutes
+            
+            List<String> sessionsToRemove = new ArrayList<>();
+            
+            activeSessions.forEach((sessionId, session) -> {
+                boolean shouldRemove = session.completed || session.startTime < cutoff;
+                
+                // Also check if response is closed for EnhancedStreamingSession
+                if (!shouldRemove && session instanceof EnhancedStreamingSession) {
+                    EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
+                    shouldRemove = enhancedSession.responseEnded || 
+                                   (enhancedSession.response != null && enhancedSession.response.closed());
+                }
+                
+                if (shouldRemove) {
+                    sessionsToRemove.add(sessionId);
+                }
+            });
+            
+            // Clean up identified sessions
+            sessionsToRemove.forEach(this::cleanupSession);
+            
+            // Log cleanup statistics
+            if (!sessionsToRemove.isEmpty()) {
+                LogUtil.logDebug(vertx, "Session cleanup: removed " + sessionsToRemove.size() + " sessions, active: " + activeSessions.size(), 
+                                 "ConversationStreaming", "Session", "Cleanup");
+            }
+        });
+    }
+    
+    /**
+     * Get the router for mounting in main HTTP server
+     */
+    public Router getRouter() {
+        return router;
+    }
+    
+    @Override
+    public void stop(Promise<Void> stopPromise) {
+        activeSessions.clear();
+        requestMetrics.clear();
+        hostAvailability.clear();
+        
+        vertx.eventBus().publish("log", "ConversationStreaming API stopped,2,ConversationStreaming,API,System");
+        stopPromise.complete();
+    }
+}

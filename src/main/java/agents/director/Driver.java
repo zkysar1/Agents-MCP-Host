@@ -1,14 +1,14 @@
 package agents.director;
 
 import agents.director.apis.*;
-import agents.director.hosts.databaseanswerer.HostManager;
-import agents.director.hosts.databaseanswerer.GenericOrchestrationVerticle;
-import agents.director.hosts.databaseanswerer.ToolSelection;
+import agents.director.services.MCPRouterService;
 import agents.director.services.LlmAPIService;
 import agents.director.services.Logger;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
+import agents.director.services.LogUtil;
+import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
+import java.util.List;
+import java.util.ArrayList;
 
 public class Driver {
   public static int logLevel = 3; // 0=errors, 1=info, 2=detail, 3=debug, 4=data
@@ -20,9 +20,10 @@ public class Driver {
   private static final String DATA_PATH = "./data";
   public static final String zakAgentPath = DATA_PATH + "/agent";
   
-  // Track component readiness via events (not polling)
-  private boolean mcpSystemReady = false;
-  private boolean orchestrationReady = false;
+  // Track component readiness via events
+  private boolean mcpRouterReady = false;
+  private boolean mcpServersReady = false;
+  private boolean hostsReady = false;
 
   public static void main(String[] args) {
     Driver me = new Driver();
@@ -30,155 +31,236 @@ public class Driver {
   }
 
   private void doIt() {
-    // Log startup information
-    System.out.println("=== ZAK-Agent Starting ===");
+    // Log startup information - Keep as console output (critical startup info)
+    System.out.println("=== MCP-Based Agent System Starting ===");
     System.out.println("Java version: " + System.getProperty("java.version"));
     System.out.println("Working directory: " + System.getProperty("user.dir"));
     System.out.println("Data path: " + DATA_PATH);
-    System.out.println("ZAK Agent path: " + zakAgentPath);
+    System.out.println("Agent path: " + zakAgentPath);
     
     // Set up event listeners for component readiness
     setupReadinessListeners();
     
-    // Deploy verticles directly - no pre-warming needed
-    deployVerticles();
+    // Start deployment sequence: Router first, then servers, then hosts
+    deployMCPRouter();
   }
   
-  private void deployVerticles() {
-    // Deploy core verticles
+  // New deployment methods following MCP architecture
+  private void deployMCPRouter() {
+    LogUtil.logInfo(vertx, "Deploying MCP Router Service...", "Driver", "StartUp", "MCP", true);
+    
+    vertx.deployVerticle(new MCPRouterService(), res -> {
+      if (res.succeeded()) {
+        LogUtil.logInfo(vertx, "MCPRouterService deployed successfully", "Driver", "StartUp", "MCP", true);
+        LogUtil.logDebug(vertx, "MCP Router deployed", "Driver", "StartUp", "MCP");
+      } else {
+        // Fatal error - keep console output
+        vertx.eventBus().publish("log", "MCPRouterService deployment failed: " + res.cause().getMessage() + ",0,Driver,System,System");
+        LogUtil.logError(vertx, "MCPRouterService deployment failed", res.cause(), "Driver", "StartUp", "MCP", false);
+        res.cause().printStackTrace();
+        System.exit(1); // Fatal error - cannot continue without router
+      }
+    });
+  }
+  
+  private void deployMCPServers() {
+    LogUtil.logInfo(vertx, "Deploying MCP Servers...", "Driver", "StartUp", "MCP", true);
+    
+    // Import the server classes
+    Promise<Void> serversPromise = Promise.<Void>promise();
+    List<Future> deploymentFutures = new ArrayList<>();
+    
+    // Deploy OracleQueryExecutionServer (Worker)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.OracleQueryExecutionServer",
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(5)
+      )
+    );
+    
+    // Deploy OracleQueryAnalysisServer (Worker)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.OracleQueryAnalysisServer",
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
+      )
+    );
+    
+    // Deploy OracleSchemaIntelligenceServer (Worker)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.OracleSchemaIntelligenceServer",
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(4)
+      )
+    );
+    
+    // Deploy OracleSQLGenerationServer (Worker)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.OracleSQLGenerationServer",
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
+      )
+    );
+    
+    // Deploy OracleSQLValidationServer (Worker)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.OracleSQLValidationServer",
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
+      )
+    );
+    
+    // Deploy BusinessMappingServer (Regular)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.BusinessMappingServer",
+        new DeploymentOptions().setWorker(false)
+      )
+    );
+    
+    // Deploy QueryIntentEvaluationServer (Regular)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.QueryIntentEvaluationServer",
+        new DeploymentOptions().setWorker(false)
+      )
+    );
+    
+    // Wait for all servers to deploy
+    CompositeFuture.all(deploymentFutures).onComplete(ar -> {
+      if (ar.succeeded()) {
+        LogUtil.logInfo(vertx, "All MCP servers deployed successfully", "Driver", "StartUp", "MCP", true);
+        vertx.eventBus().publish("mcp.servers.ready", new JsonObject()
+          .put("serverCount", deploymentFutures.size())
+          .put("timestamp", System.currentTimeMillis()));
+      } else {
+        LogUtil.logError(vertx, "Failed to deploy MCP servers", ar.cause(), "Driver", "StartUp", "MCP", true);
+      }
+    });
+  }
+  
+  private void deployHosts() {
+    LogUtil.logInfo(vertx, "Deploying Host Applications...", "Driver", "StartUp", "Host", true);
+    
+    // Deploy core services first
     setLogger();
-    setHostAPI();
-    setHealth();
-    setStatus();
-    setConversation();
-    
-    // Deploy unified tool selection (must be before conversation processing)
-    setToolSelection();
-    
-    // Initialize services
     setLlmAPIService();
     
-    // Deploy MCP infrastructure (manages servers and clients)
-    setMcpHostManager();
+    // Deploy the 3 host applications
+    List<Future> hostFutures = new ArrayList<>();
     
-    // Oracle Tools Server and Client are now deployed by HostManager via mcp-config.json
-    // This ensures proper registration and systemReady flag is set correctly
-    // setOracleToolsServer();
-    // setOracleToolsClient();
+    // Deploy OracleDBAnswererHost
+    hostFutures.add(
+      vertx.deployVerticle(
+        "agents.director.hosts.OracleDBAnswererHost",
+        new DeploymentOptions()
+      )
+    );
     
-    // Deploy Oracle Orchestration Strategy (replaces monolithic agent loop)
-    setOracleOrchestrationStrategy();
+    // Deploy OracleSQLBuilderHost
+    hostFutures.add(
+      vertx.deployVerticle(
+        "agents.director.hosts.OracleSQLBuilderHost",
+        new DeploymentOptions()
+      )
+    );
+    
+    // Deploy ToolFreeDirectLLMHost
+    hostFutures.add(
+      vertx.deployVerticle(
+        "agents.director.hosts.ToolFreeDirectLLMHost",
+        new DeploymentOptions()
+      )
+    );
+    
+    // Wait for all hosts to deploy
+    CompositeFuture.all(hostFutures).onComplete(ar -> {
+      if (ar.succeeded()) {
+        LogUtil.logInfo(vertx, "All host applications deployed successfully", "Driver", "StartUp", "Host", true);
+        
+        // Deploy API endpoints after hosts are ready
+        setConversationAPI();
+        
+        // Signal hosts ready
+        vertx.eventBus().publish("hosts.ready", new JsonObject()
+          .put("hostCount", hostFutures.size())
+          .put("timestamp", System.currentTimeMillis()));
+      } else {
+        LogUtil.logError(vertx, "Failed to deploy hosts", ar.cause(), "Driver", "StartUp", "Host", true);
+      }
+    });
   }
   
   private void setupReadinessListeners() {
-    // Listen for MCP system ready event
-    vertx.eventBus().consumer("mcp.system.ready", msg -> {
+    // Listen for MCP router ready event
+    vertx.eventBus().consumer("mcp.router.ready", msg -> {
       JsonObject status = (JsonObject) msg.body();
-      mcpSystemReady = true;
-      System.out.println("MCP System Ready - Servers: " + status.getInteger("servers", 0) + 
-                       ", Clients: " + status.getInteger("clients", 0) + 
-                       ", Tools: " + status.getInteger("tools", 0));
-      checkSystemReady();
+      mcpRouterReady = true;
+      LogUtil.logInfo(vertx, "MCP Router Ready on port: " + status.getInteger("port"), "Driver", "StartUp", "MCP", true);
+      // Deploy MCP servers after router is ready
+      deployMCPServers();
     });
     
-    // Listen for orchestration ready event
-    vertx.eventBus().consumer("oracle.orchestration.ready", msg -> {
-      orchestrationReady = true;
-      System.out.println("Oracle Orchestration Strategy Ready");
+    // Listen for MCP servers ready event
+    vertx.eventBus().consumer("mcp.servers.ready", msg -> {
+      mcpServersReady = true;
+      LogUtil.logInfo(vertx, "All MCP Servers Ready", "Driver", "StartUp", "MCP", true);
+      // Deploy hosts after servers are ready
+      deployHosts();
+    });
+    
+    // Listen for hosts ready event
+    vertx.eventBus().consumer("hosts.ready", msg -> {
+      hostsReady = true;
+      LogUtil.logInfo(vertx, "All Host Applications Ready", "Driver", "StartUp", "Host", true);
       checkSystemReady();
     });
   }
   
   private void checkSystemReady() {
     // Check if all critical components are ready
-    if (mcpSystemReady && orchestrationReady) {
-      System.out.println("=== ZAK-Agent Started ===");
-      System.out.println("MCP Infrastructure: READY");
-      System.out.println("Orchestration Strategies: READY");
-      System.out.println("Unified Tool Architecture: ACTIVE");
-      vertx.eventBus().publish("log", "ZAK-Agent startup complete,0,Driver,StartUp,System");
+    if (mcpRouterReady && mcpServersReady && hostsReady) {
+      // Critical system ready messages - keep console output
+      System.out.println("=== MCP-Based Agent System Started ===");
+      vertx.eventBus().publish("log", "MCP Router: READY" + ",2,Driver,System,System");
+      vertx.eventBus().publish("log", "MCP Servers: READY" + ",2,Driver,System,System");
+      vertx.eventBus().publish("log", "Host Applications: READY" + ",2,Driver,System,System");
+      LogUtil.logCritical(vertx, "MCP system startup complete", "Driver", "StartUp", "System");
       
-      // Publish the final system ready event that triggers HTTP server start
+      // Publish the final system ready event
       vertx.eventBus().publish("system.fully.ready", new JsonObject()
-        .put("mcp", mcpSystemReady)
-        .put("orchestration", orchestrationReady)
+        .put("mcpRouter", mcpRouterReady)
+        .put("mcpServers", mcpServersReady)
+        .put("hosts", hostsReady)
         .put("timestamp", System.currentTimeMillis()));
       
-      System.out.println("[Driver] Published system.fully.ready - HTTP server will now start accepting requests");
+      LogUtil.logInfo(vertx, "Published system.fully.ready - System is now operational", "Driver", "StartUp", "System", true);
     } else {
-      System.out.println("[Driver] Waiting for components - MCP: " + mcpSystemReady + ", Orchestration: " + orchestrationReady);
+      LogUtil.logDebug(vertx, "Waiting for components - Router: " + mcpRouterReady + 
+                       ", Servers: " + mcpServersReady + ", Hosts: " + hostsReady, "Driver", "StartUp", "System");
     }
   }
 
   private void setLogger() {
     vertx.deployVerticle(new Logger(), res -> {
       if (res.succeeded()) {
-        System.out.println("Logger Verticle initialized successfully");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Logger deployed,3,Driver,StartUp,System");
+        LogUtil.logInfo(vertx, "Logger Verticle initialized successfully", "Driver", "StartUp", "System", true);
+        LogUtil.logDebug(vertx, "Logger deployed", "Driver", "StartUp", "System");
       } else {
-        System.err.println("Logger deployment failed: " + res.cause().getMessage());
+        LogUtil.logError(vertx, "Logger deployment failed", res.cause(), "Driver", "StartUp", "System", true);
       }
     });
   }
 
-  private void setHostAPI() {
-    // Deploy the host API
-    vertx.deployVerticle(new HostAPI(), res -> {
-      if (res.succeeded()) {
-        System.out.println("HostAPI Verticle initialized successfully");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Host API verticle deployed,3,Driver,StartUp,System");
-      } else {
-        System.err.println("Host API deployment failed: " + res.cause().getMessage());
-      }
-    });
-  }
   
-  private void setHealth() {
-    // Deploy the health endpoint
-    vertx.deployVerticle(new Health(), res -> {
+  private void setConversationAPI() {
+    // Deploy the streaming conversation API with host routing
+    vertx.deployVerticle(new ConversationStreaming(), res -> {
       if (res.succeeded()) {
-        System.out.println("Health Verticle initialized successfully");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Health verticle deployed,3,Driver,StartUp,System");
+        LogUtil.logInfo(vertx, "Conversation API initialized successfully", "Driver", "StartUp", "API", true);
+        LogUtil.logDebug(vertx, "Streaming conversation API deployed", "Driver", "StartUp", "API");
       } else {
-        System.err.println("Health verticle deployment failed: " + res.cause().getMessage());
-      }
-    });
-  }
-  
-  private void setStatus() {
-    // Deploy the status endpoint
-    vertx.deployVerticle(new Status(), res -> {
-      if (res.succeeded()) {
-        System.out.println("Status Verticle initialized successfully");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Status verticle deployed,3,Driver,StartUp,System");
-      } else {
-        System.err.println("Status verticle deployment failed: " + res.cause().getMessage());
-      }
-    });
-  }
-  
-  private void setConversation() {
-    // Deploy the unified conversation API with auto MCP tool detection
-    vertx.deployVerticle(new Conversation(), res -> {
-      if (res.succeeded()) {
-        System.out.println("Conversation Verticle initialized successfully");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Unified conversation verticle with MCP deployed,3,Driver,StartUp,System");
-      } else {
-        System.err.println("Conversation verticle deployment failed: " + res.cause().getMessage());
-      }
-    });
-  }
-  
-  private void setToolSelection() {
-    // Deploy the unified tool selection for intelligent tool routing
-    vertx.deployVerticle(new ToolSelection(), res -> {
-      if (res.succeeded()) {
-        System.out.println("Tool Selection Verticle initialized successfully");
-        System.out.println("Unified tool selection with LLM validation enabled");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Tool Selection Verticle deployed,3,Driver,StartUp,System");
-      } else {
-        System.err.println("Tool Selection verticle deployment failed: " + res.cause().getMessage());
-        System.err.println("WARNING: Falling back to pattern-based tool selection");
+        LogUtil.logError(vertx, "Conversation API deployment failed", res.cause(), "Driver", "StartUp", "API", true);
       }
     });
   }
@@ -188,42 +270,13 @@ public class Driver {
     boolean initialized = LlmAPIService.getInstance().setupService(vertx);
     
     if (initialized) {
-      System.out.println("OpenAI API service initialized successfully");
-      if (logLevel >= 3) vertx.eventBus().publish("log", "LLM API service initialized,3,Driver,StartUp,System");
+      LogUtil.logInfo(vertx, "OpenAI API service initialized successfully", "Driver", "StartUp", "System", true);
+      LogUtil.logDebug(vertx, "LLM API service initialized", "Driver", "StartUp", "System");
     } else {
+      // Keep warning in console - important configuration issue
       System.out.println("WARNING: OpenAI API service not initialized (missing API key)");
       System.out.println("Set OPENAI_API_KEY environment variable to enable LLM responses");
+      LogUtil.logError(vertx, "OpenAI API service not initialized (missing API key)", "Driver", "StartUp", "System", false);
     }
-  }
-  
-  private void setMcpHostManager() {
-    // Deploy MCP Host Manager which orchestrates all MCP servers and clients
-    System.out.println("Deploying MCP infrastructure...");
-    
-    vertx.deployVerticle(new HostManager(), res -> {
-      if (res.succeeded()) {
-        System.out.println("MCP Host Manager deployed successfully");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "MCP Host Manager deployed,3,Driver,StartUp,MCP");
-      } else {
-        System.err.println("MCP Host Manager deployment failed: " + res.cause().getMessage());
-        System.err.println("MCP tools will not be available");
-      }
-    });
-  }
-  
-  private void setOracleOrchestrationStrategy() {
-    // Deploy Generic Orchestration Verticle - handles all orchestration strategies
-    System.out.println("Deploying Generic Orchestration Strategies...");
-    
-    vertx.deployVerticle(new GenericOrchestrationVerticle(), res -> {
-      if (res.succeeded()) {
-        System.out.println("Generic Orchestration deployed - all strategies available");
-        if (logLevel >= 3) vertx.eventBus().publish("log", "Generic Orchestration deployed,3,Driver,StartUp,Orchestration");
-      } else {
-        System.err.println("Generic Orchestration deployment failed: " + res.cause().getMessage());
-        System.err.println("Orchestration strategies will not be available");
-        res.cause().printStackTrace();
-      }
-    });
   }
 }

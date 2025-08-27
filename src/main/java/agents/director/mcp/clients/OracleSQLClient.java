@@ -50,8 +50,8 @@ public class OracleSQLClient extends AbstractVerticle {
                 // Notify host that client is ready
                 publishClientReady();
                 
-                System.out.println("[OracleSQLClient] Connected to Oracle server via HTTP on port " + ORACLE_PORT);
-                System.out.println("[OracleSQLClient] Discovered " + availableTools.size() + " tools");
+                vertx.eventBus().publish("log", "[OracleSQLClient] Connected to Oracle server via HTTP on port " + ORACLE_PORT + ",2,OracleSQLClient,MCP,System");
+                vertx.eventBus().publish("log", "[OracleSQLClient] Discovered " + availableTools.size() + " tools" + ",2,OracleSQLClient,MCP,System");
                 
                 vertx.eventBus().publish("log", 
                     "OracleSQLClient ready with " + availableTools.size() + " tools,1,OracleSQLClient,StartUp,MCP");
@@ -59,7 +59,7 @@ public class OracleSQLClient extends AbstractVerticle {
                 startPromise.complete();
             })
             .onFailure(err -> {
-                System.err.println("[OracleSQLClient] Failed to connect: " + err.getMessage());
+                vertx.eventBus().publish("log", "[OracleSQLClient] Failed to connect: " + err.getMessage() + ",0,OracleSQLClient,MCP,System");
                 startPromise.fail(err);
             });
     }
@@ -73,11 +73,11 @@ public class OracleSQLClient extends AbstractVerticle {
         // Initialize connection (MCP protocol handshake)
         oracleTransport.initialize()
             .compose(initResponse -> {
-                System.out.println("[OracleSQLClient] Initialized MCP connection to Oracle server");
+                vertx.eventBus().publish("log", "[OracleSQLClient] Initialized MCP connection to Oracle server" + ",2,OracleSQLClient,MCP,System");
                 // Protocol version might be a string or object
                 Object protocolVersion = initResponse.getValue("protocolVersion");
                 if (protocolVersion != null) {
-                    System.out.println("[OracleSQLClient] Protocol version: " + protocolVersion);
+                    vertx.eventBus().publish("log", "[OracleSQLClient] Protocol version: " + protocolVersion + ",2,OracleSQLClient,MCP,System");
                 }
                 
                 // Request tools list via MCP protocol
@@ -92,7 +92,7 @@ public class OracleSQLClient extends AbstractVerticle {
                     // Store tool as-is - no prefixing!
                     availableTools.put(toolName, tool);
                     
-                    System.out.println("[OracleSQLClient]   Discovered tool: " + toolName);
+                    vertx.eventBus().publish("log", "[OracleSQLClient]   Discovered tool: " + toolName + ",3,OracleSQLClient,MCP,System");
                 }
                 
                 // Publish discovered tools to event bus for HostManager
@@ -106,12 +106,12 @@ public class OracleSQLClient extends AbstractVerticle {
                 promise.complete();
             })
             .onFailure(err -> {
-                System.err.println("[OracleSQLClient] Failed to connect to Oracle server: " + err.getMessage());
-                System.err.println("[OracleSQLClient] Is Oracle server running on port " + ORACLE_PORT + "?");
+                vertx.eventBus().publish("log", "[OracleSQLClient] Failed to connect to Oracle server: " + err.getMessage() + ",0,OracleSQLClient,MCP,System");
+                vertx.eventBus().publish("log", "[OracleSQLClient] Is Oracle server running on port " + ORACLE_PORT + "?" + ",0,OracleSQLClient,MCP,System");
                 
                 // Retry connection after delay
                 vertx.setTimer(5000, id -> {
-                    System.out.println("[OracleSQLClient] Retrying connection...");
+                    vertx.eventBus().publish("log", "[OracleSQLClient] Retrying connection..." + ",1,OracleSQLClient,MCP,System");
                     connectToOracleServer();
                 });
                 
@@ -130,7 +130,7 @@ public class OracleSQLClient extends AbstractVerticle {
         JsonObject arguments = request.getJsonObject("arguments", new JsonObject());
         String streamId = request.getString("streamId"); // Extract streamId if present
         
-        System.out.println("[OracleSQLClient] Received tool call request: " + toolName);
+        vertx.eventBus().publish("log", "[OracleSQLClient] Received tool call request: " + toolName + ",2,OracleSQLClient,MCP,System");
         
         // No more prefix manipulation - send tool name as-is!
         String serverToolName = toolName;
@@ -146,7 +146,7 @@ public class OracleSQLClient extends AbstractVerticle {
                 // Check if result contains an error
                 if (result.getBoolean("isError", false)) {
                     String errorMessage = result.getString("error", "Unknown error");
-                    System.err.println("[OracleSQLClient] Tool returned error: " + errorMessage);
+                    vertx.eventBus().publish("log", "[OracleSQLClient] Tool returned error: " + errorMessage + ",0,OracleSQLClient,MCP,System");
                     
                     // Log error
                     vertx.eventBus().publish("log",
@@ -163,7 +163,7 @@ public class OracleSQLClient extends AbstractVerticle {
                     result.put("_client", CLIENT_ID);
                     result.put("_transport", "HTTP");
                     
-                    System.out.println("[OracleSQLClient] Tool call succeeded: " + toolName);
+                    vertx.eventBus().publish("log", "[OracleSQLClient] Tool call succeeded: " + toolName + ",2,OracleSQLClient,MCP,System");
                     
                     // Log success
                     vertx.eventBus().publish("log",
@@ -173,7 +173,7 @@ public class OracleSQLClient extends AbstractVerticle {
                 }
             })
             .onFailure(err -> {
-                System.err.println("[OracleSQLClient] Tool call failed: " + err.getMessage());
+                vertx.eventBus().publish("log", "[OracleSQLClient] Tool call failed: " + err.getMessage() + ",0,OracleSQLClient,MCP,System");
                 
                 // Log error
                 vertx.eventBus().publish("log",
@@ -220,7 +220,7 @@ public class OracleSQLClient extends AbstractVerticle {
         
         vertx.eventBus().publish("mcp.tools.discovered", discovery);
         
-        System.out.println("[OracleSQLClient] Published tool discovery: " + tools.size() + " tools");
+        vertx.eventBus().publish("log", "[OracleSQLClient] Published tool discovery: " + tools.size() + " tools" + ",2,OracleSQLClient,MCP,System");
         
         vertx.eventBus().publish("log",
             "OracleSQLClient discovered " + tools.size() + " tools via HTTP,2,OracleSQLClient,Discovery,MCP");
@@ -239,7 +239,7 @@ public class OracleSQLClient extends AbstractVerticle {
         
         vertx.eventBus().publish("mcp.client.ready", registration);
         
-        System.out.println("[OracleSQLClient] Published client ready event");
+        vertx.eventBus().publish("log", "[OracleSQLClient] Published client ready event" + ",2,OracleSQLClient,MCP,System");
         
         vertx.eventBus().publish("log",
             "OracleSQLClient ready with HTTP transport,2,OracleSQLClient,Registration,MCP");
@@ -253,7 +253,7 @@ public class OracleSQLClient extends AbstractVerticle {
         
         if ("tool_update".equals(eventType)) {
             // Server notified us of tool changes, re-discover
-            System.out.println("[OracleSQLClient] Received tool update notification, refreshing tools...");
+            vertx.eventBus().publish("log", "[OracleSQLClient] Received tool update notification, refreshing tools..." + ",2,OracleSQLClient,MCP,System");
             oracleTransport.listTools()
                 .onSuccess(tools -> {
                     availableTools.clear();
@@ -271,7 +271,7 @@ public class OracleSQLClient extends AbstractVerticle {
     public void stop() {
         if (oracleTransport != null) {
             // Clean shutdown of HTTP connection
-            System.out.println("[OracleSQLClient] Shutting down HTTP connection");
+            vertx.eventBus().publish("log", "[OracleSQLClient] Shutting down HTTP connection" + ",2,OracleSQLClient,MCP,System");
         }
         
         vertx.eventBus().publish("log", 

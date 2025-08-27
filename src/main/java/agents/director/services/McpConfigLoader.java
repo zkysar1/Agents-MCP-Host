@@ -34,7 +34,7 @@ public class McpConfigLoader {
             return Future.succeededFuture(cachedConfig);
         }
         
-        Promise<JsonObject> promise = Promise.promise();
+        Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
         // Check for config path from environment
         String configPath = System.getenv(CONFIG_ENV_VAR);
@@ -48,7 +48,7 @@ public class McpConfigLoader {
         // Check if config file exists
         Path path = Paths.get(finalConfigPath);
         if (!Files.exists(path)) {
-            System.out.println("MCP config file not found, using defaults: " + finalConfigPath);
+            vertx.eventBus().publish("log", "MCP config file not found, using defaults: " + finalConfigPath + ",2,McpConfigLoader,System,System");
             // Wrap default config creation in executeBlocking
             vertx.<JsonObject>executeBlocking(() -> {
                 return getDefaultConfig();
@@ -74,14 +74,14 @@ public class McpConfigLoader {
                         JsonObject config = new JsonObject(ar.result());
                         return mergeWithEnvironment(config);
                     } catch (Exception e) {
-                        System.err.println("Failed to parse MCP config: " + e.getMessage());
+                        vertx.eventBus().publish("log", "Failed to parse MCP config: " + e.getMessage() + ",0,McpConfigLoader,System,System");
                         return getDefaultConfig();
                     }
                 }, false)
                 .onComplete(parseResult -> {
                     if (parseResult.succeeded()) {
                         cachedConfig = parseResult.result();
-                        System.out.println("Loaded MCP configuration from: " + finalConfigPath);
+                        vertx.eventBus().publish("log", "Loaded MCP configuration from: " + finalConfigPath + ",2,McpConfigLoader,System,System");
                         promise.complete(cachedConfig);
                     } else {
                         // Fallback to default on parse failure
@@ -93,7 +93,7 @@ public class McpConfigLoader {
                     }
                 });
             } else {
-                System.err.println("Failed to read MCP config: " + ar.cause().getMessage());
+                vertx.eventBus().publish("log", "Failed to read MCP config: " + ar.cause().getMessage() + ",0,McpConfigLoader,System,System");
                 // Wrap default config creation in executeBlocking
                 vertx.<JsonObject>executeBlocking(() -> getDefaultConfig(), false)
                 .onComplete(defaultResult -> {

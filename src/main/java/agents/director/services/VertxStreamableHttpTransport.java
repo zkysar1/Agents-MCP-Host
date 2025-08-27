@@ -71,21 +71,21 @@ public class VertxStreamableHttpTransport {
                     if (response.statusCode() == 202 || response.statusCode() == 200) {
                         try {
                             JsonObject body = response.bodyAsJsonObject();
-                            System.out.println("[VertxStreamableHttpTransport] Response: " + body.encodePrettily());
+                            vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Response: " + body.encodePrettily() + ",2,VertxStreamableHttpTransport,System,System");
                             promise.complete(body);
                         } catch (Exception e) {
-                            System.err.println("[VertxStreamableHttpTransport] Failed to parse response: " + response.bodyAsString());
+                            vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Failed to parse response: " + response.bodyAsString() + ",0,VertxStreamableHttpTransport,System,System");
                             promise.fail("Failed to parse response: " + e.getMessage());
                         }
                     } else if (response.statusCode() == 400) {
-                        System.err.println("[VertxStreamableHttpTransport] Bad request (400): " + response.bodyAsString());
+                        vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Bad request (400): " + response.bodyAsString() + ",0,VertxStreamableHttpTransport,System,System");
                         promise.fail("Bad request: " + response.bodyAsString());
                     } else {
-                        System.err.println("[VertxStreamableHttpTransport] Unexpected status " + response.statusCode() + ": " + response.bodyAsString());
+                        vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Unexpected status " + response.statusCode() + ": " + response.bodyAsString() + ",0,VertxStreamableHttpTransport,System,System");
                         promise.fail("Unexpected status: " + response.statusCode());
                     }
                 } else {
-                    System.err.println("[VertxStreamableHttpTransport] Request failed: " + ar.cause().getMessage());
+                    vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Request failed: " + ar.cause().getMessage() + ",0,VertxStreamableHttpTransport,System,System");
                     promise.fail(ar.cause());
                 }
             });
@@ -123,7 +123,7 @@ public class VertxStreamableHttpTransport {
                         promise.fail("Failed to start SSE stream: " + response.statusCode());
                     }
                 } else {
-                    System.err.println("[VertxStreamableHttpTransport] Request failed: " + ar.cause().getMessage());
+                    vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Request failed: " + ar.cause().getMessage() + ",0,VertxStreamableHttpTransport,System,System");
                     promise.fail(ar.cause());
                 }
             });
@@ -152,7 +152,7 @@ public class VertxStreamableHttpTransport {
                     JsonObject event = new JsonObject(eventData.toString());
                     handler.accept(event);
                 } catch (Exception e) {
-                    System.err.println("Failed to parse SSE event: " + e.getMessage());
+                    vertx.eventBus().publish("log", "Failed to parse SSE event: " + e.getMessage() + ",0,VertxStreamableHttpTransport,System,System");
                 }
                 eventData.setLength(0);
             }
@@ -173,14 +173,14 @@ public class VertxStreamableHttpTransport {
             if (response.containsKey("result")) {
                 JsonObject result = response.getJsonObject("result");
                 JsonArray tools = result.getJsonArray("tools", new JsonArray());
-                System.out.println("[VertxStreamableHttpTransport] Received " + tools.size() + " tools from server");
+                vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Received " + tools.size() + " tools from server" + ",2,VertxStreamableHttpTransport,System,System");
                 return tools;
             } else if (response.containsKey("error")) {
                 JsonObject error = response.getJsonObject("error");
-                System.err.println("[VertxStreamableHttpTransport] Error listing tools: " + error.getString("message"));
+                vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Error listing tools: " + error.getString("message") + ",0,VertxStreamableHttpTransport,System,System");
                 return new JsonArray();
             }
-            System.err.println("[VertxStreamableHttpTransport] Unexpected response format: " + response.encode());
+            vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Unexpected response format: " + response.encode() + ",0,VertxStreamableHttpTransport,System,System");
             return new JsonArray();
         });
     }
@@ -205,7 +205,7 @@ public class VertxStreamableHttpTransport {
                 JsonObject error = response.getJsonObject("error");
                 String errorMessage = error.getString("message", "Unknown error");
                 int errorCode = error.getInteger("code", -32000);
-                System.err.println("[VertxStreamableHttpTransport] Tool call error: " + errorMessage);
+                vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Tool call error: " + errorMessage + ",0,VertxStreamableHttpTransport,System,System");
                 
                 // Return error in a structured format
                 return new JsonObject()
@@ -215,7 +215,7 @@ public class VertxStreamableHttpTransport {
                     .put("originalError", error);
             }
             // Unexpected response format
-            System.err.println("[VertxStreamableHttpTransport] Unexpected response format for tool call: " + response.encode());
+            vertx.eventBus().publish("log", "[VertxStreamableHttpTransport] Unexpected response format for tool call: " + response.encode() + ",0,VertxStreamableHttpTransport,System,System");
             return new JsonObject()
                 .put("isError", true)
                 .put("error", "Unexpected response format: no result or error field");

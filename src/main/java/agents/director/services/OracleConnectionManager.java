@@ -90,7 +90,7 @@ public class OracleConnectionManager {
      */
     public Future<Void> initialize(Vertx vertx) {
         this.vertx = vertx;
-        Promise<Void> promise = Promise.promise();
+        Promise<Void> promise = Promise.<Void>promise();
         
         // Quick check if already initialized and healthy
         if (initialized && isConnectionHealthy()) {
@@ -136,7 +136,7 @@ public class OracleConnectionManager {
                 if (poolExists) {
                     // Pool exists - try to reuse it
                     try {
-                        System.out.println("[OracleConnectionManager] Found existing pool 'OracleAgentPool', attempting to reuse...");
+                        vertx.eventBus().publish("log", "[OracleConnectionManager] Found existing pool 'OracleAgentPool', attempting to reuse..." + ",2,OracleConnectionManager,Database,System");
                         
                         // Get existing pool reference
                         // Note: getConnectionPool returns UniversalConnectionPoolAdapter which implements PoolDataSource
@@ -153,20 +153,20 @@ public class OracleConnectionManager {
                                     vertx.eventBus().publish("log", "Reusing existing healthy Oracle connection pool,1,OracleConnectionManager,StartUp,Database");
                                 }
                                 
-                                System.out.println("[OracleConnectionManager] Successfully reusing existing healthy connection pool");
+                                vertx.eventBus().publish("log", "[OracleConnectionManager] Successfully reusing existing healthy connection pool" + ",2,OracleConnectionManager,Database,System");
                                 return null; // Success - reused existing pool
                             }
                         }
                     } catch (Exception e) {
                         // Existing pool is unhealthy - need to destroy and recreate
-                        System.out.println("[OracleConnectionManager] Existing pool unhealthy: " + e.getMessage());
-                        System.out.println("[OracleConnectionManager] Destroying unhealthy pool and creating new one...");
+                        vertx.eventBus().publish("log", "[OracleConnectionManager] Existing pool unhealthy: " + e.getMessage() + ",2,OracleConnectionManager,Database,System");
+                        vertx.eventBus().publish("log", "[OracleConnectionManager] Destroying unhealthy pool and creating new one..." + ",2,OracleConnectionManager,Database,System");
                         
                         try {
                             mgr.destroyConnectionPool("OracleAgentPool");
                         } catch (UniversalConnectionPoolException uce) {
                             // Ignore - pool might already be in bad state
-                            System.out.println("[OracleConnectionManager] Warning during pool destroy: " + uce.getMessage());
+                            vertx.eventBus().publish("log", "[OracleConnectionManager] Warning during pool destroy: " + uce.getMessage() + ",1,OracleConnectionManager,Database,System");
                         }
                         
                         poolExists = false; // Will create new one below
@@ -175,7 +175,7 @@ public class OracleConnectionManager {
                 
                 // Create new pool only if needed
                 if (!poolExists) {
-                    System.out.println("[OracleConnectionManager] Creating new connection pool...");
+                    vertx.eventBus().publish("log", "[OracleConnectionManager] Creating new connection pool..." + ",2,OracleConnectionManager,Database,System");
                     
                     // Load Oracle driver
                     Class.forName("oracle.jdbc.driver.OracleDriver");
@@ -212,7 +212,7 @@ public class OracleConnectionManager {
                                 " (min=" + MIN_POOL_SIZE + ", max=" + MAX_POOL_SIZE + "),1,OracleConnectionManager,StartUp,Database");
                         }
                         
-                        System.out.println("[OracleConnectionManager] Successfully created and tested new connection pool");
+                        vertx.eventBus().publish("log", "[OracleConnectionManager] Successfully created and tested new connection pool" + ",2,OracleConnectionManager,Database,System");
                         return null; // Return null for Void
                     }
                 }
@@ -289,7 +289,7 @@ public class OracleConnectionManager {
      * Execute a query and return results as JSON with streaming support
      */
     public Future<JsonArray> executeQuery(String sql, String streamId, Object... params) {
-        Promise<JsonArray> promise = Promise.promise();
+        Promise<JsonArray> promise = Promise.<JsonArray>promise();
         
         if (!initialized) {
             promise.fail("Connection pool not initialized");
@@ -355,7 +355,7 @@ public class OracleConnectionManager {
      * Execute an update (INSERT, UPDATE, DELETE) and return affected rows
      */
     public Future<Integer> executeUpdate(String sql, Object... params) {
-        Promise<Integer> promise = Promise.promise();
+        Promise<Integer> promise = Promise.<Integer>promise();
         
         if (!initialized) {
             promise.fail("Connection pool not initialized");
@@ -623,7 +623,7 @@ public class OracleConnectionManager {
                     // This allows other parts of the application to potentially reuse it
                     poolDataSource = null;
                     
-                    System.out.println("[OracleConnectionManager] Released reference to pool '" + poolName + "' (pool remains active for reuse)");
+                    vertx.eventBus().publish("log", "[OracleConnectionManager] Released reference to pool '" + poolName + "' (pool remains active for reuse)" + ",2,OracleConnectionManager,Database,System");
                     
                     if (vertx != null) {
                         vertx.eventBus().publish("log", "Released Oracle pool reference (pool remains active for reuse),1,OracleConnectionManager,Shutdown,Database");
@@ -755,7 +755,7 @@ public class OracleConnectionManager {
         retryCount++;
         lastConnectionAttempt = System.currentTimeMillis();
         
-        System.out.println("[OracleConnectionManager] Attempting reconnection (attempt " + retryCount + "/" + MAX_RETRY_COUNT + ")");
+        vertx.eventBus().publish("log", "[OracleConnectionManager] Attempting reconnection (attempt " + retryCount + "/" + MAX_RETRY_COUNT + ")" + ",1,OracleConnectionManager,Database,System");
         
         // If already initialized but not healthy, try to reset
         if (initialized) {
@@ -763,20 +763,20 @@ public class OracleConnectionManager {
                 .compose(v -> initialize(vertx))
                 .onSuccess(v -> {
                     retryCount = 0; // Reset on success
-                    System.out.println("[OracleConnectionManager] Reconnection successful");
+                    vertx.eventBus().publish("log", "[OracleConnectionManager] Reconnection successful" + ",2,OracleConnectionManager,Database,System");
                 })
                 .onFailure(err -> {
-                    System.err.println("[OracleConnectionManager] Reconnection failed: " + err.getMessage());
+                    vertx.eventBus().publish("log", "[OracleConnectionManager] Reconnection failed: " + err.getMessage() + ",0,OracleConnectionManager,Database,System");
                 });
         } else {
             // Not initialized, just try to initialize
             return initialize(vertx)
                 .onSuccess(v -> {
                     retryCount = 0; // Reset on success
-                    System.out.println("[OracleConnectionManager] Connection successful");
+                    vertx.eventBus().publish("log", "[OracleConnectionManager] Connection successful" + ",2,OracleConnectionManager,Database,System");
                 })
                 .onFailure(err -> {
-                    System.err.println("[OracleConnectionManager] Connection failed: " + err.getMessage());
+                    vertx.eventBus().publish("log", "[OracleConnectionManager] Connection failed: " + err.getMessage() + ",0,OracleConnectionManager,Database,System");
                 });
         }
     }
