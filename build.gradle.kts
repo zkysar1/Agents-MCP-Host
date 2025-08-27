@@ -9,7 +9,7 @@ plugins {
   id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
-group = "com.agentsmcphost"
+group = "com.agents.director"
 version = "1.0.0"
 
 repositories {
@@ -24,7 +24,7 @@ val vertxVersion = "4.5.7"
 val awsSDKVersion = "2.25.31"
 val mcpVersion = "0.11.0"
 val reactorVersion = "3.6.0"
-val launcherClassName = "AgentsMCPHost.Driver"
+val launcherClassName = "agents.director.Driver"
 
 application {
   mainClass.set(launcherClassName)
