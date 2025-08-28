@@ -117,60 +117,54 @@ public class Driver {
     System.out.println("[Driver] Deploying all MCP servers...");
     
     // Import the server classes
-    Promise<Void> serversPromise = Promise.<Void>promise();
     List<Future> deploymentFutures = new ArrayList<>();
     
     int serverCount = 0;
-    
-    // TEMPORARILY COMMENT OUT ORACLE SERVERS TO FIND MEMORY LEAK
-    boolean deployOracleServers = false; // Set to true to include Oracle servers
-    
-    if (deployOracleServers) {
-      // Deploy OracleQueryExecutionServer (Worker)
-      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleQueryExecutionServer");
-      deploymentFutures.add(
-        vertx.deployVerticle(
-          "agents.director.mcp.servers.OracleQueryExecutionServer",
-          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1) // Reduced from 5
-        )
-      );
-      
-      // Deploy OracleQueryAnalysisServer (Worker)
-      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleQueryAnalysisServer");
-      deploymentFutures.add(
-        vertx.deployVerticle(
-          "agents.director.mcp.servers.OracleQueryAnalysisServer",
-          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
-        )
-      );
-      
-      // Deploy OracleSchemaIntelligenceServer (Worker)
-      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSchemaIntelligenceServer");
-      deploymentFutures.add(
-        vertx.deployVerticle(
-          "agents.director.mcp.servers.OracleSchemaIntelligenceServer",
-          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
-        )
-      );
-      
-      // Deploy OracleSQLGenerationServer (Worker)
-      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSQLGenerationServer");
-      deploymentFutures.add(
-        vertx.deployVerticle(
-          "agents.director.mcp.servers.OracleSQLGenerationServer",
-          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
-        )
-      );
-      
-      // Deploy OracleSQLValidationServer (Worker)
-      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSQLValidationServer");
-      deploymentFutures.add(
-        vertx.deployVerticle(
-          "agents.director.mcp.servers.OracleSQLValidationServer",
-          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
-        )
-      );
-    }
+
+    // Deploy OracleQueryExecutionServer (Worker)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleQueryExecutionServer");
+    deploymentFutures.add(
+            vertx.deployVerticle(
+                    "agents.director.mcp.servers.OracleQueryExecutionServer",
+                    new DeploymentOptions().setWorker(true).setWorkerPoolSize(1) // Reduced from 5
+            )
+    );
+
+    // Deploy OracleQueryAnalysisServer (Worker)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleQueryAnalysisServer");
+    deploymentFutures.add(
+            vertx.deployVerticle(
+                    "agents.director.mcp.servers.OracleQueryAnalysisServer",
+                    new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+            )
+    );
+
+    // Deploy OracleSchemaIntelligenceServer (Worker)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSchemaIntelligenceServer");
+    deploymentFutures.add(
+            vertx.deployVerticle(
+                    "agents.director.mcp.servers.OracleSchemaIntelligenceServer",
+                    new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+            )
+    );
+
+    // Deploy OracleSQLGenerationServer (Worker)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSQLGenerationServer");
+    deploymentFutures.add(
+            vertx.deployVerticle(
+                    "agents.director.mcp.servers.OracleSQLGenerationServer",
+                    new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+            )
+    );
+
+    // Deploy OracleSQLValidationServer (Worker)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSQLValidationServer");
+    deploymentFutures.add(
+            vertx.deployVerticle(
+                    "agents.director.mcp.servers.OracleSQLValidationServer",
+                    new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+            )
+    );
     
     // Deploy BusinessMappingServer (Regular)
     System.out.println("[Driver] Deploying server " + (++serverCount) + ": BusinessMappingServer");
@@ -180,7 +174,7 @@ public class Driver {
         new DeploymentOptions().setWorker(false)
       )
     );
-    
+
     // Deploy QueryIntentEvaluationServer (Regular)
     System.out.println("[Driver] Deploying server " + (++serverCount) + ": QueryIntentEvaluationServer");
     deploymentFutures.add(
@@ -189,7 +183,7 @@ public class Driver {
         new DeploymentOptions().setWorker(false)
       )
     );
-    
+
     // Deploy StrategyGenerationServer (Worker - uses LLM)
     System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyGenerationServer");
     deploymentFutures.add(
@@ -198,7 +192,7 @@ public class Driver {
         new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
       )
     );
-    
+
     // Deploy IntentAnalysisServer (Worker - uses LLM)
     System.out.println("[Driver] Deploying server " + (++serverCount) + ": IntentAnalysisServer");
     deploymentFutures.add(
@@ -207,7 +201,7 @@ public class Driver {
         new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
       )
     );
-    
+
     // Deploy StrategyOrchestratorServer (Regular - manages execution)
     System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyOrchestratorServer");
     deploymentFutures.add(
@@ -216,7 +210,7 @@ public class Driver {
         new DeploymentOptions().setWorker(false)
       )
     );
-    
+
     // Deploy StrategyLearningServer (Regular - tracks metrics)
     System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyLearningServer");
     deploymentFutures.add(
@@ -230,6 +224,7 @@ public class Driver {
     CompositeFuture.all(deploymentFutures).onComplete(ar -> {
       if (ar.succeeded()) {
         LogUtil.logInfo(vertx, "All MCP servers deployed successfully", "Driver", "StartUp", "MCP", true);
+        System.out.println("All MCP servers deployed successfully");
         vertx.eventBus().publish("mcp.servers.ready", new JsonObject()
           .put("serverCount", deploymentFutures.size())
           .put("timestamp", System.currentTimeMillis()));
@@ -244,37 +239,33 @@ public class Driver {
     
     // Deploy core services first
     System.out.println("[Driver] Setting up Logger...");
-    setLogger();
+    //setLogger();
     System.out.println("[Driver] Setting up LLM API Service...");
-    setLlmAPIService();
+    //setLlmAPIService();
     System.out.println("[Driver] LLM API Service setup complete");
     
     // Deploy the 3 host applications
     List<Future> hostFutures = new ArrayList<>();
-    
-    // TEMPORARILY SKIP ORACLE HOSTS TO ISOLATE ERROR
-    boolean deployOracleHosts = false; // Set to true to deploy Oracle hosts
-    
-    if (deployOracleHosts) {
-      // Deploy OracleDBAnswererHost
-      System.out.println("[Driver] Deploying OracleDBAnswererHost...");
-      hostFutures.add(
-        vertx.deployVerticle(
-          "agents.director.hosts.OracleDBAnswererHost",
-          new DeploymentOptions()
-        )
-      );
-      
-      // Deploy OracleSQLBuilderHost
-      System.out.println("[Driver] Deploying OracleSQLBuilderHost...");
-      hostFutures.add(
-        vertx.deployVerticle(
-          "agents.director.hosts.OracleSQLBuilderHost",
-          new DeploymentOptions()
-        )
-      );
-    }
-    
+
+
+    // Deploy OracleDBAnswererHost
+    System.out.println("[Driver] Deploying OracleDBAnswererHost...");
+    hostFutures.add(
+            vertx.deployVerticle(
+                    "agents.director.hosts.OracleDBAnswererHost",
+                    new DeploymentOptions()
+            )
+    );
+
+    // Deploy OracleSQLBuilderHost
+    System.out.println("[Driver] Deploying OracleSQLBuilderHost...");
+    hostFutures.add(
+            vertx.deployVerticle(
+                    "agents.director.hosts.OracleSQLBuilderHost",
+                    new DeploymentOptions()
+            )
+    );
+
     // Deploy ToolFreeDirectLLMHost
     System.out.println("[Driver] Deploying ToolFreeDirectLLMHost...");
     hostFutures.add(
@@ -317,6 +308,7 @@ public class Driver {
       mcpServersReady = true;
       LogUtil.logInfo(vertx, "All MCP Servers Ready", "Driver", "StartUp", "MCP", true);
       // Deploy hosts after servers are ready
+      System.out.println("All MCP Servers Ready, deploy host");
       deployHosts();
     });
     
@@ -336,7 +328,6 @@ public class Driver {
       vertx.eventBus().publish("log", "MCP Router: READY" + ",2,Driver,System,System");
       vertx.eventBus().publish("log", "MCP Servers: READY" + ",2,Driver,System,System");
       vertx.eventBus().publish("log", "Host Applications: READY" + ",2,Driver,System,System");
-      LogUtil.logCritical(vertx, "MCP system startup complete", "Driver", "StartUp", "System");
       
       // Publish the final system ready event
       vertx.eventBus().publish("system.fully.ready", new JsonObject()

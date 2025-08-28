@@ -94,14 +94,6 @@ public class OracleConnectionManager {
         
         System.out.println("[OracleConnectionManager] Initialize called from: " + Thread.currentThread().getName());
         
-        // Check if we should skip Oracle initialization
-        if ("true" == "true") {
-            System.out.println("[OracleConnectionManager] SKIP_ORACLE=true, skipping Oracle initialization");
-            initialized = false;
-            promise.complete();
-            return promise.future();
-        }
-        
         // Quick check if already initialized and healthy
         if (initialized && isConnectionHealthy()) {
             System.out.println("[OracleConnectionManager] Already initialized and healthy, skipping initialization");
