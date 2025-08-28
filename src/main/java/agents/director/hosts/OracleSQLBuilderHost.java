@@ -119,35 +119,35 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
             "OracleQueryAnalysis",
             baseUrl + "/mcp/servers/oracle-query-analysis"
         );
-        clientFutures.add(deployClient(analysisClient, "oracle-query-analysis"));
+        clientFutures.add(deployClient(analysisClient, "OracleQueryAnalysis"));
         
         // Schema Intelligence Client
         UniversalMCPClient schemaClient = new UniversalMCPClient(
             "OracleSchemaIntelligence",
             baseUrl + "/mcp/servers/oracle-schema-intel"
         );
-        clientFutures.add(deployClient(schemaClient, "oracle-schema-intel"));
+        clientFutures.add(deployClient(schemaClient, "OracleSchemaIntelligence"));
         
         // Business Mapping Client
         UniversalMCPClient businessClient = new UniversalMCPClient(
             "BusinessMapping",
             baseUrl + "/mcp/servers/business-map"
         );
-        clientFutures.add(deployClient(businessClient, "business-map"));
+        clientFutures.add(deployClient(businessClient, "BusinessMapping"));
         
         // SQL Generation Client
         UniversalMCPClient sqlGenClient = new UniversalMCPClient(
             "OracleSQLGeneration",
             baseUrl + "/mcp/servers/oracle-sql-gen"
         );
-        clientFutures.add(deployClient(sqlGenClient, "oracle-sql-gen"));
+        clientFutures.add(deployClient(sqlGenClient, "OracleSQLGeneration"));
         
         // SQL Validation Client
         UniversalMCPClient sqlValClient = new UniversalMCPClient(
             "OracleSQLValidation",
             baseUrl + "/mcp/servers/oracle-sql-val"
         );
-        clientFutures.add(deployClient(sqlValClient, "oracle-sql-val"));
+        clientFutures.add(deployClient(sqlValClient, "OracleSQLValidation"));
         
         // Dynamic Strategy Generation Clients
         // Strategy Generation Client
@@ -155,21 +155,21 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
             "StrategyGeneration",
             baseUrl + "/mcp/servers/strategy-gen"
         );
-        clientFutures.add(deployClient(strategyGenClient, "strategy-generation"));
+        clientFutures.add(deployClient(strategyGenClient, "StrategyGeneration"));
         
         // Intent Analysis Client
         UniversalMCPClient intentAnalysisClient = new UniversalMCPClient(
             "IntentAnalysis",
             baseUrl + "/mcp/servers/intent-analysis"
         );
-        clientFutures.add(deployClient(intentAnalysisClient, "intent-analysis"));
+        clientFutures.add(deployClient(intentAnalysisClient, "IntentAnalysis"));
         
         // Strategy Learning Client (for recording SQL-only executions)
         UniversalMCPClient learningClient = new UniversalMCPClient(
             "StrategyLearning",
             baseUrl + "/mcp/servers/strategy-learning"
         );
-        clientFutures.add(deployClient(learningClient, "strategy-learning"));
+        clientFutures.add(deployClient(learningClient, "StrategyLearning"));
         
         // Wait for all clients
         CompositeFuture.all(clientFutures).onComplete(ar -> {
@@ -386,8 +386,8 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
     private Future<JsonObject> generateSQLBuilderStrategy(String query) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
-        UniversalMCPClient intentClient = mcpClients.get("intent-analysis");
-        UniversalMCPClient strategyGenClient = mcpClients.get("strategy-generation");
+        UniversalMCPClient intentClient = mcpClients.get("IntentAnalysis");
+        UniversalMCPClient strategyGenClient = mcpClients.get("StrategyGeneration");
         
         if (intentClient == null || strategyGenClient == null) {
             // Use fallback strategy
@@ -509,7 +509,7 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
      * Record execution for learning
      */
     private void recordSQLGenerationExecution(SQLBuildContext context, boolean success) {
-        UniversalMCPClient learningClient = mcpClients.get("strategy-learning");
+        UniversalMCPClient learningClient = mcpClients.get("StrategyLearning");
         if (learningClient != null && learningClient.isReady()) {
             JsonObject recordArgs = new JsonObject()
                 .put("strategy", new JsonObject()

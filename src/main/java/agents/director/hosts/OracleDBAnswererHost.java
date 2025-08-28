@@ -29,7 +29,8 @@ import java.util.stream.Collectors;
  */
 public class OracleDBAnswererHost extends AbstractVerticle {
     
-    
+    // Debug flag for verbose logging
+    private static final boolean DEBUG_RESPONSES = System.getProperty("oracledb.debug.responses", "false").equalsIgnoreCase("true");
     
     // MCP Clients for all servers
     private final Map<String, UniversalMCPClient> mcpClients = new ConcurrentHashMap<>();
@@ -56,6 +57,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         Map<String, JsonObject> stepResults = new HashMap<>();
         String currentStrategy;
         int currentStep = 0;
+        int stepsCompleted = 0; // Track actually completed steps
         long startTime;
         
         ConversationContext(String conversationId) {
@@ -132,49 +134,49 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             "QueryIntentEvaluation", 
             baseUrl + "/mcp/servers/query-intent"
         );
-        clientFutures.add(deployClient(intentClient, "query-intent"));
+        clientFutures.add(deployClient(intentClient, "QueryIntentEvaluation"));
         
         // Oracle Query Analysis Client
         UniversalMCPClient analysisClient = new UniversalMCPClient(
             "OracleQueryAnalysis",
             baseUrl + "/mcp/servers/oracle-query-analysis"
         );
-        clientFutures.add(deployClient(analysisClient, "oracle-query-analysis"));
+        clientFutures.add(deployClient(analysisClient, "OracleQueryAnalysis"));
         
         // Oracle Schema Intelligence Client
         UniversalMCPClient schemaClient = new UniversalMCPClient(
             "OracleSchemaIntelligence",
             baseUrl + "/mcp/servers/oracle-schema-intel"
         );
-        clientFutures.add(deployClient(schemaClient, "oracle-schema-intel"));
+        clientFutures.add(deployClient(schemaClient, "OracleSchemaIntelligence"));
         
         // Business Mapping Client
         UniversalMCPClient businessClient = new UniversalMCPClient(
             "BusinessMapping",
             baseUrl + "/mcp/servers/business-map"
         );
-        clientFutures.add(deployClient(businessClient, "business-map"));
+        clientFutures.add(deployClient(businessClient, "BusinessMapping"));
         
         // Oracle SQL Generation Client
         UniversalMCPClient sqlGenClient = new UniversalMCPClient(
             "OracleSQLGeneration",
             baseUrl + "/mcp/servers/oracle-sql-gen"
         );
-        clientFutures.add(deployClient(sqlGenClient, "oracle-sql-gen"));
+        clientFutures.add(deployClient(sqlGenClient, "OracleSQLGeneration"));
         
         // Oracle SQL Validation Client
         UniversalMCPClient sqlValClient = new UniversalMCPClient(
             "OracleSQLValidation",
             baseUrl + "/mcp/servers/oracle-sql-val"
         );
-        clientFutures.add(deployClient(sqlValClient, "oracle-sql-val"));
+        clientFutures.add(deployClient(sqlValClient, "OracleSQLValidation"));
         
         // Oracle Query Execution Client
         UniversalMCPClient execClient = new UniversalMCPClient(
             "OracleQueryExecution",
             baseUrl + "/mcp/servers/oracle-db"
         );
-        clientFutures.add(deployClient(execClient, "oracle-db"));
+        clientFutures.add(deployClient(execClient, "OracleQueryExecution"));
         
         // Dynamic Strategy Generation Clients
         // Strategy Generation Client
@@ -182,28 +184,28 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             "StrategyGeneration",
             baseUrl + "/mcp/servers/strategy-gen"
         );
-        clientFutures.add(deployClient(strategyGenClient, "strategy-generation"));
+        clientFutures.add(deployClient(strategyGenClient, "StrategyGeneration"));
         
         // Intent Analysis Client
         UniversalMCPClient intentAnalysisClient = new UniversalMCPClient(
             "IntentAnalysis",
             baseUrl + "/mcp/servers/intent-analysis"
         );
-        clientFutures.add(deployClient(intentAnalysisClient, "intent-analysis"));
+        clientFutures.add(deployClient(intentAnalysisClient, "IntentAnalysis"));
         
         // Strategy Orchestrator Client
         UniversalMCPClient orchestratorClient = new UniversalMCPClient(
             "StrategyOrchestrator",
             baseUrl + "/mcp/servers/strategy-orchestrator"
         );
-        clientFutures.add(deployClient(orchestratorClient, "strategy-orchestrator"));
+        clientFutures.add(deployClient(orchestratorClient, "StrategyOrchestrator"));
         
         // Strategy Learning Client
         UniversalMCPClient learningClient = new UniversalMCPClient(
             "StrategyLearning",
             baseUrl + "/mcp/servers/strategy-learning"
         );
-        clientFutures.add(deployClient(learningClient, "strategy-learning"));
+        clientFutures.add(deployClient(learningClient, "StrategyLearning"));
         
         // Wait for all clients to be ready
         CompositeFuture.all(clientFutures).onComplete(ar -> {
@@ -327,6 +329,37 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                     response.put("conversationId", conversationId);
                     response.put("duration", System.currentTimeMillis() - context.startTime);
                     
+                    // Log the final response
+                    String answer = response.getString("answer", "");
+                    String answerPreview = answer.length() > 500 ? answer.substring(0, 497) + "..." : answer;
+                    vertx.eventBus().publish("log", "Sending final response for conversation " + conversationId + 
+                        " with answer length: " + answer.length() + 
+                        " confidence: " + response.getDouble("confidence", 0.0) + ",2,OracleDBAnswererHost,Host,System");
+                    
+                    // Log the actual answer content
+                    vertx.eventBus().publish("log", "Answer content: " + answerPreview.replace("\n", " ") + ",3,OracleDBAnswererHost,Host,System");
+                    
+                    // Log additional response details
+                    if (response.containsKey("data")) {
+                        JsonObject data = response.getJsonObject("data");
+                        if (data != null && data.containsKey("rows")) {
+                            int rowCount = data.getJsonArray("rows").size();
+                            vertx.eventBus().publish("log", "Response includes " + rowCount + " data rows,3,OracleDBAnswererHost,Host,System");
+                        }
+                    }
+                    if (response.containsKey("executedSQL")) {
+                        String sqlPreview = response.getString("executedSQL", "");
+                        if (sqlPreview.length() > 100) {
+                            sqlPreview = sqlPreview.substring(0, 97) + "...";
+                        }
+                        vertx.eventBus().publish("log", "Executed SQL: " + sqlPreview.replace("\n", " ") + ",3,OracleDBAnswererHost,Host,System");
+                    }
+                    
+                    // Debug mode - log full response
+                    if (DEBUG_RESPONSES) {
+                        vertx.eventBus().publish("log", "DEBUG - Full response JSON: " + response.encode() + ",3,OracleDBAnswererHost,Host,Debug");
+                    }
+                    
                     // Publish complete event if streaming
                     if (sessionId != null && streaming) {
                         publishStreamingEvent(conversationId, "tool.complete", new JsonObject()
@@ -335,12 +368,29 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                             .put("resultSummary", "Completed query with confidence " + 
                                 response.getDouble("confidence", 0.0)));
                         
-                        // Publish final event
-                        publishStreamingEvent(conversationId, "final", new JsonObject()
+                        // Publish final event with full response
+                        JsonObject finalEvent = new JsonObject()
                             .put("content", response.getString("answer", ""))
                             .put("conversationId", conversationId)
                             .put("confidence", response.getDouble("confidence", 0.0))
-                            .put("hasData", response.containsKey("data")));
+                            .put("hasData", response.containsKey("data"));
+                        
+                        // Include the actual data if present
+                        if (response.containsKey("data")) {
+                            finalEvent.put("data", response.getJsonObject("data"));
+                        }
+                        
+                        // Include executed SQL if present
+                        if (response.containsKey("executedSQL")) {
+                            finalEvent.put("executedSQL", response.getString("executedSQL"));
+                        }
+                        
+                        // Include any other response fields that might be useful
+                        if (response.containsKey("duration")) {
+                            finalEvent.put("duration", response.getLong("duration"));
+                        }
+                        
+                        publishStreamingEvent(conversationId, "final", finalEvent);
                     }
                     
                     message.reply(response);
@@ -378,6 +428,13 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 context.currentStrategy = strategy.getString("selectedStrategy");
                 vertx.eventBus().publish("log", "Selected strategy: " + context.currentStrategy + " for conversation " + context.conversationId + ",2,OracleDBAnswererHost,Host,System");
                 
+                // Log strategy details
+                JsonObject strategyObj = strategy.getJsonObject("strategy");
+                if (strategyObj != null) {
+                    JsonArray steps = strategyObj.getJsonArray("steps", new JsonArray());
+                    vertx.eventBus().publish("log", "Strategy contains " + steps.size() + " steps to execute,3,OracleDBAnswererHost,Host,System");
+                }
+                
                 // Publish strategy selection event if streaming
                 if (context.sessionId != null && context.streaming) {
                     String method = strategy.getString("method", "unknown");
@@ -396,9 +453,18 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 }
                 
                 // Execute the selected strategy
+                vertx.eventBus().publish("log", "Calling executeStrategy for conversation " + context.conversationId + ",3,OracleDBAnswererHost,Host,System");
                 return executeStrategy(context, strategy, streaming);
             })
-            .onComplete(promise);
+            .onComplete(ar -> {
+                if (ar.succeeded()) {
+                    vertx.eventBus().publish("log", "Pipeline completed successfully for conversation " + context.conversationId + ",2,OracleDBAnswererHost,Host,System");
+                    promise.complete(ar.result());
+                } else {
+                    vertx.eventBus().publish("log", "ERROR: Pipeline failed for conversation " + context.conversationId + ": " + ar.cause().getMessage() + ",0,OracleDBAnswererHost,Host,System");
+                    promise.fail(ar.cause());
+                }
+            });
         
         return promise.future();
     }
@@ -415,8 +481,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 if (ar.succeeded()) {
                     promise.complete(ar.result());
                 } else {
-                    vertx.eventBus().publish("log", "Dynamic strategy generation failed, using fallback" + ",1,OracleDBAnswererHost,Host,System");
-                    JsonObject fallback = getFallbackStrategySelection();
+                    vertx.eventBus().publish("log", "Dynamic strategy generation failed, requesting fallback generation" + ",1,OracleDBAnswererHost,Host,System");
                     
                     // Add streaming notification about fallback
                     if (context.sessionId != null && context.streaming) {
@@ -428,7 +493,9 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                                 .put("method", "fallback")));
                     }
                     
-                    promise.complete(fallback);
+                    // Instead of returning a non-existent strategy, force generate with fallback
+                    generateDynamicStrategyWithFallback(context, query)
+                        .onComplete(promise);
                 }
             });
         
@@ -442,8 +509,8 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
         // Step 1: Analyze intent
-        UniversalMCPClient intentClient = mcpClients.get("intent-analysis");
-        UniversalMCPClient strategyGenClient = mcpClients.get("strategy-generation");
+        UniversalMCPClient intentClient = mcpClients.get("IntentAnalysis");
+        UniversalMCPClient strategyGenClient = mcpClients.get("StrategyGeneration");
         
         if (intentClient == null || strategyGenClient == null) {
             promise.fail("Required strategy generation clients not available");
@@ -526,8 +593,29 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             })
             .onComplete(ar -> {
                 if (ar.succeeded()) {
-                    JsonObject generatedStrategy = ar.result();
-                    context.storeStepResult("generated_strategy", generatedStrategy);
+                    JsonObject toolResponse = ar.result();
+                    context.storeStepResult("generated_strategy", toolResponse);
+                    
+                    // Extract the actual strategy from the result field
+                    JsonObject generatedStrategy = toolResponse.getJsonObject("result");
+                    if (generatedStrategy == null) {
+                        vertx.eventBus().publish("log", "ERROR: No strategy found in tool response! Response: " + 
+                            toolResponse.encodePrettily() + ",0,OracleDBAnswererHost,Host,System");
+                        promise.fail("No strategy found in tool response");
+                        return;
+                    }
+                    
+                    // Validate the generated strategy has steps
+                    JsonArray steps = generatedStrategy.getJsonArray("steps", new JsonArray());
+                    if (steps.isEmpty()) {
+                        vertx.eventBus().publish("log", "ERROR: Generated strategy has no steps! Strategy: " + 
+                            generatedStrategy.encodePrettily() + ",0,OracleDBAnswererHost,Host,System");
+                        promise.fail("Generated strategy has no steps");
+                        return;
+                    }
+                    
+                    vertx.eventBus().publish("log", "Generated strategy '" + generatedStrategy.getString("name", "unknown") + 
+                        "' with " + steps.size() + " steps,2,OracleDBAnswererHost,Host,System");
                     
                     // Format result for compatibility
                     JsonObject result = new JsonObject()
@@ -560,13 +648,61 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         return promise.future();
     }
     
-    private JsonObject getFallbackStrategySelection() {
-        return new JsonObject()
-            .put("selectedStrategy", "oracle_full_pipeline")
-            .put("selectedHost", "oracledbanswerer")
-            .put("confidence", 0.5)
+    /**
+     * Generate a strategy using the fallback mechanism when dynamic generation fails
+     */
+    private Future<JsonObject> generateDynamicStrategyWithFallback(ConversationContext context, String query) {
+        Promise<JsonObject> promise = Promise.<JsonObject>promise();
+        
+        // Create a simple fallback strategy directly
+        JsonObject fallbackStrategy = new JsonObject()
+            .put("name", "Fallback Complex Pipeline")
+            .put("description", "Comprehensive query processing with validation")
             .put("method", "fallback")
-            .put("reasoning", "Using default pipeline");
+            .put("steps", new JsonArray()
+                .add(createStep(1, "evaluate_query_intent", "QueryIntentEvaluation", "Deep intent analysis"))
+                .add(createStep(2, "analyze_query", "OracleQueryAnalysis", "Analyze query structure"))
+                .add(createStep(3, "match_oracle_schema", "OracleSchemaIntelligence", "Find all related tables"))
+                .add(createStep(4, "infer_table_relationships", "OracleSchemaIntelligence", "Discover relationships", true))
+                .add(createStep(5, "map_business_terms", "BusinessMapping", "Map business terminology", true))
+                .add(createStep(6, "generate_oracle_sql", "OracleSQLGeneration", "Generate complex SQL"))
+                .add(createStep(7, "optimize_oracle_sql", "OracleSQLGeneration", "Optimize for performance", true))
+                .add(createStep(8, "validate_oracle_sql", "OracleSQLValidation", "Validate SQL"))
+                .add(createStep(9, "run_oracle_query", "OracleQueryExecution", "Execute with monitoring"))
+                .add(createStep(10, "format_results", "OracleQueryExecution", "Format response", true)))
+            .put("decision_points", new JsonArray())
+            .put("adaptation_rules", new JsonObject()
+                .put("allow_runtime_modification", true)
+                .put("max_retries_per_step", 2))
+            .put("generation_method", "fallback_hardcoded");
+        
+        // Format result for compatibility
+        JsonObject result = new JsonObject()
+            .put("selectedStrategy", "dynamic_generated")
+            .put("strategy", fallbackStrategy)
+            .put("confidence", 0.7)
+            .put("method", "fallback")
+            .put("reasoning", "Using hardcoded fallback strategy due to generation failure")
+            .put("generation_method", "fallback_hardcoded");
+        
+        vertx.eventBus().publish("log", "Generated hardcoded fallback strategy with " + 
+            fallbackStrategy.getJsonArray("steps").size() + " steps,1,OracleDBAnswererHost,Host,System");
+        
+        promise.complete(result);
+        return promise.future();
+    }
+    
+    private static JsonObject createStep(int stepNum, String tool, String server, String description) {
+        return createStep(stepNum, tool, server, description, false);
+    }
+    
+    private static JsonObject createStep(int stepNum, String tool, String server, String description, boolean optional) {
+        return new JsonObject()
+            .put("step", stepNum)
+            .put("tool", tool)
+            .put("server", server)
+            .put("description", description)
+            .put("optional", optional);
     }
     
     /**
@@ -576,6 +712,9 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                                              JsonObject strategySelection, 
                                              boolean streaming) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
+        
+        vertx.eventBus().publish("log", "executeStrategy called for conversation " + context.conversationId + 
+            " with strategy selection: " + strategySelection.encodePrettily() + ",3,OracleDBAnswererHost,Host,System");
         
         String strategyName = strategySelection.getString("selectedStrategy");
         JsonObject strategy;
@@ -607,9 +746,22 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             steps = strategy.getJsonArray("steps", new JsonArray());
         }
         
+        // Log execution start for static strategies
+        vertx.eventBus().publish("log", "Starting strategy execution: " + strategyName + 
+            " with " + steps.size() + " steps (static strategy) for conversation " + context.conversationId + ",2,OracleDBAnswererHost,Host,System");
+        
+        // Reset step counters
+        context.currentStep = 0;
+        context.stepsCompleted = 0;
+        
         // Execute steps sequentially (traditional approach)
         executeSteps(context, steps, 0, new JsonObject())
             .compose(finalResult -> {
+                // Log completion
+                vertx.eventBus().publish("log", "Strategy execution complete: " + strategyName + 
+                    " - " + context.stepsCompleted + " steps executed (static strategy) for conversation " + 
+                    context.conversationId + ",2,OracleDBAnswererHost,Host,System");
+                
                 // Compose the final answer
                 return composeFinalAnswer(context, finalResult, streaming);
             })
@@ -626,22 +778,62 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                                                      boolean streaming) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
-        UniversalMCPClient orchestratorClient = mcpClients.get("strategy-orchestrator");
-        UniversalMCPClient learningClient = mcpClients.get("strategy-learning");
+        UniversalMCPClient orchestratorClient = mcpClients.get("StrategyOrchestrator");
+        UniversalMCPClient learningClient = mcpClients.get("StrategyLearning");
         
         JsonArray steps = strategy.getJsonArray("steps", new JsonArray());
+        String strategyName = strategy.getString("name", "dynamic_strategy");
+        
+        // Log strategy execution start
+        vertx.eventBus().publish("log", "Starting strategy execution: " + strategyName + 
+            " with " + steps.size() + " steps for conversation " + context.conversationId + ",2,OracleDBAnswererHost,Host,System");
+        
+        // Publish streaming event for strategy execution start
+        if (context.sessionId != null && context.streaming) {
+            publishStreamingEvent(context.conversationId, "progress", new JsonObject()
+                .put("step", "strategy_execution_start")
+                .put("message", "Starting strategy execution: " + strategyName)
+                .put("details", new JsonObject()
+                    .put("strategyName", strategyName)
+                    .put("totalSteps", steps.size())
+                    .put("method", "adaptive")));
+        }
+        
+        // Reset step counters
+        context.currentStep = 0;
+        context.stepsCompleted = 0;
         
         // Execute with adaptation
         executeStepsWithAdaptation(context, strategy, steps, 0, new JsonObject())
             .compose(finalResult -> {
+                // Log strategy execution completion
+                vertx.eventBus().publish("log", "Strategy execution complete: " + strategyName + 
+                    " - " + context.stepsCompleted + " steps executed for conversation " + 
+                    context.conversationId + ",2,OracleDBAnswererHost,Host,System");
+                
+                // Publish streaming event for strategy execution completion
+                if (context.sessionId != null && context.streaming) {
+                    publishStreamingEvent(context.conversationId, "progress", new JsonObject()
+                        .put("step", "strategy_execution_complete")
+                        .put("message", "Strategy execution complete: " + context.stepsCompleted + " steps executed")
+                        .put("details", new JsonObject()
+                            .put("strategyName", strategyName)
+                            .put("stepsCompleted", context.stepsCompleted)
+                            .put("totalSteps", steps.size())
+                            .put("duration", System.currentTimeMillis() - context.startTime)));
+                }
+                
                 // Record execution for learning
                 if (learningClient != null && learningClient.isReady()) {
+                    vertx.eventBus().publish("log", "Recording execution for strategy: " + strategyName + 
+                        " with " + context.stepsCompleted + " completed steps,3,OracleDBAnswererHost,Host,System");
+                    
                     JsonObject recordArgs = new JsonObject()
                         .put("strategy", strategy)
                         .put("execution_results", new JsonObject()
                             .put("success", true)
                             .put("total_duration", System.currentTimeMillis() - context.startTime)
-                            .put("steps_completed", steps.size()))
+                            .put("steps_completed", context.stepsCompleted))
                         .put("performance_metrics", new JsonObject()
                             .put("query_complexity", context.getStepResult("complexity_analysis")
                                 .getJsonObject("factors", new JsonObject()).getFloat("complexity_score", 0.5f)));
@@ -650,6 +842,8 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                         .onComplete(ar -> {
                             if (ar.failed()) {
                                 vertx.eventBus().publish("log", "Failed to record execution: " + ar.cause() + ",1,OracleDBAnswererHost,Host,System");
+                            } else {
+                                vertx.eventBus().publish("log", "Successfully recorded execution for learning,3,OracleDBAnswererHost,Host,System");
                             }
                         });
                 }
@@ -673,14 +867,29 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             return Future.succeededFuture(accumulated);
         }
         
-        UniversalMCPClient orchestratorClient = mcpClients.get("strategy-orchestrator");
+        UniversalMCPClient orchestratorClient = mcpClients.get("StrategyOrchestrator");
         JsonObject currentStep = steps.getJsonObject(currentIndex);
+        String toolName = currentStep.getString("tool", "unknown");
+        
+        // Update current step
+        context.currentStep = currentIndex;
+        
+        // Log step execution start
+        vertx.eventBus().publish("log", "Executing step " + (currentIndex + 1) + "/" + steps.size() + 
+            ": " + toolName + " for conversation " + context.conversationId + ",3,OracleDBAnswererHost,Host,System");
         
         // Execute current step
         return executeStep(context, currentStep, accumulated)
             .compose(result -> {
+                // Increment completed steps counter
+                context.stepsCompleted++;
+                context.storeStepResult(toolName, result);
+                
                 accumulated.mergeIn(new JsonObject()
                     .put(currentStep.getString("tool") + "_result", result));
+                
+                vertx.eventBus().publish("log", "Step " + (currentIndex + 1) + " completed: " + toolName + 
+                    " - Total completed: " + context.stepsCompleted + ",3,OracleDBAnswererHost,Host,System");
                 
                 // Evaluate progress if orchestrator available
                 if (orchestratorClient != null && orchestratorClient.isReady() && 
@@ -718,6 +927,22 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                     return executeStepsWithAdaptation(context, strategy, steps, 
                         currentIndex + 1, accumulated);
                 }
+            })
+            .recover(error -> {
+                // Handle step execution failure
+                vertx.eventBus().publish("log", "ERROR: Step " + (currentIndex + 1) + " failed: " + toolName + 
+                    " - Error: " + error.getMessage() + ",0,OracleDBAnswererHost,Host,System");
+                
+                // Check if step is optional
+                boolean optional = currentStep.getBoolean("optional", false);
+                if (optional) {
+                    vertx.eventBus().publish("log", "Skipping optional step " + toolName + " and continuing,1,OracleDBAnswererHost,Host,System");
+                    // Continue with next step
+                    return executeStepsWithAdaptation(context, strategy, steps, currentIndex + 1, accumulated);
+                } else {
+                    // Required step failed, propagate error
+                    return Future.failedFuture("Required step failed: " + toolName + " - " + error.getMessage());
+                }
             });
     }
     
@@ -750,7 +975,11 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         String description = step.getString("description");
         boolean optional = step.getBoolean("optional", false);
         
-        vertx.eventBus().publish("log", "Executing step " + currentStepIndex + 1 + ": " + tool + " - " + description + "" + ",3,OracleDBAnswererHost,Host,System");
+        // Update current step
+        context.currentStep = currentStepIndex;
+        
+        vertx.eventBus().publish("log", "Executing step " + (currentStepIndex + 1) + "/" + steps.size() + 
+            ": " + tool + " - " + description + ",3,OracleDBAnswererHost,Host,System");
         
         // Publish progress event if streaming
         if (context.sessionId != null && context.streaming) {
@@ -773,6 +1002,9 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                     
                     // Store step result
                     context.storeStepResult(tool, stepResult);
+                    
+                    // Increment completed steps counter
+                    context.stepsCompleted++;
                     
                     // Accumulate results
                     accumulatedResult.mergeIn(new JsonObject()
@@ -853,12 +1085,16 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         
         UniversalMCPClient client = mcpClients.get(server);
         if (client == null || !client.isReady()) {
+            vertx.eventBus().publish("log", "ERROR: Client not ready for server '" + server + "' when trying to execute tool '" + tool + "',0,OracleDBAnswererHost,Host,System");
             promise.fail("Client not ready for server: " + server);
             return promise.future();
         }
         
         // Build arguments based on the tool and previous results
         JsonObject arguments = buildToolArguments(context, tool, previousResults);
+        
+        vertx.eventBus().publish("log", "Calling MCP tool '" + tool + "' on server '" + server + "' with args: " + 
+            arguments.encodePrettily() + ",3,OracleDBAnswererHost,Host,System");
         
         // Track performance
         long startTime = System.currentTimeMillis();
@@ -869,9 +1105,10 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 performanceMetrics.put(tool, duration);
                 
                 if (ar.succeeded()) {
-                    vertx.eventBus().publish("log", "Step " + tool + " completed in " + duration + "ms" + ",3,OracleDBAnswererHost,Host,System");
+                    vertx.eventBus().publish("log", "MCP tool '" + tool + "' completed successfully in " + duration + "ms,3,OracleDBAnswererHost,Host,System");
                     promise.complete(ar.result());
                 } else {
+                    vertx.eventBus().publish("log", "ERROR: MCP tool '" + tool + "' failed: " + ar.cause().getMessage() + ",0,OracleDBAnswererHost,Host,System");
                     promise.fail("Step " + tool + " failed: " + ar.cause().getMessage());
                 }
             });
@@ -887,9 +1124,14 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                                         JsonObject previousResults) {
         JsonObject args = new JsonObject();
         
+        vertx.eventBus().publish("log", "Building tool arguments for: " + tool + ",3,OracleDBAnswererHost,Host,System");
+        
         switch (tool) {
             case "evaluate_query_intent":
-                // Already handled in strategy selection
+                // Extract the query from the most recent user message
+                args.put("query", context.history.getJsonObject(context.history.size() - 1).getString("content"));
+                // Include recent conversation history for context
+                args.put("conversationHistory", context.getRecentHistory(5));
                 break;
                 
             case "analyze_query":
@@ -1006,6 +1248,41 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                     args.put("includeIndirect", false);
                 }
                 break;
+                
+            case "format_results":
+                // Format query results into natural language
+                // Get the original user query from conversation history
+                String originalQuery = context.history.getJsonObject(context.history.size() - 1).getString("content");
+                args.put("original_query", originalQuery);
+                
+                // Get the SQL that was executed
+                String executedSQL = getExecutedSQL(context);
+                if (!executedSQL.isEmpty()) {
+                    args.put("sql_executed", executedSQL);
+                }
+                
+                // Get query results if available
+                JsonObject queryResultsForFormat = context.getStepResult("run_oracle_query");
+                if (queryResultsForFormat != null) {
+                    args.put("results", queryResultsForFormat);
+                }
+                
+                // Add any error information if execution failed
+                // This would be handled by the step execution error handling
+                break;
+                
+            default:
+                // For unknown tools, pass minimal arguments
+                vertx.eventBus().publish("log", "WARNING: Unknown tool '" + tool + "' - using minimal arguments,1,OracleDBAnswererHost,Host,System");
+                // Add query if available
+                if (!context.history.isEmpty()) {
+                    args.put("query", context.history.getJsonObject(context.history.size() - 1).getString("content"));
+                }
+                // Add any previous results that might be relevant
+                if (!previousResults.isEmpty()) {
+                    args.put("context", previousResults);
+                }
+                break;
         }
         
         return args;
@@ -1019,14 +1296,65 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                                                  boolean streaming) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
+        vertx.eventBus().publish("log", "Composing final answer for conversation " + context.conversationId + 
+            " with strategy: " + context.currentStrategy + ",3,OracleDBAnswererHost,Host,System");
+        
+        // Log available step results for debugging
+        if (!context.stepResults.isEmpty()) {
+            vertx.eventBus().publish("log", "Available step results: " + 
+                context.stepResults.keySet().toString() + ",3,OracleDBAnswererHost,Host,System");
+        } else {
+            vertx.eventBus().publish("log", "WARNING: No step results available for answer composition,1,OracleDBAnswererHost,Host,System");
+        }
+        
+        // Log allResults parameter
+        vertx.eventBus().publish("log", "AllResults keys: " + allResults.fieldNames().toString() + ",3,OracleDBAnswererHost,Host,System");
+        
         JsonObject response = new JsonObject();
         
-        // Check if we have query results
-        JsonObject queryResults = context.getStepResult("run_oracle_query");
+        // Check if we have formatted results first (highest priority)
+        JsonObject formattedResults = context.getStepResult("format_results");
+        if (formattedResults != null) {
+            vertx.eventBus().publish("log", "Found formatted results, using pre-formatted answer,3,OracleDBAnswererHost,Host,System");
+            // Extract the formatted answer
+            String formattedAnswer = formattedResults.getString("formatted");
+            if (formattedAnswer != null && !formattedAnswer.isEmpty()) {
+                response.put("answer", formattedAnswer);
+                response.put("confidence", calculateConfidence(context));
+                response.put("executedSQL", getExecutedSQL(context));
+                
+                // Include raw data if available
+                JsonObject queryResults = context.getStepResult("run_oracle_query");
+                if (queryResults != null && queryResults.containsKey("rows")) {
+                    response.put("data", queryResults);
+                }
+                
+                promise.complete(response);
+                return promise.future();
+            }
+        }
+        
+        // Check if we have query results (second priority)
+        JsonObject initialQueryResults = context.getStepResult("run_oracle_query");
+        
+        // Check if result is nested in a "result" field (common MCP pattern)
+        final JsonObject queryResults;
+        if (initialQueryResults != null && initialQueryResults.containsKey("result") && !initialQueryResults.containsKey("rows")) {
+            JsonObject nestedResult = initialQueryResults.getJsonObject("result");
+            if (nestedResult != null) {
+                vertx.eventBus().publish("log", "Extracting nested query result from MCP response,3,OracleDBAnswererHost,Host,System");
+                queryResults = nestedResult;
+            } else {
+                queryResults = initialQueryResults;
+            }
+        } else {
+            queryResults = initialQueryResults;
+        }
         
         if (queryResults != null && queryResults.containsKey("rows")) {
-            // We have data results
             JsonArray rows = queryResults.getJsonArray("rows");
+            vertx.eventBus().publish("log", "Found query results with " + rows.size() + " rows, composing data answer,3,OracleDBAnswererHost,Host,System");
+            // We have data results
             JsonArray columns = queryResults.getJsonArray("columns", new JsonArray());
             
             // Use LLM to compose a natural language answer
@@ -1034,7 +1362,11 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 composeAnswerWithLLM(context, queryResults)
                     .onComplete(ar -> {
                         if (ar.succeeded()) {
-                            response.put("answer", ar.result());
+                            String llmAnswer = ar.result();
+                            vertx.eventBus().publish("log", "LLM composed answer: " + 
+                                (llmAnswer.length() > 200 ? llmAnswer.substring(0, 197) + "..." : llmAnswer).replace("\n", " ") + 
+                                ",3,OracleDBAnswererHost,Host,System");
+                            response.put("answer", llmAnswer);
                             response.put("data", queryResults);
                             response.put("executedSQL", getExecutedSQL(context));
                             response.put("confidence", calculateConfidence(context));
@@ -1048,15 +1380,122 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                             promise.complete(response);
                         }
                     });
+                return promise.future();
             } else {
                 // No LLM available, return structured response
-                response.put("answer", formatStructuredAnswer(queryResults));
+                String structuredAnswer = formatStructuredAnswer(queryResults);
+                vertx.eventBus().publish("log", "No LLM available, using structured answer: " + 
+                    (structuredAnswer.length() > 200 ? structuredAnswer.substring(0, 197) + "..." : structuredAnswer).replace("\n", " ") + 
+                    ",3,OracleDBAnswererHost,Host,System");
+                response.put("answer", structuredAnswer);
                 response.put("data", queryResults);
                 response.put("executedSQL", getExecutedSQL(context));
                 response.put("confidence", 0.7);
                 promise.complete(response);
+                return promise.future();
             }
-        } else if (context.currentStrategy.contains("sql_only")) {
+        } 
+        
+        // Handle dynamic generated strategies
+        if ("dynamic_generated".equals(context.currentStrategy)) {
+            vertx.eventBus().publish("log", "Handling dynamic generated strategy results,3,OracleDBAnswererHost,Host,System");
+            
+            // Check what results we have from the dynamic pipeline
+            JsonObject sqlGenResult = context.getStepResult("generate_oracle_sql");
+            JsonObject sqlValResult = context.getStepResult("validate_oracle_sql");
+            JsonObject schemaResult = context.getStepResult("match_oracle_schema");
+            
+            // Log what we found for debugging
+            if (sqlGenResult != null) {
+                vertx.eventBus().publish("log", "SQL generation result structure: " + 
+                    sqlGenResult.fieldNames().toString() + ",3,OracleDBAnswererHost,Host,System");
+                // Check if result is nested
+                if (sqlGenResult.containsKey("result") && sqlGenResult.getJsonObject("result") != null) {
+                    sqlGenResult = sqlGenResult.getJsonObject("result");
+                    vertx.eventBus().publish("log", "Extracted nested SQL result: " + 
+                        sqlGenResult.fieldNames().toString() + ",3,OracleDBAnswererHost,Host,System");
+                }
+            }
+            
+            // If we generated SQL but couldn't execute it
+            if (sqlGenResult != null && sqlGenResult.containsKey("sql")) {
+                vertx.eventBus().publish("log", "Found SQL generation result without execution,3,OracleDBAnswererHost,Host,System");
+                String sql = sqlGenResult.getString("sql");
+                String answer = "I generated the following SQL query for your request:\n\n```sql\n" + sql + "\n```";
+                
+                if (sqlValResult != null) {
+                    boolean isValid = sqlValResult.getBoolean("valid", false);
+                    if (!isValid && sqlValResult.containsKey("errors")) {
+                        answer += "\n\nNote: The query validation found some issues: " + 
+                                sqlValResult.getJsonArray("errors").encode();
+                    } else if (isValid) {
+                        answer += "\n\nThe query has been validated and is ready to execute.";
+                    }
+                }
+                
+                vertx.eventBus().publish("log", "SQL generation without execution answer: " + 
+                    answer.replace("\n", " ").substring(0, Math.min(answer.length(), 200)) + 
+                    ",3,OracleDBAnswererHost,Host,System");
+                response.put("answer", answer);
+                response.put("sql", sql);
+                response.put("validated", sqlValResult != null);
+                response.put("executedSQL", sql);
+                response.put("confidence", calculateConfidence(context));
+                promise.complete(response);
+                return promise.future();
+            }
+            
+            // Check for nested schema result
+            if (schemaResult != null) {
+                if (schemaResult.containsKey("result") && schemaResult.getJsonObject("result") != null) {
+                    schemaResult = schemaResult.getJsonObject("result");
+                    vertx.eventBus().publish("log", "Extracted nested schema result: " + 
+                        schemaResult.fieldNames().toString() + ",3,OracleDBAnswererHost,Host,System");
+                }
+            }
+            
+            // If we only have schema matching results
+            if (schemaResult != null && schemaResult.containsKey("matches")) {
+                vertx.eventBus().publish("log", "Found schema matching results only,3,OracleDBAnswererHost,Host,System");
+                JsonArray matches = schemaResult.getJsonArray("matches", new JsonArray());
+                String answer = "I found the following relevant database objects for your query:\n\n";
+                
+                for (int i = 0; i < Math.min(matches.size(), 5); i++) {
+                    JsonObject match = matches.getJsonObject(i);
+                    JsonObject table = match.getJsonObject("table", new JsonObject());
+                    answer += "- Table: " + table.getString("tableName", "Unknown") + "\n";
+                }
+                
+                answer += "\nTo proceed, I would need to generate and execute a SQL query against these tables.";
+                
+                response.put("answer", answer);
+                response.put("schemaMatches", schemaResult);
+                response.put("confidence", 0.6);
+                promise.complete(response);
+                return promise.future();
+            }
+            
+            // If we have other step results, compose a summary
+            if (!context.stepResults.isEmpty()) {
+                vertx.eventBus().publish("log", "Composing answer from available step results: " + 
+                    context.stepResults.keySet().toString() + ",3,OracleDBAnswererHost,Host,System");
+                String answer = composeAnswerFromStepResults(context);
+                vertx.eventBus().publish("log", "Composed fallback answer: " + 
+                    (answer.length() > 200 ? answer.substring(0, 197) + "..." : answer).replace("\n", " ") + 
+                    ",3,OracleDBAnswererHost,Host,System");
+                response.put("answer", answer);
+                // Convert Map<String,JsonObject> to JsonObject
+                JsonObject stepResultsJson = new JsonObject();
+                context.stepResults.forEach(stepResultsJson::put);
+                response.put("stepResults", stepResultsJson);
+                response.put("confidence", calculateConfidence(context));
+                promise.complete(response);
+                return promise.future();
+            }
+        } 
+        
+        // Handle specific strategy types
+        else if (context.currentStrategy.contains("sql_only")) {
             // SQL generation only - return the SQL
             JsonObject sqlResult = context.getStepResult("generate_oracle_sql");
             if (sqlResult != null) {
@@ -1080,11 +1519,28 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 promise.fail("No schema information retrieved");
             }
         } else {
-            // Unknown or error case
-            response.put("answer", "I was unable to process your query successfully.");
-            response.put("error", "No valid results from pipeline");
-            response.put("confidence", 0.1);
-            promise.complete(response);
+            // Unknown strategy - try to compose from available results
+            vertx.eventBus().publish("log", "WARNING: Unknown strategy '" + context.currentStrategy + 
+                "', attempting to compose answer from available results,1,OracleDBAnswererHost,Host,System");
+            
+            if (!context.stepResults.isEmpty()) {
+                String answer = composeAnswerFromStepResults(context);
+                vertx.eventBus().publish("log", "Unknown strategy fallback answer: " + 
+                    (answer.length() > 200 ? answer.substring(0, 197) + "..." : answer).replace("\n", " ") + 
+                    ",3,OracleDBAnswererHost,Host,System");
+                response.put("answer", answer);
+                // Convert Map<String,JsonObject> to JsonObject
+                JsonObject stepResultsJson = new JsonObject();
+                context.stepResults.forEach(stepResultsJson::put);
+                response.put("stepResults", stepResultsJson);
+                response.put("confidence", calculateConfidence(context) * 0.8); // Lower confidence for unknown strategy
+                promise.complete(response);
+            } else {
+                response.put("answer", "I was unable to process your query successfully.");
+                response.put("error", "No valid results from pipeline");
+                response.put("confidence", 0.1);
+                promise.complete(response);
+            }
         }
         
         return promise.future();
@@ -1125,18 +1581,37 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 "Please provide a natural language answer.")
         );
         
+        vertx.eventBus().publish("log", "Calling LLM to compose answer from " + 
+            queryResults.getJsonArray("rows").size() + " rows,3,OracleDBAnswererHost,Host,System");
+        
         llmService.chatCompletion(
             messages.stream().map(JsonObject::encode).collect(Collectors.toList()),
             0.7, // Some creativity for natural answers
             500
         ).whenComplete((result, error) -> {
             if (error == null) {
-                String answer = result.getJsonArray("choices")
-                    .getJsonObject(0)
-                    .getJsonObject("message")
-                    .getString("content");
-                promise.complete(answer);
+                vertx.eventBus().publish("log", "LLM response received: " + result.encode().substring(0, Math.min(200, result.encode().length())) + 
+                    "...,3,OracleDBAnswererHost,Host,System");
+                
+                JsonArray choices = result.getJsonArray("choices");
+                if (choices != null && !choices.isEmpty()) {
+                    JsonObject firstChoice = choices.getJsonObject(0);
+                    JsonObject message = firstChoice.getJsonObject("message");
+                    if (message != null) {
+                        String answer = message.getString("content", "No content in LLM response");
+                        vertx.eventBus().publish("log", "Extracted answer from LLM: " + 
+                            answer.substring(0, Math.min(100, answer.length())) + "...,3,OracleDBAnswererHost,Host,System");
+                        promise.complete(answer);
+                    } else {
+                        vertx.eventBus().publish("log", "ERROR: No message in LLM response,0,OracleDBAnswererHost,Host,System");
+                        promise.fail("No message in LLM response");
+                    }
+                } else {
+                    vertx.eventBus().publish("log", "ERROR: No choices in LLM response,0,OracleDBAnswererHost,Host,System");
+                    promise.fail("No choices in LLM response");
+                }
             } else {
+                vertx.eventBus().publish("log", "ERROR: LLM call failed: " + error.getMessage() + ",0,OracleDBAnswererHost,Host,System");
                 promise.fail(error);
             }
         });
@@ -1194,6 +1669,106 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         JsonArray tables = schemaInfo.getJsonArray("tables", new JsonArray());
         return String.format("Found %d tables in the schema. Use these table names in your queries.", 
             tables.size());
+    }
+    
+    /**
+     * Compose an answer from available step results when no specific result type is found
+     */
+    private String composeAnswerFromStepResults(ConversationContext context) {
+        StringBuilder answer = new StringBuilder();
+        answer.append("Based on the analysis of your query, here's what I found:\n\n");
+        
+        // Check intent evaluation
+        JsonObject intentEval = context.getStepResult("evaluate_query_intent");
+        if (intentEval != null) {
+            // Check for nested result
+            if (intentEval.containsKey("result") && intentEval.getJsonObject("result") != null) {
+                intentEval = intentEval.getJsonObject("result");
+            }
+            String intent = intentEval.getString("intent", "");
+            if (!intent.isEmpty()) {
+                answer.append("Query Intent: ").append(intent).append("\n");
+            }
+        }
+        
+        // Check query analysis
+        JsonObject queryAnalysis = context.getStepResult("analyze_query");
+        if (queryAnalysis != null) {
+            // Check for nested result
+            if (queryAnalysis.containsKey("result") && queryAnalysis.getJsonObject("result") != null) {
+                queryAnalysis = queryAnalysis.getJsonObject("result");
+            }
+            JsonArray entities = queryAnalysis.getJsonArray("entities", new JsonArray());
+            if (!entities.isEmpty()) {
+                answer.append("\nIdentified entities:\n");
+                for (int i = 0; i < entities.size(); i++) {
+                    JsonObject entity = entities.getJsonObject(i);
+                    answer.append("- ").append(entity.getString("text", ""))
+                          .append(" (").append(entity.getString("type", "")).append(")\n");
+                }
+            }
+        }
+        
+        // Check schema matches
+        JsonObject schemaMatches = context.getStepResult("match_oracle_schema");
+        if (schemaMatches != null) {
+            // Check for nested result
+            if (schemaMatches.containsKey("result") && schemaMatches.getJsonObject("result") != null) {
+                schemaMatches = schemaMatches.getJsonObject("result");
+            }
+            JsonArray matches = schemaMatches.getJsonArray("matches", new JsonArray());
+            if (!matches.isEmpty()) {
+                answer.append("\nRelevant database objects:\n");
+                for (int i = 0; i < Math.min(matches.size(), 3); i++) {
+                    JsonObject match = matches.getJsonObject(i);
+                    JsonObject table = match.getJsonObject("table", new JsonObject());
+                    answer.append("- ").append(table.getString("tableName", "Unknown table")).append("\n");
+                }
+            }
+        }
+        
+        // Check SQL generation
+        JsonObject sqlGen = context.getStepResult("generate_oracle_sql");
+        if (sqlGen != null) {
+            // Check for nested result
+            if (sqlGen.containsKey("result") && sqlGen.getJsonObject("result") != null) {
+                sqlGen = sqlGen.getJsonObject("result");
+            }
+            if (sqlGen.containsKey("sql")) {
+                answer.append("\nGenerated SQL:\n```sql\n")
+                      .append(sqlGen.getString("sql"))
+                      .append("\n```\n");
+            }
+        }
+        
+        // Check validation results
+        JsonObject validation = context.getStepResult("validate_oracle_sql");
+        if (validation != null) {
+            // Check for nested result
+            if (validation.containsKey("result") && validation.getJsonObject("result") != null) {
+                validation = validation.getJsonObject("result");
+            }
+            boolean isValid = validation.getBoolean("valid", false);
+            if (!isValid) {
+                answer.append("\nValidation issues found. ");
+                if (validation.containsKey("errors")) {
+                    answer.append("Errors: ").append(validation.getJsonArray("errors").encode());
+                }
+            }
+        }
+        
+        // If we completed some steps but couldn't get a full result
+        if (context.stepsCompleted > 0) {
+            answer.append("\n\nI completed ")
+                  .append(context.stepsCompleted)
+                  .append(" steps of the analysis but was unable to provide a complete result. ");
+            
+            if (context.getStepResult("run_oracle_query") == null && sqlGen != null) {
+                answer.append("The SQL query was generated but could not be executed.");
+            }
+        }
+        
+        return answer.toString();
     }
     
     /**

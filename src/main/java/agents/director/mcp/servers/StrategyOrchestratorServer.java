@@ -376,7 +376,9 @@ public class StrategyOrchestratorServer extends MCPServerBase {
     private String buildAdaptationPrompt(JsonObject currentStrategy, JsonObject evaluation,
                                        String userFeedback, JsonObject constraints) {
         JsonArray suggestions = evaluation.getJsonArray("adaptation_suggestions", new JsonArray());
-        String suggestionsStr = String.join("\n- ", suggestions.getList());
+        @SuppressWarnings("unchecked")
+        List<String> suggestionsList = suggestions.getList();
+        String suggestionsStr = String.join("\n- ", suggestionsList);
         
         return String.format("""
             Adapt this orchestration strategy based on execution feedback.

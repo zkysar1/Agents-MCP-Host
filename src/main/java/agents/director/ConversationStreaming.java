@@ -195,9 +195,8 @@ public class ConversationStreaming extends AbstractVerticle {
         // Root welcome page
         router.get("/").handler(this::handleRoot);
         
-        // Main conversation endpoint
+        // Main conversation endpoint (streaming-only)
         router.post("/conversations").handler(this::handleConversation);
-        router.post("/conversations/streaming").handler(this::handleStreamingConversation);
         
         // Host status endpoint
         router.get("/hosts/status").handler(this::handleHostStatus);
@@ -231,12 +230,12 @@ public class ConversationStreaming extends AbstractVerticle {
     }
     
     /**
-     * Main conversation handler with host routing
+     * Main conversation handler with host routing (streaming-only)
      */
     private void handleConversation(RoutingContext context) {
         // Check if system is ready
         if (!systemReady) {
-            sendError(context, 503, "System is starting up. Please try again in a few seconds.");
+            sendEarlyError(context, 503, "System is starting up. Please try again in a few seconds.");
             if (logLevel >= 3) vertx.eventBus().publish("log", "Request rejected - system not ready,3,ConversationStreaming,Request,Validation");
             return;
         }
@@ -246,7 +245,7 @@ public class ConversationStreaming extends AbstractVerticle {
             JsonObject firstError = criticalErrors.values().iterator().next();
             String userErrorMessage = firstError.getString("userMessage", 
                 "System critical error occurred. Please restart the system or contact support.");
-            sendError(context, 503, userErrorMessage);
+            sendEarlyError(context, 503, userErrorMessage);
             vertx.eventBus().publish("log", "Request blocked due to critical error,0,ConversationStreaming,Request,Critical");
             return;
         }
@@ -255,13 +254,13 @@ public class ConversationStreaming extends AbstractVerticle {
         
         // Validate request
         if (request == null || !request.containsKey("messages")) {
-            sendError(context, 400, "Invalid request: messages array required");
+            sendEarlyError(context, 400, "Invalid request: messages array required");
             return;
         }
         
         JsonArray messages = request.getJsonArray("messages");
         if (messages.isEmpty()) {
-            sendError(context, 400, "Invalid request: messages array cannot be empty");
+            sendEarlyError(context, 400, "Invalid request: messages array cannot be empty");
             return;
         }
         
@@ -269,7 +268,6 @@ public class ConversationStreaming extends AbstractVerticle {
         String host = request.getString("host", DEFAULT_HOST);
         String conversationId = request.getString("conversationId", UUID.randomUUID().toString());
         JsonObject options = request.getJsonObject("options", new JsonObject());
-        boolean streaming = request.getBoolean("streaming", true);
         
         // Get the latest user message
         JsonObject lastMessage = messages.size() > 0 ? messages.getJsonObject(messages.size() - 1) : null;
@@ -282,32 +280,21 @@ public class ConversationStreaming extends AbstractVerticle {
         String requestId = UUID.randomUUID().toString();
         requestMetrics.put(requestId, System.currentTimeMillis());
         
-        // Route to appropriate host
-        routeToHost(context, host, conversationId, query, messages, options, streaming, requestId);
-    }
-    
-    /**
-     * Handle streaming conversation requests
-     */
-    private void handleStreamingConversation(RoutingContext context) {
-        // Set up SSE headers
+        // Now that validation passed, set up SSE headers for streaming
         context.response()
             .putHeader("Content-Type", "text/event-stream")
             .putHeader("Cache-Control", "no-cache")
             .putHeader("Connection", "keep-alive")
+            .putHeader("Access-Control-Allow-Origin", "*")
             .setChunked(true);
         
-        // Process as streaming
-        JsonObject request = context.body().asJsonObject();
-        if (request != null) {
-            request.put("streaming", true);
-        }
-        
-        handleConversation(context);
+        // Route to appropriate host (always streaming)
+        routeToHost(context, host, conversationId, query, messages, options, requestId);
     }
     
+    
     /**
-     * Route request to the appropriate host
+     * Route request to the appropriate host (streaming-only)
      */
     private void routeToHost(RoutingContext context, 
                            String host, 
@@ -315,7 +302,6 @@ public class ConversationStreaming extends AbstractVerticle {
                            String query,
                            JsonArray messages,
                            JsonObject options,
-                           boolean streaming,
                            String requestId) {
         
         // Validate host availability
@@ -324,78 +310,64 @@ public class ConversationStreaming extends AbstractVerticle {
             // Try fallback hosts
             selectedHost = selectFallbackHost(selectedHost);
             if (selectedHost == null) {
-                sendError(context, 503, "No available hosts to process request");
+                sendStreamingError(context, 503, "No available hosts to process request");
                 return;
             }
             if (logLevel >= 1) vertx.eventBus().publish("log", "Original host unavailable; falling back to: " + selectedHost + ",1,ConversationStreaming,API,System");
         }
         final String finalHost = selectedHost;
         
-        // Create session for streaming
-        String sessionId = null;
-        EnhancedStreamingSession enhancedSession = null;
-        
-        if (streaming) {
-            // Check session limit
-            if (activeSessions.size() >= MAX_ACTIVE_SESSIONS) {
-                sendError(context, 503, "Server at capacity - too many active sessions");
-                return;
-            }
-            
-            sessionId = UUID.randomUUID().toString();
-            
-            // Set up SSE headers FIRST
-            context.response()
-                .putHeader("Content-Type", "text/event-stream")
-                .putHeader("Cache-Control", "no-cache")
-                .putHeader("Connection", "keep-alive")
-                .putHeader("Access-Control-Allow-Origin", "*")
-                .setChunked(true);
-            
-            // Check session limit
-            if (activeSessions.size() >= MAX_ACTIVE_SESSIONS) {
-                sendError(context, 503, "Maximum concurrent sessions reached. Please try again later.");
-                return;
-            }
-            
-            // Create enhanced session
-            enhancedSession = new EnhancedStreamingSession(sessionId, conversationId, context, finalHost);
-            activeSessions.put(sessionId, enhancedSession);
-            
-            // Send initial connection event
-            enhancedSession.sendSSEEvent("connected", new JsonObject()
-                .put("sessionId", sessionId)
-                .put("conversationId", conversationId)
-                .put("host", finalHost)
-                .put("timestamp", System.currentTimeMillis()));
-            
-            // Set up event consumers BEFORE sending to host
-            try {
-                setupEventConsumers(enhancedSession, options);
-            } catch (Exception e) {
-                // Clean up on error
-                vertx.eventBus().publish("log", "Failed to setup event consumers: " + e.getMessage() + ",0,ConversationStreaming,Session,Setup");
-                activeSessions.remove(sessionId);
-                sendError(context, 500, "Failed to initialize streaming session");
-                return;
-            }
-            
-            // Set up cleanup handlers
-            final String finalSessionId = sessionId;
-            final EnhancedStreamingSession finalEnhancedSession = enhancedSession;
-            context.response().closeHandler(v -> {
-                finalEnhancedSession.responseEnded = true;
-                cleanupSession(finalSessionId);
-                if (logLevel >= 3) vertx.eventBus().publish("log", "Client closed connection for session: " + finalSessionId + ",3,ConversationStreaming,Session,Cleanup");
-            });
-            
-            context.response().exceptionHandler(err -> {
-                finalEnhancedSession.responseEnded = true;
-                cleanupSession(finalSessionId);
-                vertx.eventBus().publish("log", "Connection error for session: " + finalSessionId + " - " + err.getMessage() + ",0,ConversationStreaming,Session,Error");
-            });
+        // Create streaming session
+        // Check session limit
+        if (activeSessions.size() >= MAX_ACTIVE_SESSIONS) {
+            sendStreamingError(context, 503, "Server at capacity - too many active sessions");
+            return;
         }
+        
+        String sessionId = UUID.randomUUID().toString();
+        
+        // Create enhanced session
+        EnhancedStreamingSession enhancedSession = new EnhancedStreamingSession(sessionId, conversationId, context, finalHost);
+        activeSessions.put(sessionId, enhancedSession);
+        
+        // Send initial connection event
+        enhancedSession.sendSSEEvent("connected", new JsonObject()
+            .put("sessionId", sessionId)
+            .put("conversationId", conversationId)
+            .put("host", finalHost)
+            .put("timestamp", System.currentTimeMillis()));
+        
+        // Set up event consumers BEFORE sending to host
+        boolean setupSuccessful = false;
+        try {
+            setupEventConsumers(enhancedSession, options);
+            setupSuccessful = true;
+        } catch (Exception e) {
+            // Log error
+            vertx.eventBus().publish("log", "Failed to setup event consumers: " + e.getMessage() + ",0,ConversationStreaming,Session,Setup");
+        } finally {
+            // Clean up on error - ensure session is removed from activeSessions
+            if (!setupSuccessful) {
+                activeSessions.remove(sessionId);
+                sendStreamingError(context, 500, "Failed to initialize streaming session");
+                return;
+            }
+        }
+        
+        // Set up cleanup handlers
         final String finalSessionId = sessionId;
+        final EnhancedStreamingSession finalEnhancedSession = enhancedSession;
+        context.response().closeHandler(v -> {
+            finalEnhancedSession.responseEnded = true;
+            cleanupSession(finalSessionId);
+            if (logLevel >= 3) vertx.eventBus().publish("log", "Client closed connection for session: " + finalSessionId + ",3,ConversationStreaming,Session,Cleanup");
+        });
+        
+        context.response().exceptionHandler(err -> {
+            finalEnhancedSession.responseEnded = true;
+            cleanupSession(finalSessionId);
+            vertx.eventBus().publish("log", "Connection error for session: " + finalSessionId + " - " + err.getMessage() + ",0,ConversationStreaming,Session,Error");
+        });
         
         // Build message for host
         JsonObject hostMessage = new JsonObject()
@@ -403,12 +375,9 @@ public class ConversationStreaming extends AbstractVerticle {
             .put("conversationId", conversationId)
             .put("history", messages)
             .put("options", options)
-            .put("streaming", streaming)
-            .put("requestId", requestId);
-        
-        if (finalSessionId != null) {
-            hostMessage.put("sessionId", finalSessionId);
-        }
+            .put("streaming", true)  // Always streaming
+            .put("requestId", requestId)
+            .put("sessionId", finalSessionId);
         
         // Send to host via event bus
         String hostAddress = "host." + finalHost.toLowerCase() + ".process";
@@ -434,13 +403,9 @@ public class ConversationStreaming extends AbstractVerticle {
                         .put("timestamp", System.currentTimeMillis())
                         .put("querySnippet", query.length() > 100 ? query.substring(0, 100) + "..." : query);
                     
-                    if (streaming && finalSessionId != null) {
-                        sendSSEEvent(context, "error", errorDetails);
-                        context.response().end();
-                        cleanupSession(finalSessionId);
-                    } else {
-                        sendError(context, 500, errorMessage);
-                    }
+                    sendSSEEvent(context, "error", errorDetails);
+                    context.response().end();
+                    cleanupSession(finalSessionId);
                     vertx.eventBus().publish("log", errorMessage + ",0,ConversationStreaming,Host,NullResponse");
                     return;
                 }
@@ -449,24 +414,19 @@ public class ConversationStreaming extends AbstractVerticle {
                 response.put("host", finalHost);
                 response.put("processingTime", duration);
                 
-                if (streaming && finalSessionId != null) {
-                    // For streaming, the host will publish events to the event bus
-                    // We just need to wait for them. The response here is just an acknowledgment.
-                    // Do NOT send the response body or end the stream here!
-                    
-                    // The event consumers set up earlier will handle:
-                    // - progress events
-                    // - tool events  
-                    // - final response event (which will end the stream)
-                    // - error events
-                    
-                    // Log that streaming has started
-                    if (logLevel >= 3) {
-                        vertx.eventBus().publish("log", "Streaming started for session " + finalSessionId + " with host " + finalHost + ",3,ConversationStreaming,Streaming,Started");
-                    }
-                } else {
-                    // Send as regular JSON response
-                    sendJsonResponse(context, 200, response);
+                // For streaming, the host will publish events to the event bus
+                // We just need to wait for them. The response here is just an acknowledgment.
+                // Do NOT send the response body or end the stream here!
+                
+                // The event consumers set up earlier will handle:
+                // - progress events
+                // - tool events  
+                // - final response event (which will end the stream)
+                // - error events
+                
+                // Log that streaming has started
+                if (logLevel >= 3) {
+                    vertx.eventBus().publish("log", "Streaming started for session " + finalSessionId + " with host " + finalHost + ",3,ConversationStreaming,Streaming,Started");
                 }
             } else {
                 // Enhanced error handling with context
@@ -509,17 +469,9 @@ public class ConversationStreaming extends AbstractVerticle {
                     .put("timestamp", System.currentTimeMillis())
                     .put("querySnippet", query.length() > 100 ? query.substring(0, 100) + "..." : query);
                 
-                if (streaming) {
-                    sendSSEEvent(context, "error", errorDetails);
-                    context.response().end();
-                } else {
-                    sendError(context, 500, errorMessage);
-                }
-                
-                // Clean up session
-                if (finalSessionId != null) {
-                    cleanupSession(finalSessionId);
-                }
+                sendSSEEvent(context, "error", errorDetails);
+                context.response().end();
+                cleanupSession(finalSessionId);
             }
         });
     }
@@ -694,6 +646,52 @@ public class ConversationStreaming extends AbstractVerticle {
     }
     
     /**
+     * Send early error response (non-SSE) for errors that occur before session creation
+     */
+    private void sendEarlyError(RoutingContext context, int statusCode, String message) {
+        JsonObject error = new JsonObject()
+            .put("error", message)
+            .put("statusCode", statusCode)
+            .put("timestamp", System.currentTimeMillis())
+            .put("service", "ConversationStreaming")
+            .put("severity", "ERROR");
+        
+        // Add request context if available
+        if (context.body() != null && context.body().asJsonObject() != null) {
+            JsonObject requestBody = context.body().asJsonObject();
+            String host = requestBody.getString("host", "unknown");
+            error.put("requestedHost", host);
+        }
+        
+        // Send as regular JSON response, not SSE
+        sendJsonResponse(context, statusCode, error);
+    }
+    
+    /**
+     * Send error response via SSE for streaming
+     */
+    private void sendStreamingError(RoutingContext context, int statusCode, String message) {
+        JsonObject error = new JsonObject()
+            .put("error", message)
+            .put("statusCode", statusCode)
+            .put("timestamp", System.currentTimeMillis())
+            .put("service", "ConversationStreaming")
+            .put("severity", "ERROR");
+        
+        // Add request context if available
+        if (context.body() != null && context.body().asJsonObject() != null) {
+            JsonObject requestBody = context.body().asJsonObject();
+            String host = requestBody.getString("host", "unknown");
+            error.put("requestedHost", host);
+        }
+        
+        // Send error event and close stream
+        sendSSEEvent(context, "error", error);
+        // Add response flushing to ensure data is sent before closing
+        context.response().drainHandler(v -> context.response().end());
+    }
+    
+    /**
      * Set up event consumers for a streaming session
      */
     private void setupEventConsumers(EnhancedStreamingSession session, JsonObject options) {
@@ -737,8 +735,20 @@ public class ConversationStreaming extends AbstractVerticle {
             // Mark session as completed
             session.completed = true;
             
-            // Schedule cleanup after a short delay
-            vertx.setTimer(5000, id -> cleanupSession(sessionId));
+            // End the response properly after sending the final event
+            vertx.setTimer(100, id -> {
+                if (!session.responseEnded && session.response != null && !session.response.closed()) {
+                    try {
+                        session.response.end();
+                        session.responseEnded = true;
+                    } catch (Exception e) {
+                        // Response already closed
+                    }
+                }
+                
+                // Schedule cleanup after ending response
+                vertx.setTimer(5000, cleanupId -> cleanupSession(sessionId));
+            });
         });
         session.consumers.add(finalConsumer);
         

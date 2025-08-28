@@ -34,6 +34,7 @@ public class MCPRegistryService extends AbstractVerticle {
     private final Map<String, MCPClientInfo> clients = new ConcurrentHashMap<>();
     private final Map<String, Set<String>> toolToClients = new ConcurrentHashMap<>();
     private final Map<String, ToolStatistics> toolStats = new ConcurrentHashMap<>();
+    private final Map<String, String> deduplicationMap = new ConcurrentHashMap<>(); // Maps deduplication key to clientId
     
     // Health check configuration
     private static final long HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
@@ -181,6 +182,42 @@ public class MCPRegistryService extends AbstractVerticle {
             return;
         }
         
+        // Create deduplication key based on serverName + serverUrl
+        String deduplicationKey = serverName + "@" + serverUrl;
+        
+        // Check for duplicate registration using the deduplication map
+        String existingClientId = deduplicationMap.get(deduplicationKey);
+        
+        if (existingClientId != null) {
+            MCPClientInfo existingClient = clients.get(existingClientId);
+            
+            if (existingClient != null) {
+                // Found an existing registration for the same server
+                // Check if it's the same clientId or a different one
+                if (existingClientId.equals(clientId)) {
+                    // Same client re-registering - just update heartbeat
+                    existingClient.lastHeartbeat = System.currentTimeMillis();
+                    existingClient.active = true;
+                    if (eventBusAddress != null && !eventBusAddress.equals(existingClient.eventBusAddress)) {
+                        existingClient.eventBusAddress = eventBusAddress;
+                    }
+                    
+                    if (logLevel >= 4) vertx.eventBus().publish("log", "MCP client heartbeat via registration: " + serverName + " (" + clientId + "),4,MCPRegistryService,Registry,Client");
+                    
+                    message.reply(new JsonObject()
+                        .put("status", "updated")
+                        .put("clientId", clientId)
+                        .put("existing", true));
+                    return;
+                } else {
+                    // Different clientId for same server - remove old entry
+                    clients.remove(existingClientId);
+                    deduplicationMap.remove(deduplicationKey);
+                    if (logLevel >= 2) vertx.eventBus().publish("log", "MCP client replaced due to new registration: " + serverName + " (old: " + existingClientId + ", new: " + clientId + "),2,MCPRegistryService,Registry,Client");
+                }
+            }
+        }
+        
         // Create client info
         MCPClientInfo clientInfo = new MCPClientInfo(clientId, serverName, serverUrl, eventBusAddress);
         
@@ -192,6 +229,7 @@ public class MCPRegistryService extends AbstractVerticle {
         
         // Register client
         clients.put(clientId, clientInfo);
+        deduplicationMap.put(deduplicationKey, clientId); // Add to deduplication map
         totalRegistrations.incrementAndGet();
         updateActiveClientCount();
         
@@ -218,6 +256,10 @@ public class MCPRegistryService extends AbstractVerticle {
         
         MCPClientInfo clientInfo = clients.remove(clientId);
         if (clientInfo != null) {
+            // Remove from deduplication map
+            String deduplicationKey = clientInfo.serverName + "@" + clientInfo.serverUrl;
+            deduplicationMap.remove(deduplicationKey);
+            
             // Remove from tool mappings
             if (clientInfo.tools != null) {
                 for (Object toolObj : clientInfo.tools) {
