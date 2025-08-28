@@ -17,10 +17,6 @@ public class Driver {
   public static Vertx vertx = Vertx.vertx(new VertxOptions()
       .setWorkerPoolSize(4)
       .setEventLoopPoolSize(1)
-      .setBlockedThreadCheckInterval(3600000) // Check every hour instead of every second
-      .setWarningExceptionTime(3600000) // Warn after 1 hour instead of default
-      .setMaxEventLoopExecuteTime(300000000000L) // 5 minutes in nanoseconds
-      .setMaxWorkerExecuteTime(300000000000L) // 5 minutes in nanoseconds
   );
 
   private static final String DATA_PATH = "./data";
@@ -241,7 +237,7 @@ public class Driver {
     System.out.println("[Driver] Setting up Logger...");
     //setLogger();
     System.out.println("[Driver] Setting up LLM API Service...");
-    //setLlmAPIService();
+    setLlmAPIService();
     System.out.println("[Driver] LLM API Service setup complete");
     
     // Deploy the 3 host applications
