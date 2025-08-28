@@ -4,16 +4,23 @@ import agents.director.services.MCPRouterService;
 import agents.director.services.LlmAPIService;
 import agents.director.services.Logger;
 import agents.director.services.LogUtil;
+import agents.director.services.OracleConnectionManager;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import java.util.List;
 import java.util.ArrayList;
+import oracle.ucp.admin.UniversalConnectionPoolManager;
+import oracle.ucp.admin.UniversalConnectionPoolManagerImpl;
 
 public class Driver {
   public static int logLevel = 3; // 0=errors, 1=info, 2=detail, 3=debug, 4=data
   public static Vertx vertx = Vertx.vertx(new VertxOptions()
       .setWorkerPoolSize(4)
       .setEventLoopPoolSize(1)
+      .setBlockedThreadCheckInterval(3600000) // Check every hour instead of every second
+      .setWarningExceptionTime(3600000) // Warn after 1 hour instead of default
+      .setMaxEventLoopExecuteTime(300000000000L) // 5 minutes in nanoseconds
+      .setMaxWorkerExecuteTime(300000000000L) // 5 minutes in nanoseconds
   );
 
   private static final String DATA_PATH = "./data";
@@ -36,6 +43,31 @@ public class Driver {
     System.out.println("Working directory: " + System.getProperty("user.dir"));
     System.out.println("Data path: " + DATA_PATH);
     System.out.println("Agent path: " + zakAgentPath);
+    
+    // Add shutdown hook to properly clean up Oracle connection pools
+    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+      System.out.println("[Driver] Shutting down Oracle connection pools...");
+      try {
+        UniversalConnectionPoolManager mgr = 
+            UniversalConnectionPoolManagerImpl.getUniversalConnectionPoolManager();
+        String[] poolNames = mgr.getConnectionPoolNames();
+        if (poolNames != null && poolNames.length > 0) {
+          for (String poolName : poolNames) {
+            System.out.println("[Driver] Destroying pool: " + poolName);
+            try {
+              mgr.destroyConnectionPool(poolName);
+              System.out.println("[Driver] Successfully destroyed pool: " + poolName);
+            } catch (Exception e) {
+              System.err.println("[Driver] Error destroying pool " + poolName + ": " + e.getMessage());
+            }
+          }
+        } else {
+          System.out.println("[Driver] No Oracle connection pools found to destroy");
+        }
+      } catch (Exception e) {
+        System.err.println("[Driver] Error in shutdown hook: " + e.getMessage());
+      }
+    }));
     
     // Set up event listeners for component readiness
     setupReadinessListeners();
@@ -65,51 +97,83 @@ public class Driver {
   private void deployMCPServers() {
     LogUtil.logInfo(vertx, "Deploying MCP Servers...", "Driver", "StartUp", "MCP", true);
     
+    // Initialize OracleConnectionManager first, then deploy all servers
+    System.out.println("[Driver] Starting OracleConnectionManager initialization...");
+    OracleConnectionManager.getInstance().initialize(vertx).onComplete(ar -> {
+      if (ar.succeeded()) {
+        System.out.println("[Driver] OracleConnectionManager initialization complete");
+        LogUtil.logInfo(vertx, "Oracle Connection Manager initialized", "Driver", "StartUp", "Database", true);
+      } else {
+        System.out.println("[Driver] OracleConnectionManager initialization failed: " + ar.cause().getMessage());
+        LogUtil.logError(vertx, "Failed to initialize Oracle Connection Manager", ar.cause(), "Driver", "StartUp", "Database", true);
+      }
+      
+      // Deploy all servers AFTER Oracle initialization completes (whether success or failure)
+      deployAllMCPServers();
+    });
+  }
+  
+  private void deployAllMCPServers() {
+    System.out.println("[Driver] Deploying all MCP servers...");
+    
     // Import the server classes
     Promise<Void> serversPromise = Promise.<Void>promise();
     List<Future> deploymentFutures = new ArrayList<>();
     
-    // Deploy OracleQueryExecutionServer (Worker)
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.OracleQueryExecutionServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(5)
-      )
-    );
+    int serverCount = 0;
     
-    // Deploy OracleQueryAnalysisServer (Worker)
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.OracleQueryAnalysisServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
-      )
-    );
+    // TEMPORARILY COMMENT OUT ORACLE SERVERS TO FIND MEMORY LEAK
+    boolean deployOracleServers = false; // Set to true to include Oracle servers
     
-    // Deploy OracleSchemaIntelligenceServer (Worker)
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.OracleSchemaIntelligenceServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(4)
-      )
-    );
-    
-    // Deploy OracleSQLGenerationServer (Worker)
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.OracleSQLGenerationServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
-      )
-    );
-    
-    // Deploy OracleSQLValidationServer (Worker)
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.OracleSQLValidationServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
-      )
-    );
+    if (deployOracleServers) {
+      // Deploy OracleQueryExecutionServer (Worker)
+      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleQueryExecutionServer");
+      deploymentFutures.add(
+        vertx.deployVerticle(
+          "agents.director.mcp.servers.OracleQueryExecutionServer",
+          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1) // Reduced from 5
+        )
+      );
+      
+      // Deploy OracleQueryAnalysisServer (Worker)
+      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleQueryAnalysisServer");
+      deploymentFutures.add(
+        vertx.deployVerticle(
+          "agents.director.mcp.servers.OracleQueryAnalysisServer",
+          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+        )
+      );
+      
+      // Deploy OracleSchemaIntelligenceServer (Worker)
+      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSchemaIntelligenceServer");
+      deploymentFutures.add(
+        vertx.deployVerticle(
+          "agents.director.mcp.servers.OracleSchemaIntelligenceServer",
+          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+        )
+      );
+      
+      // Deploy OracleSQLGenerationServer (Worker)
+      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSQLGenerationServer");
+      deploymentFutures.add(
+        vertx.deployVerticle(
+          "agents.director.mcp.servers.OracleSQLGenerationServer",
+          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+        )
+      );
+      
+      // Deploy OracleSQLValidationServer (Worker)
+      System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSQLValidationServer");
+      deploymentFutures.add(
+        vertx.deployVerticle(
+          "agents.director.mcp.servers.OracleSQLValidationServer",
+          new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+        )
+      );
+    }
     
     // Deploy BusinessMappingServer (Regular)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": BusinessMappingServer");
     deploymentFutures.add(
       vertx.deployVerticle(
         "agents.director.mcp.servers.BusinessMappingServer",
@@ -118,6 +182,7 @@ public class Driver {
     );
     
     // Deploy QueryIntentEvaluationServer (Regular)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": QueryIntentEvaluationServer");
     deploymentFutures.add(
       vertx.deployVerticle(
         "agents.director.mcp.servers.QueryIntentEvaluationServer",
@@ -126,22 +191,25 @@ public class Driver {
     );
     
     // Deploy StrategyGenerationServer (Worker - uses LLM)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyGenerationServer");
     deploymentFutures.add(
       vertx.deployVerticle(
         "agents.director.mcp.servers.StrategyGenerationServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
       )
     );
     
     // Deploy IntentAnalysisServer (Worker - uses LLM)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": IntentAnalysisServer");
     deploymentFutures.add(
       vertx.deployVerticle(
         "agents.director.mcp.servers.IntentAnalysisServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
       )
     );
     
     // Deploy StrategyOrchestratorServer (Regular - manages execution)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyOrchestratorServer");
     deploymentFutures.add(
       vertx.deployVerticle(
         "agents.director.mcp.servers.StrategyOrchestratorServer",
@@ -150,6 +218,7 @@ public class Driver {
     );
     
     // Deploy StrategyLearningServer (Regular - tracks metrics)
+    System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyLearningServer");
     deploymentFutures.add(
       vertx.deployVerticle(
         "agents.director.mcp.servers.StrategyLearningServer",
@@ -174,29 +243,40 @@ public class Driver {
     LogUtil.logInfo(vertx, "Deploying Host Applications...", "Driver", "StartUp", "Host", true);
     
     // Deploy core services first
+    System.out.println("[Driver] Setting up Logger...");
     setLogger();
+    System.out.println("[Driver] Setting up LLM API Service...");
     setLlmAPIService();
+    System.out.println("[Driver] LLM API Service setup complete");
     
     // Deploy the 3 host applications
     List<Future> hostFutures = new ArrayList<>();
     
-    // Deploy OracleDBAnswererHost
-    hostFutures.add(
-      vertx.deployVerticle(
-        "agents.director.hosts.OracleDBAnswererHost",
-        new DeploymentOptions()
-      )
-    );
+    // TEMPORARILY SKIP ORACLE HOSTS TO ISOLATE ERROR
+    boolean deployOracleHosts = false; // Set to true to deploy Oracle hosts
     
-    // Deploy OracleSQLBuilderHost
-    hostFutures.add(
-      vertx.deployVerticle(
-        "agents.director.hosts.OracleSQLBuilderHost",
-        new DeploymentOptions()
-      )
-    );
+    if (deployOracleHosts) {
+      // Deploy OracleDBAnswererHost
+      System.out.println("[Driver] Deploying OracleDBAnswererHost...");
+      hostFutures.add(
+        vertx.deployVerticle(
+          "agents.director.hosts.OracleDBAnswererHost",
+          new DeploymentOptions()
+        )
+      );
+      
+      // Deploy OracleSQLBuilderHost
+      System.out.println("[Driver] Deploying OracleSQLBuilderHost...");
+      hostFutures.add(
+        vertx.deployVerticle(
+          "agents.director.hosts.OracleSQLBuilderHost",
+          new DeploymentOptions()
+        )
+      );
+    }
     
     // Deploy ToolFreeDirectLLMHost
+    System.out.println("[Driver] Deploying ToolFreeDirectLLMHost...");
     hostFutures.add(
       vertx.deployVerticle(
         "agents.director.hosts.ToolFreeDirectLLMHost",

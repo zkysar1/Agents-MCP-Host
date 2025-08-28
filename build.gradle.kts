@@ -113,7 +113,13 @@ tasks.named<JavaExec>("run") {
     
     // Add JVM arguments for better Windows compatibility
     jvmArgs = listOf(
-        "-Xmx2g",
+        "-Xmx4g",  // Increased heap size for Oracle UCP
+        "-Xms1g",  // Initial heap size
+        "-XX:+UseG1GC",  // G1 garbage collector for better memory management
+        "-XX:+HeapDumpOnOutOfMemoryError",  // Create heap dump on OOM
+        "-XX:HeapDumpPath=./heapdump.hprof",  // Heap dump location
+        "-XX:MaxMetaspaceSize=512m",  // Limit metaspace
+        "-Doracle.ucp.PreCreatedConnectionsCount=0",  // Don't pre-create connections
         "-Dfile.encoding=UTF-8",
         "-Djava.awt.headless=true"
     )

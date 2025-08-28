@@ -40,9 +40,9 @@ public class OracleConnectionManager {
     private static final String DB_SERVICE = "gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com";
     private static final String DB_USER = "ADMIN";
     
-    // Connection pool settings
-    private static final int MIN_POOL_SIZE = 5;
-    private static final int MAX_POOL_SIZE = 20;
+    // Connection pool settings - optimized for development/testing
+    private static final int MIN_POOL_SIZE = 2;  // Reduced from 5
+    private static final int MAX_POOL_SIZE = 10; // Reduced from 20
     private static final int CONNECTION_TIMEOUT = 30; // seconds
     
     // Cache for metadata
@@ -92,8 +92,19 @@ public class OracleConnectionManager {
         this.vertx = vertx;
         Promise<Void> promise = Promise.<Void>promise();
         
+        System.out.println("[OracleConnectionManager] Initialize called from: " + Thread.currentThread().getName());
+        
+        // Check if we should skip Oracle initialization
+        if ("true" == "true") {
+            System.out.println("[OracleConnectionManager] SKIP_ORACLE=true, skipping Oracle initialization");
+            initialized = false;
+            promise.complete();
+            return promise.future();
+        }
+        
         // Quick check if already initialized and healthy
         if (initialized && isConnectionHealthy()) {
+            System.out.println("[OracleConnectionManager] Already initialized and healthy, skipping initialization");
             promise.complete();
             return promise.future();
         }
@@ -126,7 +137,9 @@ public class OracleConnectionManager {
                 String[] existingPools = mgr.getConnectionPoolNames();
                 boolean poolExists = false;
                 
+                System.out.println("[OracleConnectionManager] Found " + existingPools.length + " existing pools");
                 for (String poolName : existingPools) {
+                    System.out.println("[OracleConnectionManager] - Pool: " + poolName);
                     if ("OracleAgentPool".equals(poolName)) {
                         poolExists = true;
                         break;
@@ -175,6 +188,7 @@ public class OracleConnectionManager {
                 
                 // Create new pool only if needed
                 if (!poolExists) {
+                    System.out.println("[OracleConnectionManager] Creating new UCP pool with min=" + MIN_POOL_SIZE + " max=" + MAX_POOL_SIZE);
                     vertx.eventBus().publish("log", "[OracleConnectionManager] Creating new connection pool..." + ",2,OracleConnectionManager,Database,System");
                     
                     // Load Oracle driver
@@ -195,6 +209,18 @@ public class OracleConnectionManager {
                     poolDataSource.setConnectionWaitTimeout(CONNECTION_TIMEOUT);
                     poolDataSource.setValidateConnectionOnBorrow(true);
                     poolDataSource.setMaxIdleTime(300); // 5 minutes
+                    
+                    // Additional tuning for cloud connections
+                    poolDataSource.setConnectionWaitTimeout(10); // Reduce to 10 seconds for faster failure
+                    poolDataSource.setInactiveConnectionTimeout(120); // 2 minutes
+                    poolDataSource.setAbandonedConnectionTimeout(300); // 5 minutes
+                    poolDataSource.setTimeToLiveConnectionTimeout(600); // 10 minutes
+                    
+                    // Disable features known to cause memory issues
+                    poolDataSource.setFastConnectionFailoverEnabled(false); // Disable FCF
+                    poolDataSource.setONSConfiguration(""); // Disable Oracle Notification Service
+                    poolDataSource.setSecondsToTrustIdleConnection(0); // Disable trust for idle connections
+                    poolDataSource.setSQLForValidateConnection("SELECT 1 FROM DUAL"); // Simple validation query
                     
                     // Test the connection
                     try (Connection conn = poolDataSource.getConnection()) {
@@ -619,15 +645,20 @@ public class OracleConnectionManager {
                     // Mark as not initialized first
                     initialized = false;
                     
-                    // Don't destroy the pool - just release our reference
-                    // This allows other parts of the application to potentially reuse it
-                    poolDataSource = null;
-                    
-                    vertx.eventBus().publish("log", "[OracleConnectionManager] Released reference to pool '" + poolName + "' (pool remains active for reuse)" + ",2,OracleConnectionManager,Database,System");
-                    
-                    if (vertx != null) {
-                        vertx.eventBus().publish("log", "Released Oracle pool reference (pool remains active for reuse),1,OracleConnectionManager,Shutdown,Database");
+                    // IMPORTANT: Actually destroy the pool to prevent memory leaks
+                    try {
+                        UniversalConnectionPoolManager mgr = 
+                            UniversalConnectionPoolManagerImpl.getUniversalConnectionPoolManager();
+                        mgr.destroyConnectionPool(poolName);
+                        System.out.println("[OracleConnectionManager] Destroyed pool: " + poolName);
+                        
+                        vertx.eventBus().publish("log", "[OracleConnectionManager] Destroyed connection pool: " + poolName + ",2,OracleConnectionManager,Database,System");
+                    } catch (Exception e) {
+                        System.err.println("[OracleConnectionManager] Error destroying pool: " + e.getMessage());
+                        vertx.eventBus().publish("log", "[OracleConnectionManager] Error destroying pool: " + e.getMessage() + ",0,OracleConnectionManager,Database,System");
                     }
+                    
+                    poolDataSource = null;
                 }
                 
                 // Clean up other references
@@ -779,5 +810,27 @@ public class OracleConnectionManager {
                     vertx.eventBus().publish("log", "[OracleConnectionManager] Connection failed: " + err.getMessage() + ",0,OracleConnectionManager,Database,System");
                 });
         }
+    }
+    
+    /**
+     * Execute a custom database operation with a connection from the pool.
+     * The operation is executed in a blocking handler and the connection is
+     * automatically returned to the pool after use.
+     * 
+     * @param operation A function that takes a Connection and returns a result
+     * @return Future containing the result of the operation
+     */
+    public <T> Future<T> executeWithConnection(java.util.function.Function<Connection, T> operation) {
+        if (!initialized) {
+            return Future.failedFuture("Connection pool not initialized");
+        }
+        
+        return vertx.executeBlocking(() -> {
+            try (Connection conn = getConnection()) {
+                return operation.apply(conn);
+            } catch (SQLException e) {
+                throw new RuntimeException("Database operation failed: " + e.getMessage(), e);
+            }
+        }, false);  // Unordered execution
     }
 }

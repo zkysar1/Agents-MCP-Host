@@ -12,6 +12,7 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.RoutingContext;
 
 
+import agents.director.services.OracleConnectionManager;
 import java.sql.*;
 import java.util.*;
 import java.util.regex.Pattern;
@@ -27,15 +28,7 @@ public class OracleSQLValidationServer extends MCPServerBase {
     
     
     
-    // Oracle connection details
-    private static final String ORACLE_URL = System.getenv("ORACLE_URL") != null ? 
-        System.getenv("ORACLE_URL") : "jdbc:oracle:thin:@localhost:1521:XE";
-    private static final String ORACLE_USER = System.getenv("ORACLE_USER") != null ? 
-        System.getenv("ORACLE_USER") : "system";
-    private static final String ORACLE_PASSWORD = System.getenv("ORACLE_PASSWORD") != null ? 
-        System.getenv("ORACLE_PASSWORD") : "oracle";
-    
-    private Connection dbConnection;
+    private OracleConnectionManager connectionManager;
     private LlmAPIService llmService;
     
     // Common Oracle error codes and their meanings
@@ -128,16 +121,21 @@ public class OracleSQLValidationServer extends MCPServerBase {
     
     @Override
     public void start(Promise<Void> startPromise) {
-        // Initialize database connection
-        initializeDatabase().onComplete(ar -> {
-            if (ar.succeeded()) {
-                llmService = LlmAPIService.getInstance();
-                super.start(startPromise);
-            } else {
-                vertx.eventBus().publish("log", "Failed to initialize database connection" + ",0,OracleSQLValidationServer,MCP,System");
-                startPromise.fail(ar.cause());
-            }
-        });
+        // Get connection manager instance (already initialized in Driver)
+        connectionManager = OracleConnectionManager.getInstance();
+        
+        // Check if connection manager is healthy
+        if (!connectionManager.isConnectionHealthy()) {
+            vertx.eventBus().publish("log", "Oracle Connection Manager not healthy - server will operate with limited functionality,1,OracleSQLValidationServer,MCP,System");
+        } else {
+            vertx.eventBus().publish("log", "OracleSQLValidationServer using connection pool,2,OracleSQLValidationServer,MCP,System");
+        }
+        
+        // Initialize LLM service
+        llmService = LlmAPIService.getInstance();
+        
+        // Continue with parent initialization regardless
+        super.start(startPromise);
     }
     
     @Override
@@ -452,51 +450,66 @@ public class OracleSQLValidationServer extends MCPServerBase {
         JsonArray errors = new JsonArray();
         
         try {
-            // Use EXPLAIN PLAN to parse SQL without executing
-            Statement stmt = dbConnection.createStatement();
-            
-            // Try to create an explain plan
-            String stmtId = "VAL_" + System.currentTimeMillis();
-            String explainSQL = "EXPLAIN PLAN SET STATEMENT_ID = '" + stmtId + "' FOR " + sql;
-            
-            try {
-                stmt.execute(explainSQL);
-                // If successful, clean up
-                stmt.execute("DELETE FROM plan_table WHERE statement_id = '" + stmtId + "'");
-                check.put("passed", true);
-            } catch (SQLException e) {
-                // Parse the error to identify schema issues
-                String errorCode = "ORA-" + String.format("%05d", Math.abs(e.getErrorCode()));
-                String errorMsg = e.getMessage();
-                
-                JsonObject error = new JsonObject()
-                    .put("type", "schema")
-                    .put("code", errorCode)
-                    .put("message", errorMsg);
-                
-                // Extract specific object that caused error
-                if (errorMsg.contains("table or view does not exist")) {
-                    String tableName = extractObjectName(errorMsg);
-                    if (tableName != null) {
-                        error.put("object", tableName);
-                        error.put("objectType", "table");
+            // Use connection manager to execute EXPLAIN PLAN
+            JsonObject validationResult = connectionManager.executeWithConnection(conn -> {
+                try {
+                    Statement stmt = conn.createStatement();
+                    
+                    // Try to create an explain plan
+                    String stmtId = "VAL_" + System.currentTimeMillis();
+                    String explainSQL = "EXPLAIN PLAN SET STATEMENT_ID = '" + stmtId + "' FOR " + sql;
+                    
+                    try {
+                        stmt.execute(explainSQL);
+                        // If successful, clean up
+                        stmt.execute("DELETE FROM plan_table WHERE statement_id = '" + stmtId + "'");
+                        return new JsonObject().put("success", true);
+                    } catch (SQLException e) {
+                        // Parse the error to identify schema issues
+                        String errorCode = "ORA-" + String.format("%05d", Math.abs(e.getErrorCode()));
+                        String errorMsg = e.getMessage();
+                        
+                        JsonObject error = new JsonObject()
+                            .put("type", "schema")
+                            .put("code", errorCode)
+                            .put("message", errorMsg);
+                        
+                        // Extract specific object that caused error
+                        if (errorMsg.contains("table or view does not exist")) {
+                            String tableName = extractObjectName(errorMsg);
+                            if (tableName != null) {
+                                error.put("object", tableName);
+                                error.put("objectType", "table");
+                            }
+                        } else if (errorMsg.contains("invalid identifier")) {
+                            String columnName = extractObjectName(errorMsg);
+                            if (columnName != null) {
+                                error.put("object", columnName);
+                                error.put("objectType", "column");
+                            }
+                        }
+                        
+                        return new JsonObject().put("success", false).put("error", error);
+                    } finally {
+                        stmt.close();
                     }
-                } else if (errorMsg.contains("invalid identifier")) {
-                    String columnName = extractObjectName(errorMsg);
-                    if (columnName != null) {
-                        error.put("object", columnName);
-                        error.put("objectType", "column");
-                    }
+                } catch (SQLException e) {
+                    return new JsonObject().put("success", false)
+                        .put("error", new JsonObject()
+                            .put("type", "connection")
+                            .put("message", "Database operation error: " + e.getMessage()));
                 }
-                
-                errors.add(error);
+            }).toCompletionStage().toCompletableFuture().get();
+            
+            if (validationResult.getBoolean("success", false)) {
+                check.put("passed", true);
+            } else {
+                errors.add(validationResult.getJsonObject("error"));
                 check.put("passed", false);
-            } finally {
-                stmt.close();
             }
             
-        } catch (SQLException e) {
-            vertx.eventBus().publish("log", "Schema validation error" + ",0,OracleSQLValidationServer,MCP,System");
+        } catch (Exception e) {
+            vertx.eventBus().publish("log", "Schema validation error: " + e.getMessage() + ",0,OracleSQLValidationServer,MCP,System");
             errors.add(new JsonObject()
                 .put("type", "connection")
                 .put("message", "Database connection error during validation"));
@@ -515,55 +528,77 @@ public class OracleSQLValidationServer extends MCPServerBase {
             .put("step", "execution_validation");
         
         try {
-            // Get execution plan
-            Statement stmt = dbConnection.createStatement();
-            String stmtId = "EXEC_" + System.currentTimeMillis();
+            // Use connection manager to get execution plan
+            JsonObject planResult = connectionManager.executeWithConnection(conn -> {
+                try {
+                    Statement stmt = conn.createStatement();
+                    String stmtId = "EXEC_" + System.currentTimeMillis();
+                    
+                    stmt.execute("EXPLAIN PLAN SET STATEMENT_ID = '" + stmtId + "' FOR " + sql);
+                    
+                    // Retrieve plan details
+                    String planQuery = """
+                        SELECT operation, options, object_name, cost
+                        FROM plan_table
+                        WHERE statement_id = ?
+                        ORDER BY id
+                        """;
+                    
+                    PreparedStatement ps = conn.prepareStatement(planQuery);
+                    ps.setString(1, stmtId);
+                    ResultSet rs = ps.executeQuery();
+                    
+                    JsonArray operations = new JsonArray();
+                    double totalCost = 0;
+                    
+                    while (rs.next()) {
+                        JsonObject op = new JsonObject()
+                            .put("operation", rs.getString("operation"))
+                            .put("options", rs.getString("options"))
+                            .put("object", rs.getString("object_name"))
+                            .put("cost", rs.getDouble("cost"));
+                        operations.add(op);
+                        totalCost += rs.getDouble("cost");
+                    }
+                    
+                    rs.close();
+                    ps.close();
+                    
+                    // Clean up
+                    stmt.execute("DELETE FROM plan_table WHERE statement_id = '" + stmtId + "'");
+                    stmt.close();
+                    
+                    return new JsonObject()
+                        .put("success", true)
+                        .put("operations", operations)
+                        .put("estimatedCost", totalCost);
+                    
+                } catch (SQLException e) {
+                    return new JsonObject()
+                        .put("success", false)
+                        .put("errorCode", "ORA-" + String.format("%05d", Math.abs(e.getErrorCode())))
+                        .put("errorMessage", e.getMessage());
+                }
+            }).toCompletionStage().toCompletableFuture().get();
             
-            stmt.execute("EXPLAIN PLAN SET STATEMENT_ID = '" + stmtId + "' FOR " + sql);
-            
-            // Retrieve plan details
-            String planQuery = """
-                SELECT operation, options, object_name, cost
-                FROM plan_table
-                WHERE statement_id = ?
-                ORDER BY id
-                """;
-            
-            PreparedStatement ps = dbConnection.prepareStatement(planQuery);
-            ps.setString(1, stmtId);
-            ResultSet rs = ps.executeQuery();
-            
-            JsonArray operations = new JsonArray();
-            double totalCost = 0;
-            
-            while (rs.next()) {
-                JsonObject op = new JsonObject()
-                    .put("operation", rs.getString("operation"))
-                    .put("options", rs.getString("options"))
-                    .put("object", rs.getString("object_name"))
-                    .put("cost", rs.getDouble("cost"));
-                operations.add(op);
-                totalCost += rs.getDouble("cost");
+            if (planResult.getBoolean("success", false)) {
+                check.put("passed", true);
+                check.put("plan", new JsonObject()
+                    .put("operations", planResult.getJsonArray("operations"))
+                    .put("estimatedCost", planResult.getDouble("estimatedCost")));
+            } else {
+                check.put("passed", false);
+                check.put("errors", new JsonArray().add(new JsonObject()
+                    .put("type", "execution")
+                    .put("code", planResult.getString("errorCode"))
+                    .put("message", planResult.getString("errorMessage"))));
             }
             
-            rs.close();
-            ps.close();
-            
-            // Clean up
-            stmt.execute("DELETE FROM plan_table WHERE statement_id = '" + stmtId + "'");
-            stmt.close();
-            
-            check.put("passed", true);
-            check.put("plan", new JsonObject()
-                .put("operations", operations)
-                .put("estimatedCost", totalCost));
-            
-        } catch (SQLException e) {
+        } catch (Exception e) {
             check.put("passed", false);
             check.put("errors", new JsonArray().add(new JsonObject()
                 .put("type", "execution")
-                .put("code", "ORA-" + String.format("%05d", Math.abs(e.getErrorCode())))
-                .put("message", e.getMessage())));
+                .put("message", "Execution validation failed: " + e.getMessage())));
         }
         
         return check;
@@ -581,38 +616,56 @@ public class OracleSQLValidationServer extends MCPServerBase {
             Set<String> tables = extractTablesFromSQL(sql);
             
             for (String table : tables) {
-                // Check if user has SELECT privilege on table
-                String privQuery = """
-                    SELECT privilege
-                    FROM user_tab_privs
-                    WHERE table_name = UPPER(?)
-                    AND privilege IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
-                    """;
+                // Use connection manager to check permissions
+                JsonObject permResult = connectionManager.executeWithConnection(conn -> {
+                    try {
+                        // Check if user has SELECT privilege on table
+                        String privQuery = """
+                            SELECT privilege
+                            FROM user_tab_privs
+                            WHERE table_name = UPPER(?)
+                            AND privilege IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+                            """;
+                        
+                        PreparedStatement ps = conn.prepareStatement(privQuery);
+                        ps.setString(1, table);
+                        ResultSet rs = ps.executeQuery();
+                        
+                        boolean hasPrivilege = false;
+                        while (rs.next()) {
+                            hasPrivilege = true;
+                            break;
+                        }
+                        rs.close();
+                        ps.close();
+                        
+                        if (!hasPrivilege) {
+                            // Check if it's user's own table
+                            String ownerQuery = "SELECT 1 FROM user_tables WHERE table_name = UPPER(?)";
+                            ps = conn.prepareStatement(ownerQuery);
+                            ps.setString(1, table);
+                            rs = ps.executeQuery();
+                            hasPrivilege = rs.next();
+                            rs.close();
+                            ps.close();
+                        }
+                        
+                        return new JsonObject()
+                            .put("table", table)
+                            .put("hasPrivilege", hasPrivilege);
+                            
+                    } catch (SQLException e) {
+                        return new JsonObject()
+                            .put("table", table)
+                            .put("error", e.getMessage());
+                    }
+                }).toCompletionStage().toCompletableFuture().get();
                 
-                PreparedStatement ps = dbConnection.prepareStatement(privQuery);
-                ps.setString(1, table);
-                ResultSet rs = ps.executeQuery();
-                
-                boolean hasPrivilege = false;
-                while (rs.next()) {
-                    hasPrivilege = true;
-                    break;
+                if (permResult.containsKey("error")) {
+                    throw new RuntimeException("Permission check failed for table " + table + ": " + permResult.getString("error"));
                 }
-                rs.close();
-                ps.close();
                 
-                if (!hasPrivilege) {
-                    // Check if it's user's own table
-                    String ownerQuery = "SELECT 1 FROM user_tables WHERE table_name = UPPER(?)";
-                    ps = dbConnection.prepareStatement(ownerQuery);
-                    ps.setString(1, table);
-                    rs = ps.executeQuery();
-                    hasPrivilege = rs.next();
-                    rs.close();
-                    ps.close();
-                }
-                
-                if (!hasPrivilege) {
+                if (!permResult.getBoolean("hasPrivilege", false)) {
                     errors.add(new JsonObject()
                         .put("type", "permission")
                         .put("object", table)
@@ -620,8 +673,8 @@ public class OracleSQLValidationServer extends MCPServerBase {
                 }
             }
             
-        } catch (SQLException e) {
-            vertx.eventBus().publish("log", "Permission check error" + ",0,OracleSQLValidationServer,MCP,System");
+        } catch (Exception e) {
+            vertx.eventBus().publish("log", "Permission check error: " + e.getMessage() + ",0,OracleSQLValidationServer,MCP,System");
             errors.add(new JsonObject()
                 .put("type", "permission")
                 .put("message", "Unable to verify permissions"));
@@ -755,27 +808,37 @@ public class OracleSQLValidationServer extends MCPServerBase {
     }
     
     private String findSimilarTable(String tableName) throws SQLException {
-        // Find tables with similar names using fuzzy matching
-        String query = "SELECT table_name FROM user_tables";
-        Statement stmt = dbConnection.createStatement();
-        ResultSet rs = stmt.executeQuery(query);
-        
-        String bestMatch = null;
-        double bestScore = 0.0;
-        
-        while (rs.next()) {
-            String candidate = rs.getString("table_name");
-            double similarity = calculateSimilarity(tableName.toUpperCase(), candidate);
-            if (similarity > 0.7 && similarity > bestScore) {
-                bestScore = similarity;
-                bestMatch = candidate;
-            }
+        try {
+            // Use connection manager to find similar tables
+            return connectionManager.executeWithConnection(conn -> {
+                try {
+                    String query = "SELECT table_name FROM user_tables";
+                    Statement stmt = conn.createStatement();
+                    ResultSet rs = stmt.executeQuery(query);
+                    
+                    String bestMatch = null;
+                    double bestScore = 0.0;
+                    
+                    while (rs.next()) {
+                        String candidate = rs.getString("table_name");
+                        double similarity = calculateSimilarity(tableName.toUpperCase(), candidate);
+                        if (similarity > 0.7 && similarity > bestScore) {
+                            bestScore = similarity;
+                            bestMatch = candidate;
+                        }
+                    }
+                    
+                    rs.close();
+                    stmt.close();
+                    
+                    return bestMatch;
+                } catch (SQLException e) {
+                    throw new RuntimeException("Failed to find similar tables", e);
+                }
+            }).toCompletionStage().toCompletableFuture().get();
+        } catch (Exception e) {
+            throw new SQLException("Failed to find similar tables: " + e.getMessage(), e);
         }
-        
-        rs.close();
-        stmt.close();
-        
-        return bestMatch;
     }
     
     private double calculateSimilarity(String s1, String s2) {
@@ -851,16 +914,17 @@ public class OracleSQLValidationServer extends MCPServerBase {
             return;
         }
         
-        executeBlocking(Promise.<JsonObject>promise(), promise -> {
-            JsonObject result = new JsonObject();
-            
+        // Use connection manager to execute the explain plan
+        connectionManager.executeWithConnection(conn -> {
             try {
+                JsonObject result = new JsonObject();
+                
                 // Generate unique statement ID
                 String stmtId = "PLAN_" + System.currentTimeMillis() + "_" + Thread.currentThread().getId();
                 
                 // Use PreparedStatement to safely set statement ID
                 String explainPlanSql = "EXPLAIN PLAN SET STATEMENT_ID = ? FOR " + sql;
-                PreparedStatement explainStmt = dbConnection.prepareStatement(explainPlanSql);
+                PreparedStatement explainStmt = conn.prepareStatement(explainPlanSql);
                 explainStmt.setString(1, stmtId);
                 
                 // Execute EXPLAIN PLAN
@@ -895,7 +959,7 @@ public class OracleSQLValidationServer extends MCPServerBase {
                     ORDER BY id
                     """;
                 
-                PreparedStatement ps = dbConnection.prepareStatement(planQuery);
+                PreparedStatement ps = conn.prepareStatement(planQuery);
                 ps.setString(1, stmtId);
                 ResultSet rs = ps.executeQuery();
                 
@@ -971,7 +1035,7 @@ public class OracleSQLValidationServer extends MCPServerBase {
                 ps.close();
                 
                 // Clean up plan table using PreparedStatement
-                PreparedStatement deleteStmt = dbConnection.prepareStatement(
+                PreparedStatement deleteStmt = conn.prepareStatement(
                     "DELETE FROM plan_table WHERE statement_id = ?");
                 deleteStmt.setString(1, stmtId);
                 deleteStmt.execute();
@@ -1011,66 +1075,31 @@ public class OracleSQLValidationServer extends MCPServerBase {
                 }
                 
                 result.put("insights", insights);
-                promise.complete(result);
+                return result;
                 
             } catch (SQLException e) {
-                vertx.eventBus().publish("log", "Failed to generate execution plan" + ",0,OracleSQLValidationServer,MCP,System");
-                promise.fail(new Exception("Execution plan generation failed: " + e.getMessage()));
+                vertx.eventBus().publish("log", "Failed to generate execution plan: " + e.getMessage() + ",0,OracleSQLValidationServer,MCP,System");
+                throw new RuntimeException("Execution plan generation failed: " + e.getMessage(), e);
             }
-        }, res -> {
-            if (res.succeeded()) {
-                sendSuccess(ctx, requestId, res.result());
+        }).onComplete(ar -> {
+            if (ar.succeeded()) {
+                sendSuccess(ctx, requestId, ar.result());
             } else {
                 sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR, 
-                    res.cause().getMessage());
+                    ar.cause().getMessage());
             }
         });
     }
     
-    private Future<Void> initializeDatabase() {
-        Promise<Void> promise = Promise.<Void>promise();
-        
-        vertx.executeBlocking(blockingPromise -> {
-            try {
-                Class.forName("oracle.jdbc.driver.OracleDriver");
-                dbConnection = DriverManager.getConnection(ORACLE_URL, ORACLE_USER, ORACLE_PASSWORD);
-                dbConnection.setAutoCommit(true);
-                
-                vertx.eventBus().publish("log", "Oracle database connection established for SQL validation,2,OracleSQLValidationServer,MCP,System");
-                blockingPromise.complete();
-                
-            } catch (Exception e) {
-                vertx.eventBus().publish("log", "Failed to connect to Oracle database" + ",0,OracleSQLValidationServer,MCP,System");
-                blockingPromise.fail(e);
-            }
-        }, false, res -> {
-            if (res.succeeded()) {
-                promise.complete();
-            } else {
-                promise.fail(res.cause());
-            }
-        });
-        
-        return promise.future();
-    }
     
     @Override
     public void stop(Promise<Void> stopPromise) {
-        if (dbConnection != null) {
-            vertx.executeBlocking(promise -> {
-                try {
-                    dbConnection.close();
-                    vertx.eventBus().publish("log", "Database connection closed,2,OracleSQLValidationServer,MCP,System");
-                    promise.complete();
-                } catch (SQLException e) {
-                    vertx.eventBus().publish("log", "Failed to close database connection" + ",0,OracleSQLValidationServer,MCP,System");
-                    promise.fail(e);
-                }
-            }, res -> {
-                try { super.stop(stopPromise); } catch (Exception e) { stopPromise.fail(e); }
-            });
-        } else {
-            try { super.stop(stopPromise); } catch (Exception e) { stopPromise.fail(e); }
+        // Connection manager handles its own lifecycle
+        // Just call parent stop
+        try { 
+            super.stop(stopPromise); 
+        } catch (Exception e) { 
+            stopPromise.fail(e); 
         }
     }
     

@@ -12,10 +12,12 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.RoutingContext;
 
 
+import agents.director.services.OracleConnectionManager;
 import java.sql.*;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * MCP Server for intelligent schema matching and discovery.
@@ -27,15 +29,7 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     
     
     
-    // Oracle connection details
-    private static final String ORACLE_URL = System.getenv("ORACLE_URL") != null ? 
-        System.getenv("ORACLE_URL") : "jdbc:oracle:thin:@localhost:1521:XE";
-    private static final String ORACLE_USER = System.getenv("ORACLE_USER") != null ? 
-        System.getenv("ORACLE_USER") : "system";
-    private static final String ORACLE_PASSWORD = System.getenv("ORACLE_PASSWORD") != null ? 
-        System.getenv("ORACLE_PASSWORD") : "oracle";
-    
-    private Connection dbConnection;
+    private OracleConnectionManager connectionManager;
     private LlmAPIService llmService;
     
     // Cache for schema metadata
@@ -89,18 +83,21 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     
     @Override
     public void start(Promise<Void> startPromise) {
-        // Initialize database connection
-        initializeDatabase().onComplete(ar -> {
-            if (ar.succeeded()) {
-                // Initialize LLM service
-                llmService = LlmAPIService.getInstance();
-                // Continue with parent initialization
-                super.start(startPromise);
-            } else {
-                vertx.eventBus().publish("log", "Failed to initialize database connection" + ",0,OracleSchemaIntelligenceServer,MCP,System");
-                startPromise.fail(ar.cause());
-            }
-        });
+        // Get connection manager instance (already initialized in Driver)
+        connectionManager = OracleConnectionManager.getInstance();
+        
+        // Check if connection manager is healthy
+        if (!connectionManager.isConnectionHealthy()) {
+            vertx.eventBus().publish("log", "Oracle Connection Manager not healthy - server will operate with limited functionality,1,OracleSchemaIntelligenceServer,MCP,System");
+        } else {
+            vertx.eventBus().publish("log", "OracleSchemaIntelligenceServer using connection pool,2,OracleSchemaIntelligenceServer,MCP,System");
+        }
+        
+        // Initialize LLM service
+        llmService = LlmAPIService.getInstance();
+        
+        // Continue with parent initialization regardless
+        super.start(startPromise);
     }
     
     @Override
@@ -370,41 +367,52 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     
     // Helper methods for schema matching
     
-    private void loadSchemaIfNeeded() throws SQLException {
+    private void loadSchemaIfNeeded() throws Exception {
         if (System.currentTimeMillis() - cacheTimestamp > CACHE_TTL || schemaCache.isEmpty()) {
             vertx.eventBus().publish("log", "Loading schema metadata from database,2,OracleSchemaIntelligenceServer,MCP,System");
             schemaCache.clear();
             
-            DatabaseMetaData metaData = dbConnection.getMetaData();
-            String currentSchema = dbConnection.getSchema();
-            
-            // Get all tables
-            ResultSet tablesRs = metaData.getTables(null, currentSchema, "%", new String[]{"TABLE"});
-            
-            while (tablesRs.next()) {
-                TableInfo table = new TableInfo();
-                table.schema = tablesRs.getString("TABLE_SCHEM");
-                table.tableName = tablesRs.getString("TABLE_NAME");
-                table.comment = tablesRs.getString("REMARKS");
-                
-                // Get columns for this table
-                ResultSet columnsRs = metaData.getColumns(null, table.schema, table.tableName, "%");
-                while (columnsRs.next()) {
-                    ColumnInfo column = new ColumnInfo();
-                    column.columnName = columnsRs.getString("COLUMN_NAME");
-                    column.dataType = columnsRs.getString("TYPE_NAME");
-                    column.size = columnsRs.getInt("COLUMN_SIZE");
-                    column.nullable = "YES".equals(columnsRs.getString("IS_NULLABLE"));
-                    column.comment = columnsRs.getString("REMARKS");
-                    table.columns.add(column);
+            // Use connection manager to load schema
+            Map<String, List<TableInfo>> newCache = connectionManager.executeWithConnection(conn -> {
+                try {
+                    Map<String, List<TableInfo>> tempCache = new HashMap<>();
+                    DatabaseMetaData metaData = conn.getMetaData();
+                    String currentSchema = conn.getSchema();
+                    
+                    // Get all tables
+                    ResultSet tablesRs = metaData.getTables(null, currentSchema, "%", new String[]{"TABLE"});
+                    
+                    while (tablesRs.next()) {
+                        TableInfo table = new TableInfo();
+                        table.schema = tablesRs.getString("TABLE_SCHEM");
+                        table.tableName = tablesRs.getString("TABLE_NAME");
+                        table.comment = tablesRs.getString("REMARKS");
+                        
+                        // Get columns for this table
+                        ResultSet columnsRs = metaData.getColumns(null, table.schema, table.tableName, "%");
+                        while (columnsRs.next()) {
+                            ColumnInfo column = new ColumnInfo();
+                            column.columnName = columnsRs.getString("COLUMN_NAME");
+                            column.dataType = columnsRs.getString("TYPE_NAME");
+                            column.size = columnsRs.getInt("COLUMN_SIZE");
+                            column.nullable = "YES".equals(columnsRs.getString("IS_NULLABLE"));
+                            column.comment = columnsRs.getString("REMARKS");
+                            table.columns.add(column);
+                        }
+                        columnsRs.close();
+                        
+                        // Add to cache
+                        tempCache.computeIfAbsent(table.schema, k -> new ArrayList<>()).add(table);
+                    }
+                    tablesRs.close();
+                    
+                    return tempCache;
+                } catch (SQLException e) {
+                    throw new RuntimeException("Failed to load schema metadata", e);
                 }
-                columnsRs.close();
-                
-                // Add to cache
-                schemaCache.computeIfAbsent(table.schema, k -> new ArrayList<>()).add(table);
-            }
-            tablesRs.close();
+            }).toCompletionStage().toCompletableFuture().get();
             
+            schemaCache.putAll(newCache);
             cacheTimestamp = System.currentTimeMillis();
             vertx.eventBus().publish("log", "Loaded " + schemaCache.size() + " schemas with tables" + ",2,OracleSchemaIntelligenceServer,MCP,System");
         }
@@ -604,96 +612,116 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     }
     
     private JsonObject analyzeColumnSemantics(String tableName, String columnName, int sampleSize) 
-            throws SQLException {
-        JsonObject semantics = new JsonObject()
-            .put("column", columnName)
-            .put("table", tableName);
-        
-        // Get column metadata
-        DatabaseMetaData metaData = dbConnection.getMetaData();
-        ResultSet rs = metaData.getColumns(null, dbConnection.getSchema(), tableName, columnName);
-        
-        if (rs.next()) {
-            semantics.put("dataType", rs.getString("TYPE_NAME"));
-            semantics.put("size", rs.getInt("COLUMN_SIZE"));
+            throws Exception {
+        try {
+            return connectionManager.executeWithConnection(conn -> {
+                try {
+                    JsonObject semantics = new JsonObject()
+                        .put("column", columnName)
+                        .put("table", tableName);
+                    
+                    // Get column metadata
+                    DatabaseMetaData metaData = conn.getMetaData();
+                    ResultSet rs = metaData.getColumns(null, conn.getSchema(), tableName, columnName);
+                    
+                    if (rs.next()) {
+                        semantics.put("dataType", rs.getString("TYPE_NAME"));
+                        semantics.put("size", rs.getInt("COLUMN_SIZE"));
+                    }
+                    rs.close();
+                    
+                    // Sample data analysis
+                    String sql = String.format(
+                        "SELECT DISTINCT %s FROM %s WHERE %s IS NOT NULL AND ROWNUM <= %d",
+                        columnName, tableName, columnName, sampleSize
+                    );
+                    
+                    Statement stmt = conn.createStatement();
+                    ResultSet dataRs = stmt.executeQuery(sql);
+                    
+                    List<String> samples = new ArrayList<>();
+                    while (dataRs.next() && samples.size() < 10) {
+                        samples.add(dataRs.getString(1));
+                    }
+                    dataRs.close();
+                    stmt.close();
+                    
+                    // Detect patterns
+                    JsonArray patterns = new JsonArray();
+                    if (samples.stream().allMatch(s -> s.matches("\\d+"))) {
+                        patterns.add("numeric_id");
+                    }
+                    if (samples.stream().allMatch(s -> s.matches("[A-Z0-9]+"))) {
+                        patterns.add("code");
+                    }
+                    if (samples.stream().allMatch(s -> s.contains("@"))) {
+                        patterns.add("email");
+                    }
+                    if (samples.stream().allMatch(s -> s.matches("\\d{4}-\\d{2}-\\d{2}"))) {
+                        patterns.add("date");
+                    }
+                    
+                    semantics.put("detectedPatterns", patterns);
+                    semantics.put("sampleValues", new JsonArray(samples.subList(0, Math.min(5, samples.size()))));
+                    
+                    return semantics;
+                } catch (SQLException e) {
+                    throw new RuntimeException("Failed to analyze column semantics", e);
+                }
+            }).toCompletionStage().toCompletableFuture().get();
+        } catch (Exception e) {
+            throw new Exception("Failed to analyze column semantics: " + e.getMessage(), e);
         }
-        rs.close();
-        
-        // Sample data analysis
-        String sql = String.format(
-            "SELECT DISTINCT %s FROM %s WHERE %s IS NOT NULL AND ROWNUM <= %d",
-            columnName, tableName, columnName, sampleSize
-        );
-        
-        Statement stmt = dbConnection.createStatement();
-        ResultSet dataRs = stmt.executeQuery(sql);
-        
-        List<String> samples = new ArrayList<>();
-        while (dataRs.next() && samples.size() < 10) {
-            samples.add(dataRs.getString(1));
-        }
-        dataRs.close();
-        stmt.close();
-        
-        // Detect patterns
-        JsonArray patterns = new JsonArray();
-        if (samples.stream().allMatch(s -> s.matches("\\d+"))) {
-            patterns.add("numeric_id");
-        }
-        if (samples.stream().allMatch(s -> s.matches("[A-Z0-9]+"))) {
-            patterns.add("code");
-        }
-        if (samples.stream().allMatch(s -> s.contains("@"))) {
-            patterns.add("email");
-        }
-        if (samples.stream().allMatch(s -> s.matches("\\d{4}-\\d{2}-\\d{2}"))) {
-            patterns.add("date");
-        }
-        
-        semantics.put("detectedPatterns", patterns);
-        semantics.put("sampleValues", new JsonArray(samples.subList(0, Math.min(5, samples.size()))));
-        
-        return semantics;
     }
     
     private List<JsonObject> findRelationships(String table1, String table2, boolean includeIndirect) 
-            throws SQLException {
-        List<JsonObject> relationships = new ArrayList<>();
-        
-        // Check foreign keys
-        DatabaseMetaData metaData = dbConnection.getMetaData();
-        
-        // Check FK from table1 to table2
-        ResultSet fks = metaData.getExportedKeys(null, dbConnection.getSchema(), table2);
-        while (fks.next()) {
-            if (table1.equalsIgnoreCase(fks.getString("FKTABLE_NAME"))) {
-                JsonObject rel = new JsonObject()
-                    .put("type", "foreign_key")
-                    .put("fromTable", table1)
-                    .put("fromColumn", fks.getString("FKCOLUMN_NAME"))
-                    .put("toTable", table2)
-                    .put("toColumn", fks.getString("PKCOLUMN_NAME"));
-                relationships.add(rel);
-            }
+            throws Exception {
+        try {
+            return connectionManager.executeWithConnection(conn -> {
+                try {
+                    List<JsonObject> relationships = new ArrayList<>();
+                    
+                    // Check foreign keys
+                    DatabaseMetaData metaData = conn.getMetaData();
+                    
+                    // Check FK from table1 to table2
+                    ResultSet fks = metaData.getExportedKeys(null, conn.getSchema(), table2);
+                    while (fks.next()) {
+                        if (table1.equalsIgnoreCase(fks.getString("FKTABLE_NAME"))) {
+                            JsonObject rel = new JsonObject()
+                                .put("type", "foreign_key")
+                                .put("fromTable", table1)
+                                .put("fromColumn", fks.getString("FKCOLUMN_NAME"))
+                                .put("toTable", table2)
+                                .put("toColumn", fks.getString("PKCOLUMN_NAME"));
+                            relationships.add(rel);
+                        }
+                    }
+                    fks.close();
+                    
+                    // Check FK from table2 to table1
+                    fks = metaData.getExportedKeys(null, conn.getSchema(), table1);
+                    while (fks.next()) {
+                        if (table2.equalsIgnoreCase(fks.getString("FKTABLE_NAME"))) {
+                            JsonObject rel = new JsonObject()
+                                .put("type", "foreign_key")
+                                .put("fromTable", table2)
+                                .put("fromColumn", fks.getString("FKCOLUMN_NAME"))
+                                .put("toTable", table1)
+                                .put("toColumn", fks.getString("PKCOLUMN_NAME"));
+                            relationships.add(rel);
+                        }
+                    }
+                    fks.close();
+                    
+                    return relationships;
+                } catch (SQLException e) {
+                    throw new RuntimeException("Failed to find relationships", e);
+                }
+            }).toCompletionStage().toCompletableFuture().get();
+        } catch (Exception e) {
+            throw new Exception("Failed to find relationships: " + e.getMessage(), e);
         }
-        fks.close();
-        
-        // Check FK from table2 to table1
-        fks = metaData.getExportedKeys(null, dbConnection.getSchema(), table1);
-        while (fks.next()) {
-            if (table2.equalsIgnoreCase(fks.getString("FKTABLE_NAME"))) {
-                JsonObject rel = new JsonObject()
-                    .put("type", "foreign_key")
-                    .put("fromTable", table2)
-                    .put("fromColumn", fks.getString("FKCOLUMN_NAME"))
-                    .put("toTable", table1)
-                    .put("toColumn", fks.getString("PKCOLUMN_NAME"));
-                relationships.add(rel);
-            }
-        }
-        fks.close();
-        
-        return relationships;
     }
     
     private JsonArray parseJsonArray(String content) {
@@ -721,108 +749,68 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
             return;
         }
         
-        executeBlocking(Promise.<JsonObject>promise(), promise -> {
-            JsonObject result = new JsonObject();
-            JsonObject samples = new JsonObject();
+        JsonObject result = new JsonObject();
+        JsonObject samples = new JsonObject();
+        
+        // Process each table
+        List<Future<Void>> futures = new ArrayList<>();
+        
+        for (int i = 0; i < tableNames.size(); i++) {
+            String tableName = tableNames.getString(i);
             
-            try {
-                for (int i = 0; i < tableNames.size(); i++) {
-                    String tableName = tableNames.getString(i);
-                    
-                    // Validate table name to prevent SQL injection
-                    if (!isValidTableName(tableName)) {
-                        vertx.eventBus().publish("log", "Invalid table name: " + tableName + "" + ",1,OracleSchemaIntelligenceServer,MCP,System");
-                        samples.put(tableName, new JsonObject()
-                            .put("error", "Invalid table name format"));
-                        continue;
-                    }
-                    
-                    try {
-                        // Get current schema
-                        String currentSchema = dbConnection.getSchema();
-                        
-                        // Build safe query with schema qualification
-                        String qualifiedTable = tableName.contains(".") ? tableName : 
-                            (currentSchema != null ? currentSchema + "." + tableName : tableName);
-                        
-                        // Use metadata to verify table exists before querying
-                        DatabaseMetaData metaData = dbConnection.getMetaData();
-                        String[] tableParts = qualifiedTable.split("\\.");
-                        String schema = tableParts.length > 1 ? tableParts[0] : currentSchema;
-                        String table = tableParts.length > 1 ? tableParts[1] : tableParts[0];
-                        
-                        ResultSet tables = metaData.getTables(null, schema, table, new String[]{"TABLE"});
-                        if (!tables.next()) {
-                            samples.put(tableName, new JsonObject()
-                                .put("error", "Table not found: " + qualifiedTable));
-                            tables.close();
-                            continue;
-                        }
-                        tables.close();
-                        
-                        // Safe query using verified table name
-                        String query = "SELECT * FROM " + qualifiedTable + " WHERE ROWNUM <= ?";
-                        PreparedStatement stmt = dbConnection.prepareStatement(query);
-                        stmt.setInt(1, limit);
-                        ResultSet rs = stmt.executeQuery();
-                        
-                        // Get metadata
-                        ResultSetMetaData rsMetaData = rs.getMetaData();
-                        int columnCount = rsMetaData.getColumnCount();
-                        
-                        JsonArray columns = new JsonArray();
-                        for (int col = 1; col <= columnCount; col++) {
+            // Validate table name to prevent SQL injection
+            if (!isValidTableName(tableName)) {
+                vertx.eventBus().publish("log", "Invalid table name: " + tableName + ",1,OracleSchemaIntelligenceServer,MCP,System");
+                samples.put(tableName, new JsonObject()
+                    .put("error", "Invalid table name format"));
+                continue;
+            }
+            
+            // Use connection manager to query table
+            String query = "SELECT * FROM " + tableName + " WHERE ROWNUM <= " + limit;
+            Future<Void> tableFuture = connectionManager.executeQuery(query)
+                .onSuccess(rows -> {
+                    // Extract column info from first row
+                    JsonArray columns = new JsonArray();
+                    if (!rows.isEmpty()) {
+                        JsonObject firstRow = rows.getJsonObject(0);
+                        for (String columnName : firstRow.fieldNames()) {
                             columns.add(new JsonObject()
-                                .put("name", rsMetaData.getColumnName(col))
-                                .put("type", rsMetaData.getColumnTypeName(col)));
+                                .put("name", columnName)
+                                .put("type", "UNKNOWN")); // Connection manager doesn't provide type info
                         }
-                        
-                        JsonArray rows = new JsonArray();
-                        while (rs.next()) {
-                            JsonObject row = new JsonObject();
-                            for (int col = 1; col <= columnCount; col++) {
-                                String columnName = rsMetaData.getColumnName(col);
-                                Object value = rs.getObject(col);
-                                if (value != null) {
-                                    row.put(columnName, value.toString());
-                                } else {
-                                    row.putNull(columnName);
-                                }
-                            }
-                            rows.add(row);
-                        }
-                        
-                        samples.put(tableName, new JsonObject()
-                            .put("columns", columns)
-                            .put("rows", rows)
-                            .put("rowCount", rows.size()));
-                        
-                        rs.close();
-                        stmt.close();
-                        
-                    } catch (SQLException e) {
-                        vertx.eventBus().publish("log", "Failed to get sample data for table " + tableName + ": " + e.getMessage() + "" + ",1,OracleSchemaIntelligenceServer,MCP,System");
-                        samples.put(tableName, new JsonObject()
-                            .put("error", e.getMessage()));
                     }
-                }
-                
+                    
+                    samples.put(tableName, new JsonObject()
+                        .put("columns", columns)
+                        .put("rows", rows)
+                        .put("rowCount", rows.size()));
+                })
+                .onFailure(err -> {
+                    vertx.eventBus().publish("log", "Failed to get sample data for table " + tableName + ": " + err.getMessage() + ",1,OracleSchemaIntelligenceServer,MCP,System");
+                    samples.put(tableName, new JsonObject()
+                        .put("error", err.getMessage()));
+                })
+                .mapEmpty(); // Convert to Future<Void>
+            
+            futures.add(tableFuture);
+        }
+        
+        // Wait for all queries to complete
+        CompletableFuture.allOf(futures.stream()
+            .map(f -> f.toCompletionStage().toCompletableFuture())
+            .toArray(CompletableFuture[]::new))
+            .whenComplete((v, error) -> {
                 result.put("samples", samples);
                 result.put("tablesProcessed", samples.fieldNames().size());
-                promise.complete(result);
                 
-            } catch (Exception e) {
-                vertx.eventBus().publish("log", "Sample data discovery failed" + ",0,OracleSchemaIntelligenceServer,MCP,System");
-                promise.fail(e);
-            }
-        }, res -> {
-            if (res.succeeded()) {
-                sendSuccess(ctx, requestId, res.result());
-            } else {
-                sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR, 
-                    "Sample data discovery failed: " + res.cause().getMessage());
-            }
-        });
+                if (error == null) {
+                    sendSuccess(ctx, requestId, result);
+                } else {
+                    sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR, 
+                        "Sample data discovery failed: " + error.getMessage());
+                }
+            });
     }
     
     /**
@@ -840,50 +828,15 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         return tableName.matches(pattern);
     }
     
-    private Future<Void> initializeDatabase() {
-        Promise<Void> promise = Promise.<Void>promise();
-        
-        vertx.executeBlocking(blockingPromise -> {
-            try {
-                Class.forName("oracle.jdbc.driver.OracleDriver");
-                dbConnection = DriverManager.getConnection(ORACLE_URL, ORACLE_USER, ORACLE_PASSWORD);
-                dbConnection.setAutoCommit(false);
-                
-                vertx.eventBus().publish("log", "Oracle database connection established,2,OracleSchemaIntelligenceServer,MCP,System");
-                blockingPromise.complete();
-                
-            } catch (Exception e) {
-                vertx.eventBus().publish("log", "Failed to connect to Oracle database" + ",0,OracleSchemaIntelligenceServer,MCP,System");
-                blockingPromise.fail(e);
-            }
-        }, false, res -> {
-            if (res.succeeded()) {
-                promise.complete();
-            } else {
-                promise.fail(res.cause());
-            }
-        });
-        
-        return promise.future();
-    }
     
     @Override
     public void stop(Promise<Void> stopPromise) {
-        if (dbConnection != null) {
-            vertx.executeBlocking(promise -> {
-                try {
-                    dbConnection.close();
-                    vertx.eventBus().publish("log", "Database connection closed,2,OracleSchemaIntelligenceServer,MCP,System");
-                    promise.complete();
-                } catch (SQLException e) {
-                    vertx.eventBus().publish("log", "Failed to close database connection" + ",0,OracleSchemaIntelligenceServer,MCP,System");
-                    promise.fail(e);
-                }
-            }, res -> {
-                try { super.stop(stopPromise); } catch (Exception e) { stopPromise.fail(e); }
-            });
-        } else {
-            try { super.stop(stopPromise); } catch (Exception e) { stopPromise.fail(e); }
+        // Connection manager handles its own lifecycle
+        // Just call parent stop
+        try { 
+            super.stop(stopPromise); 
+        } catch (Exception e) { 
+            stopPromise.fail(e); 
         }
     }
     

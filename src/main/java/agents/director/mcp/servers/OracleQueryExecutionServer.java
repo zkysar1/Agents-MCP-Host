@@ -15,8 +15,10 @@ import java.sql.*;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
 
 import agents.director.services.LlmAPIService;
+import agents.director.services.OracleConnectionManager;
 
 /**
  * MCP Server for Oracle database query execution.
@@ -27,15 +29,7 @@ public class OracleQueryExecutionServer extends MCPServerBase {
     
     
     
-    // Oracle connection details (in production, use config file or env vars)
-    private static final String ORACLE_URL = System.getenv("ORACLE_URL") != null ? 
-        System.getenv("ORACLE_URL") : "jdbc:oracle:thin:@localhost:1521:XE";
-    private static final String ORACLE_USER = System.getenv("ORACLE_USER") != null ? 
-        System.getenv("ORACLE_USER") : "system";
-    private static final String ORACLE_PASSWORD = System.getenv("ORACLE_PASSWORD") != null ? 
-        System.getenv("ORACLE_PASSWORD") : "oracle";
-    
-    private Connection dbConnection;
+    private OracleConnectionManager connectionManager;
     
     public OracleQueryExecutionServer() {
         super("OracleQueryExecutionServer", "/mcp/servers/oracle-db");
@@ -43,16 +37,22 @@ public class OracleQueryExecutionServer extends MCPServerBase {
     
     @Override
     public void start(Promise<Void> startPromise) {
-        // Initialize database connection
-        initializeDatabase().onComplete(ar -> {
-            if (ar.succeeded()) {
-                // Continue with parent initialization
-                super.start(startPromise);
-            } else {
-                vertx.eventBus().publish("log", "Failed to initialize database connection" + ",0,OracleQueryExecutionServer,MCP,System");
-                startPromise.fail(ar.cause());
-            }
-        });
+        System.out.println("[OracleQueryExecutionServer] Getting OracleConnectionManager instance...");
+        
+        // Get connection manager instance (already initialized in Driver)
+        connectionManager = OracleConnectionManager.getInstance();
+        
+        // Check if connection manager is healthy
+        if (!connectionManager.isConnectionHealthy()) {
+            System.out.println("[OracleQueryExecutionServer] Connection manager not healthy");
+            vertx.eventBus().publish("log", "Oracle Connection Manager not healthy - server will operate with limited functionality,1,OracleQueryExecutionServer,MCP,System");
+        } else {
+            System.out.println("[OracleQueryExecutionServer] Connection manager is healthy");
+            vertx.eventBus().publish("log", "OracleQueryExecutionServer using connection pool,2,OracleQueryExecutionServer,MCP,System");
+        }
+        
+        // Continue with parent initialization regardless
+        super.start(startPromise);
     }
     
     @Override
@@ -137,130 +137,133 @@ public class OracleQueryExecutionServer extends MCPServerBase {
             return;
         }
         
-        // Execute blocking DB operation
-        executeBlocking(Promise.<JsonObject>promise(), promise -> {
-            try {
-                Statement stmt = dbConnection.createStatement();
-                stmt.setMaxRows(maxRows);
-                
-                boolean hasResultSet = stmt.execute(sql);
-                JsonObject result = new JsonObject();
-                
-                if (hasResultSet) {
-                    ResultSet rs = stmt.getResultSet();
-                    ResultSetMetaData metaData = rs.getMetaData();
-                    int columnCount = metaData.getColumnCount();
+        // Add ROWNUM limit for SELECT queries if maxRows is specified
+        String limitedSql = sql.trim();
+        if (maxRows > 0 && limitedSql.toUpperCase().startsWith("SELECT") && 
+            !limitedSql.toUpperCase().contains("ROWNUM")) {
+            // Simple approach - wrap in subquery with ROWNUM
+            limitedSql = "SELECT * FROM (" + sql + ") WHERE ROWNUM <= " + maxRows;
+        }
+        
+        // Check if it's a SELECT query or DML (INSERT/UPDATE/DELETE)
+        boolean isSelectQuery = limitedSql.trim().toUpperCase().startsWith("SELECT");
+        
+        if (isSelectQuery) {
+            // Use connection manager's executeQuery for SELECT
+            connectionManager.executeQuery(limitedSql).onComplete(ar -> {
+                if (ar.succeeded()) {
+                    JsonArray rows = ar.result();
+                    JsonObject result = new JsonObject();
                     
-                    // Get column names
+                    // Extract column metadata from first row if available
                     JsonArray columns = new JsonArray();
-                    for (int i = 1; i <= columnCount; i++) {
-                        columns.add(new JsonObject()
-                            .put("name", metaData.getColumnName(i))
-                            .put("type", metaData.getColumnTypeName(i)));
-                    }
-                    
-                    // Get rows
-                    JsonArray rows = new JsonArray();
-                    while (rs.next()) {
-                        JsonObject row = new JsonObject();
-                        for (int i = 1; i <= columnCount; i++) {
-                            String columnName = metaData.getColumnName(i);
-                            Object value = rs.getObject(i);
-                            if (value != null) {
-                                row.put(columnName, value.toString());
-                            } else {
-                                row.putNull(columnName);
-                            }
+                    if (!rows.isEmpty()) {
+                        JsonObject firstRow = rows.getJsonObject(0);
+                        for (String columnName : firstRow.fieldNames()) {
+                            columns.add(new JsonObject()
+                                .put("name", columnName)
+                                .put("type", "UNKNOWN")); // Connection manager doesn't provide type info
                         }
-                        rows.add(row);
                     }
                     
                     result.put("columns", columns);
                     result.put("rows", rows);
                     result.put("rowCount", rows.size());
                     
-                    rs.close();
+                    sendSuccess(ctx, requestId, result);
                 } else {
-                    // Update/Delete/Insert query
-                    int updateCount = stmt.getUpdateCount();
-                    result.put("updateCount", updateCount);
-                    result.put("message", "Query executed successfully. Rows affected: " + updateCount);
+                    vertx.eventBus().publish("log", "Query execution failed: " + ar.cause().getMessage() + ",0,OracleQueryExecutionServer,MCP,System");
+                    sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR, 
+                        "Query execution failed: " + ar.cause().getMessage());
                 }
-                
-                stmt.close();
-                promise.complete(result);
-                
-            } catch (SQLException e) {
-                promise.fail(e);
-            }
-        }, res -> {
-            if (res.succeeded()) {
-                sendSuccess(ctx, requestId, res.result());
-            } else {
-                vertx.eventBus().publish("log", "Query execution failed" + ",0,OracleQueryExecutionServer,MCP,System");
-                sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR, 
-                    "Query execution failed: " + res.cause().getMessage());
-            }
-        });
+            });
+        } else {
+            // Use connection manager's executeUpdate for DML
+            connectionManager.executeUpdate(limitedSql).onComplete(ar -> {
+                if (ar.succeeded()) {
+                    int updateCount = ar.result();
+                    JsonObject result = new JsonObject()
+                        .put("updateCount", updateCount)
+                        .put("message", "Query executed successfully. Rows affected: " + updateCount);
+                    
+                    sendSuccess(ctx, requestId, result);
+                } else {
+                    vertx.eventBus().publish("log", "Query execution failed: " + ar.cause().getMessage() + ",0,OracleQueryExecutionServer,MCP,System");
+                    sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR, 
+                        "Query execution failed: " + ar.cause().getMessage());
+                }
+            });
+        }
     }
     
     private void getSchemaInfo(RoutingContext ctx, String requestId, JsonObject arguments) {
         String schemaFilter = arguments.getString("schemaName");
         
-        executeBlocking(Promise.<JsonObject>promise(), promise -> {
-            try {
+        // Use connection manager to get table list
+        connectionManager.listTables().onComplete(tablesAr -> {
+            if (tablesAr.succeeded()) {
+                JsonArray allTables = tablesAr.result();
+                
+                // If we need detailed schema info, we'll need to query for columns
+                // For now, let's use a combination of listTables and getTableMetadata
                 JsonObject result = new JsonObject();
-                JsonArray tables = new JsonArray();
+                JsonArray detailedTables = new JsonArray();
                 
-                DatabaseMetaData metaData = dbConnection.getMetaData();
-                String currentSchema = dbConnection.getSchema();
-                
-                // Get tables
-                ResultSet tablesRs = metaData.getTables(null, 
-                    schemaFilter != null ? schemaFilter : currentSchema, 
-                    "%", new String[]{"TABLE"});
-                
-                while (tablesRs.next()) {
-                    String tableName = tablesRs.getString("TABLE_NAME");
-                    String tableSchema = tablesRs.getString("TABLE_SCHEM");
-                    
-                    JsonObject table = new JsonObject()
-                        .put("name", tableName)
-                        .put("schema", tableSchema);
-                    
-                    // Get columns for this table
-                    JsonArray columns = new JsonArray();
-                    ResultSet columnsRs = metaData.getColumns(null, tableSchema, tableName, "%");
-                    
-                    while (columnsRs.next()) {
-                        JsonObject column = new JsonObject()
-                            .put("name", columnsRs.getString("COLUMN_NAME"))
-                            .put("type", columnsRs.getString("TYPE_NAME"))
-                            .put("size", columnsRs.getInt("COLUMN_SIZE"))
-                            .put("nullable", columnsRs.getString("IS_NULLABLE"));
-                        columns.add(column);
+                // Filter tables if schemaFilter is provided
+                List<String> tablesToProcess = new ArrayList<>();
+                for (int i = 0; i < allTables.size(); i++) {
+                    JsonObject table = allTables.getJsonObject(i);
+                    String tableName = table.getString("name");
+                    if (schemaFilter == null || tableName.toUpperCase().startsWith(schemaFilter.toUpperCase())) {
+                        tablesToProcess.add(tableName);
                     }
-                    columnsRs.close();
-                    
-                    table.put("columns", columns);
-                    tables.add(table);
                 }
-                tablesRs.close();
                 
-                result.put("tables", tables);
-                result.put("tableCount", tables.size());
-                promise.complete(result);
+                if (tablesToProcess.isEmpty()) {
+                    result.put("tables", detailedTables);
+                    result.put("tableCount", 0);
+                    sendSuccess(ctx, requestId, result);
+                    return;
+                }
                 
-            } catch (SQLException e) {
-                promise.fail(e);
-            }
-        }, res -> {
-            if (res.succeeded()) {
-                sendSuccess(ctx, requestId, res.result());
+                // Process tables to get column info
+                List<Future<JsonObject>> metadataFutures = new ArrayList<>();
+                for (String tableName : tablesToProcess) {
+                    metadataFutures.add(connectionManager.getTableMetadata(tableName));
+                }
+                
+                // Use CompositeFuture to wait for all metadata
+                CompletableFuture.allOf(metadataFutures.stream()
+                    .map(f -> f.toCompletionStage().toCompletableFuture())
+                    .toArray(CompletableFuture[]::new))
+                    .whenComplete((v, error) -> {
+                        if (error == null) {
+                            // Collect all successful metadata
+                            for (int i = 0; i < metadataFutures.size(); i++) {
+                                Future<JsonObject> future = metadataFutures.get(i);
+                                if (future.succeeded()) {
+                                    JsonObject metadata = future.result();
+                                    JsonObject tableInfo = new JsonObject()
+                                        .put("name", metadata.getString("tableName"))
+                                        .put("schema", "ADMIN") // Default schema
+                                        .put("columns", metadata.getJsonArray("columns"));
+                                    detailedTables.add(tableInfo);
+                                }
+                            }
+                            
+                            result.put("tables", detailedTables);
+                            result.put("tableCount", detailedTables.size());
+                            sendSuccess(ctx, requestId, result);
+                        } else {
+                            vertx.eventBus().publish("log", "Schema metadata retrieval failed: " + error.getMessage() + ",0,OracleQueryExecutionServer,MCP,System");
+                            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR, 
+                                "Schema retrieval failed: " + error.getMessage());
+                        }
+                    });
             } else {
-                vertx.eventBus().publish("log", "Schema retrieval failed" + ",0,OracleQueryExecutionServer,MCP,System");
+                vertx.eventBus().publish("log", "Failed to list tables: " + tablesAr.cause().getMessage() + ",0,OracleQueryExecutionServer,MCP,System");
                 sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR, 
-                    "Schema retrieval failed: " + res.cause().getMessage());
+                    "Schema retrieval failed: " + tablesAr.cause().getMessage());
             }
         });
     }
@@ -442,53 +445,15 @@ public class OracleQueryExecutionServer extends MCPServerBase {
             .put("method", "simple");
     }
     
-    private Future<Void> initializeDatabase() {
-        Promise<Void> promise = Promise.<Void>promise();
-        
-        vertx.executeBlocking(blockingPromise -> {
-            try {
-                // Load Oracle driver
-                Class.forName("oracle.jdbc.driver.OracleDriver");
-                
-                // Create connection
-                dbConnection = DriverManager.getConnection(ORACLE_URL, ORACLE_USER, ORACLE_PASSWORD);
-                dbConnection.setAutoCommit(false); // Use transactions
-                
-                vertx.eventBus().publish("log", "Oracle database connection established,2,OracleQueryExecutionServer,MCP,System");
-                blockingPromise.complete();
-                
-            } catch (Exception e) {
-                vertx.eventBus().publish("log", "Failed to connect to Oracle database" + ",0,OracleQueryExecutionServer,MCP,System");
-                blockingPromise.fail(e);
-            }
-        }, false, res -> {
-            if (res.succeeded()) {
-                promise.complete();
-            } else {
-                promise.fail(res.cause());
-            }
-        });
-        
-        return promise.future();
-    }
     
     @Override
     public void stop(Promise<Void> stopPromise) {
-        if (dbConnection != null) {
-            vertx.executeBlocking(promise -> {
-                try {
-                    dbConnection.close();
-                    vertx.eventBus().publish("log", "Database connection closed,2,OracleQueryExecutionServer,MCP,System");
-                    promise.complete();
-                } catch (SQLException e) {
-                    vertx.eventBus().publish("log", "Failed to close database connection" + ",0,OracleQueryExecutionServer,MCP,System");
-                    promise.fail(e);
-                }
-            }, res -> {
-                try { super.stop(stopPromise); } catch (Exception e) { stopPromise.fail(e); }
-            });
-        } else {
-            try { super.stop(stopPromise); } catch (Exception e) { stopPromise.fail(e); }
+        // Connection manager handles its own lifecycle
+        // Just call parent stop
+        try { 
+            super.stop(stopPromise); 
+        } catch (Exception e) { 
+            stopPromise.fail(e); 
         }
     }
     

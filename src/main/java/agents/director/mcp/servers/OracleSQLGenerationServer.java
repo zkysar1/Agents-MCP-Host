@@ -12,9 +12,11 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.RoutingContext;
 
 
+import agents.director.services.OracleConnectionManager;
 import java.sql.*;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * MCP Server for Oracle SQL generation and optimization.
@@ -26,15 +28,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
     
     
     
-    // Oracle connection details for EXPLAIN PLAN
-    private static final String ORACLE_URL = System.getenv("ORACLE_URL") != null ? 
-        System.getenv("ORACLE_URL") : "jdbc:oracle:thin:@localhost:1521:XE";
-    private static final String ORACLE_USER = System.getenv("ORACLE_USER") != null ? 
-        System.getenv("ORACLE_USER") : "system";
-    private static final String ORACLE_PASSWORD = System.getenv("ORACLE_PASSWORD") != null ? 
-        System.getenv("ORACLE_PASSWORD") : "oracle";
-    
-    private Connection dbConnection;
+    private OracleConnectionManager connectionManager;
     private LlmAPIService llmService;
     
     // SQL generation templates and patterns
@@ -53,19 +47,24 @@ public class OracleSQLGenerationServer extends MCPServerBase {
     
     @Override
     public void start(Promise<Void> startPromise) {
-        // Initialize database connection for EXPLAIN PLAN
-        initializeDatabase().onComplete(ar -> {
-            if (ar.succeeded()) {
-                llmService = LlmAPIService.getInstance();
-                if (!llmService.isInitialized()) {
-                    vertx.eventBus().publish("log", "LLM service not initialized - SQL generation will use templates only,1,OracleSQLGenerationServer,MCP,System");
-                }
-                super.start(startPromise);
-            } else {
-                vertx.eventBus().publish("log", "Failed to initialize database connection" + ",0,OracleSQLGenerationServer,MCP,System");
-                startPromise.fail(ar.cause());
-            }
-        });
+        // Get connection manager instance (already initialized in Driver)
+        connectionManager = OracleConnectionManager.getInstance();
+        
+        // Check if connection manager is healthy
+        if (!connectionManager.isConnectionHealthy()) {
+            vertx.eventBus().publish("log", "Oracle Connection Manager not healthy - server will operate with limited functionality,1,OracleSQLGenerationServer,MCP,System");
+        } else {
+            vertx.eventBus().publish("log", "OracleSQLGenerationServer using connection pool,2,OracleSQLGenerationServer,MCP,System");
+        }
+        
+        // Initialize LLM service
+        llmService = LlmAPIService.getInstance();
+        if (!llmService.isInitialized()) {
+            vertx.eventBus().publish("log", "LLM service not initialized - SQL generation will use templates only,1,OracleSQLGenerationServer,MCP,System");
+        }
+        
+        // Continue with parent initialization regardless
+        super.start(startPromise);
     }
     
     @Override
@@ -365,69 +364,78 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         return sql.trim();
     }
     
-    private JsonObject getExplainPlan(String sql) throws SQLException {
-        JsonObject plan = new JsonObject();
-        
-        Statement stmt = dbConnection.createStatement();
-        
+    private JsonObject getExplainPlan(String sql) throws Exception {
         try {
-            // Generate unique statement ID
-            String stmtId = "STMT_" + System.currentTimeMillis();
-            
-            // Run EXPLAIN PLAN
-            stmt.execute("EXPLAIN PLAN SET STATEMENT_ID = '" + stmtId + "' FOR " + sql);
-            
-            // Query the plan table
-            String planQuery = """
-                SELECT LEVEL, LPAD(' ', 2 * (LEVEL - 1)) || operation || ' ' || 
-                       NVL(options, '') AS operation,
-                       object_name, cost, cardinality, bytes, cpu_cost, io_cost
-                FROM plan_table
-                WHERE statement_id = ?
-                START WITH id = 0
-                CONNECT BY PRIOR id = parent_id AND statement_id = ?
-                ORDER BY id
-                """;
-            
-            PreparedStatement ps = dbConnection.prepareStatement(planQuery);
-            ps.setString(1, stmtId);
-            ps.setString(2, stmtId);
-            
-            ResultSet rs = ps.executeQuery();
-            JsonArray operations = new JsonArray();
-            double totalCost = 0;
-            
-            while (rs.next()) {
-                JsonObject op = new JsonObject()
-                    .put("level", rs.getInt("LEVEL"))
-                    .put("operation", rs.getString("operation"))
-                    .put("objectName", rs.getString("object_name"))
-                    .put("cost", rs.getDouble("cost"))
-                    .put("cardinality", rs.getLong("cardinality"))
-                    .put("bytes", rs.getLong("bytes"))
-                    .put("cpuCost", rs.getLong("cpu_cost"))
-                    .put("ioCost", rs.getLong("io_cost"));
-                operations.add(op);
-                
-                if (rs.getInt("LEVEL") == 1) {
-                    totalCost = rs.getDouble("cost");
+            return connectionManager.executeWithConnection(conn -> {
+                try {
+                    JsonObject plan = new JsonObject();
+                    Statement stmt = conn.createStatement();
+                    
+                    try {
+                        // Generate unique statement ID
+                        String stmtId = "STMT_" + System.currentTimeMillis();
+                        
+                        // Run EXPLAIN PLAN
+                        stmt.execute("EXPLAIN PLAN SET STATEMENT_ID = '" + stmtId + "' FOR " + sql);
+                        
+                        // Query the plan table
+                        String planQuery = """
+                            SELECT LEVEL, LPAD(' ', 2 * (LEVEL - 1)) || operation || ' ' || 
+                                   NVL(options, '') AS operation,
+                                   object_name, cost, cardinality, bytes, cpu_cost, io_cost
+                            FROM plan_table
+                            WHERE statement_id = ?
+                            START WITH id = 0
+                            CONNECT BY PRIOR id = parent_id AND statement_id = ?
+                            ORDER BY id
+                            """;
+                        
+                        PreparedStatement ps = conn.prepareStatement(planQuery);
+                        ps.setString(1, stmtId);
+                        ps.setString(2, stmtId);
+                        
+                        ResultSet rs = ps.executeQuery();
+                        JsonArray operations = new JsonArray();
+                        double totalCost = 0;
+                        
+                        while (rs.next()) {
+                            JsonObject op = new JsonObject()
+                                .put("level", rs.getInt("LEVEL"))
+                                .put("operation", rs.getString("operation"))
+                                .put("objectName", rs.getString("object_name"))
+                                .put("cost", rs.getDouble("cost"))
+                                .put("cardinality", rs.getLong("cardinality"))
+                                .put("bytes", rs.getLong("bytes"))
+                                .put("cpuCost", rs.getLong("cpu_cost"))
+                                .put("ioCost", rs.getLong("io_cost"));
+                            operations.add(op);
+                            
+                            if (rs.getInt("LEVEL") == 1) {
+                                totalCost = rs.getDouble("cost");
+                            }
+                        }
+                        
+                        rs.close();
+                        ps.close();
+                        
+                        // Clean up plan table
+                        stmt.execute("DELETE FROM plan_table WHERE statement_id = '" + stmtId + "'");
+                        
+                        plan.put("operations", operations);
+                        plan.put("totalCost", totalCost);
+                        
+                    } finally {
+                        stmt.close();
+                    }
+                    
+                    return plan;
+                } catch (SQLException e) {
+                    throw new RuntimeException("Failed to get execution plan: " + e.getMessage(), e);
                 }
-            }
-            
-            rs.close();
-            ps.close();
-            
-            // Clean up plan table
-            stmt.execute("DELETE FROM plan_table WHERE statement_id = '" + stmtId + "'");
-            
-            plan.put("operations", operations);
-            plan.put("totalCost", totalCost);
-            
-        } finally {
-            stmt.close();
+            }).toCompletionStage().toCompletableFuture().get();
+        } catch (Exception e) {
+            throw new Exception("Failed to get execution plan: " + e.getMessage(), e);
         }
-        
-        return plan;
     }
     
     private JsonArray analyzeExplainPlan(JsonObject explainPlan, String sql) {
@@ -613,50 +621,15 @@ public class OracleSQLGenerationServer extends MCPServerBase {
                upperSQL.contains("MIN(") || upperSQL.contains("GROUP BY");
     }
     
-    private Future<Void> initializeDatabase() {
-        Promise<Void> promise = Promise.<Void>promise();
-        
-        vertx.executeBlocking(blockingPromise -> {
-            try {
-                Class.forName("oracle.jdbc.driver.OracleDriver");
-                dbConnection = DriverManager.getConnection(ORACLE_URL, ORACLE_USER, ORACLE_PASSWORD);
-                dbConnection.setAutoCommit(true); // Auto-commit for EXPLAIN PLAN
-                
-                vertx.eventBus().publish("log", "Oracle database connection established for SQL optimization,2,OracleSQLGenerationServer,MCP,System");
-                blockingPromise.complete();
-                
-            } catch (Exception e) {
-                vertx.eventBus().publish("log", "Failed to connect to Oracle database" + ",0,OracleSQLGenerationServer,MCP,System");
-                blockingPromise.fail(e);
-            }
-        }, false, res -> {
-            if (res.succeeded()) {
-                promise.complete();
-            } else {
-                promise.fail(res.cause());
-            }
-        });
-        
-        return promise.future();
-    }
     
     @Override
     public void stop(Promise<Void> stopPromise) {
-        if (dbConnection != null) {
-            vertx.executeBlocking(promise -> {
-                try {
-                    dbConnection.close();
-                    vertx.eventBus().publish("log", "Database connection closed,2,OracleSQLGenerationServer,MCP,System");
-                    promise.complete();
-                } catch (SQLException e) {
-                    vertx.eventBus().publish("log", "Failed to close database connection" + ",0,OracleSQLGenerationServer,MCP,System");
-                    promise.fail(e);
-                }
-            }, res -> {
-                try { super.stop(stopPromise); } catch (Exception e) { stopPromise.fail(e); }
-            });
-        } else {
-            try { super.stop(stopPromise); } catch (Exception e) { stopPromise.fail(e); }
+        // Connection manager handles its own lifecycle
+        // Just call parent stop
+        try { 
+            super.stop(stopPromise); 
+        } catch (Exception e) { 
+            stopPromise.fail(e); 
         }
     }
     

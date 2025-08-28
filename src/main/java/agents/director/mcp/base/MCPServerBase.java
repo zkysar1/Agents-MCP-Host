@@ -7,6 +7,7 @@ import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 
+import agents.director.services.MCPRouterService;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -44,27 +45,13 @@ public abstract class MCPServerBase extends AbstractVerticle {
         // Initialize server-specific tools
         initializeTools();
         
-        // Register router with the event bus for dynamic mounting
-        String routerId = serverName + "-router";
-        vertx.eventBus().consumer(routerId + ".router", message -> {
-            message.reply(router);
-        });
+        // Register router with MCPRouterService using static method
+        MCPRouterService.registerRouter(serverPath, router);
+        vertx.eventBus().publish("log", "" + serverName + " registered router at path: " + serverPath + "" + ",2,MCPServerBase,MCP,System");
         
-        // Register with MCPRouterService
-        JsonObject registration = new JsonObject()
-            .put("path", serverPath)
-            .put("routerId", routerId);
-            
-        vertx.eventBus().<JsonObject>request("mcp.router.register", registration, reply -> {
-            if (reply.succeeded()) {
-                vertx.eventBus().publish("log", "" + serverName + " registered at path: " + serverPath + "" + ",2,MCPServerBase,MCP,System");
-                onServerReady();
-                startPromise.complete();
-            } else {
-                vertx.eventBus().publish("log", "Failed to register " + serverName + " with router" + ",0,MCPServerBase,MCP,System");
-                startPromise.fail(reply.cause());
-            }
-        });
+        // Notify that the server is ready
+        onServerReady();
+        startPromise.complete();
     }
     
     /**
