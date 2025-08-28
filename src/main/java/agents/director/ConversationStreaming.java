@@ -1,4 +1,4 @@
-package agents.director.apis;
+package agents.director;
 
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Promise;
@@ -11,7 +11,6 @@ import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import io.vertx.core.http.HttpServerResponse;
-import io.vertx.core.eventbus.DeliveryOptions;
 
 import agents.director.services.MCPRouterService;
 import agents.director.services.InterruptManager;
@@ -21,7 +20,6 @@ import agents.director.services.OracleConnectionManager;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.stream.Collectors;
 
 /**
  * Master Streaming Conversation API with host-based routing.
