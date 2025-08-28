@@ -126,6 +126,38 @@ public class Driver {
       )
     );
     
+    // Deploy StrategyGenerationServer (Worker - uses LLM)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.StrategyGenerationServer",
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
+      )
+    );
+    
+    // Deploy IntentAnalysisServer (Worker - uses LLM)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.IntentAnalysisServer",
+        new DeploymentOptions().setWorker(true).setWorkerPoolSize(3)
+      )
+    );
+    
+    // Deploy StrategyOrchestratorServer (Regular - manages execution)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.StrategyOrchestratorServer",
+        new DeploymentOptions().setWorker(false)
+      )
+    );
+    
+    // Deploy StrategyLearningServer (Regular - tracks metrics)
+    deploymentFutures.add(
+      vertx.deployVerticle(
+        "agents.director.mcp.servers.StrategyLearningServer",
+        new DeploymentOptions().setWorker(false)
+      )
+    );
+    
     // Wait for all servers to deploy
     CompositeFuture.all(deploymentFutures).onComplete(ar -> {
       if (ar.succeeded()) {

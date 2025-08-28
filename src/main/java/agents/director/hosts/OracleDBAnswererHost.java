@@ -38,10 +38,9 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     private LlmAPIService llmService;
     private EventBus eventBus;
     
-    // Orchestration configuration
-    private JsonObject orchestrationConfig;
-    private JsonObject strategies;
-    private JsonObject strategyRules;
+    // Dynamic strategy configuration
+    private boolean useDynamicStrategies = true; // Feature flag
+    private JsonObject fallbackStrategies; // For backward compatibility
     
     // Conversation context management
     private final Map<String, ConversationContext> conversations = new ConcurrentHashMap<>();
@@ -113,22 +112,31 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     private Future<Void> loadOrchestrationConfig() {
         Promise<Void> promise = Promise.<Void>promise();
         
-        try {
-            InputStream is = getClass().getResourceAsStream("/orchestration-strategies.json");
-            if (is != null) {
-                String content = new String(is.readAllBytes());
-                orchestrationConfig = new JsonObject(content);
-                strategies = orchestrationConfig.getJsonObject("strategies", new JsonObject());
-                strategyRules = orchestrationConfig.getJsonObject("strategy_selection_rules", new JsonObject());
-                vertx.eventBus().publish("log", "Loaded orchestration configuration with " + strategies.size() + " strategies" + ",2,OracleDBAnswererHost,Host,System");
-                promise.complete();
-            } else {
-                promise.fail("orchestration-strategies.json not found");
-            }
-        } catch (Exception e) {
-            promise.fail(e);
+        // Check if using dynamic strategies
+        String dynamicFlag = System.getenv("USE_DYNAMIC_STRATEGIES");
+        if (dynamicFlag != null) {
+            useDynamicStrategies = Boolean.parseBoolean(dynamicFlag);
         }
         
+        if (!useDynamicStrategies) {
+            // Load fallback strategies for backward compatibility
+            try {
+                InputStream is = getClass().getResourceAsStream("/orchestration-strategies.json");
+                if (is != null) {
+                    String content = new String(is.readAllBytes());
+                    JsonObject config = new JsonObject(content);
+                    fallbackStrategies = config.getJsonObject("strategies", new JsonObject());
+                    vertx.eventBus().publish("log", "Loaded fallback strategies for compatibility,2,OracleDBAnswererHost,Host,System");
+                }
+            } catch (Exception e) {
+                vertx.eventBus().publish("log", "Failed to load fallback strategies: " + e.getMessage() + ",1,OracleDBAnswererHost,Host,System");
+            }
+        }
+        
+        vertx.eventBus().publish("log", "OracleDBAnswererHost configured for " + 
+            (useDynamicStrategies ? "DYNAMIC" : "STATIC") + " strategy generation,2,OracleDBAnswererHost,Host,System");
+        
+        promise.complete();
         return promise.future();
     }
     
@@ -187,6 +195,37 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             baseUrl + "/mcp/servers/oracle-db"
         );
         clientFutures.add(deployClient(execClient, "oracle-db"));
+        
+        // Dynamic Strategy Generation Clients (only if enabled)
+        if (useDynamicStrategies) {
+            // Strategy Generation Client
+            UniversalMCPClient strategyGenClient = new UniversalMCPClient(
+                "StrategyGeneration",
+                baseUrl + "/mcp/servers/strategy-gen"
+            );
+            clientFutures.add(deployClient(strategyGenClient, "strategy-generation"));
+            
+            // Intent Analysis Client
+            UniversalMCPClient intentAnalysisClient = new UniversalMCPClient(
+                "IntentAnalysis",
+                baseUrl + "/mcp/servers/intent-analysis"
+            );
+            clientFutures.add(deployClient(intentAnalysisClient, "intent-analysis"));
+            
+            // Strategy Orchestrator Client
+            UniversalMCPClient orchestratorClient = new UniversalMCPClient(
+                "StrategyOrchestrator",
+                baseUrl + "/mcp/servers/strategy-orchestrator"
+            );
+            clientFutures.add(deployClient(orchestratorClient, "strategy-orchestrator"));
+            
+            // Strategy Learning Client
+            UniversalMCPClient learningClient = new UniversalMCPClient(
+                "StrategyLearning",
+                baseUrl + "/mcp/servers/strategy-learning"
+            );
+            clientFutures.add(deployClient(learningClient, "strategy-learning"));
+        }
         
         // Wait for all clients to be ready
         CompositeFuture.all(clientFutures).onComplete(ar -> {
@@ -381,71 +420,145 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     }
     
     /**
-     * Evaluate query intent and select optimal strategy
+     * Evaluate query intent and select or generate optimal strategy
      */
     private Future<JsonObject> evaluateAndSelectStrategy(ConversationContext context, String query) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
-        UniversalMCPClient intentClient = mcpClients.get("query-intent");
-        if (intentClient == null || !intentClient.isReady()) {
-            // Fallback to default strategy
-            vertx.eventBus().publish("log", "Intent evaluation client not ready, using default strategy,1,OracleDBAnswererHost,Host,System");
-            promise.complete(new JsonObject()
-                .put("selectedStrategy", "oracle_full_pipeline")
-                .put("selectedHost", "oracledbanswerer")
-                .put("confidence", 0.5)
-                .put("method", "fallback"));
+        if (useDynamicStrategies) {
+            // Use dynamic strategy generation
+            generateDynamicStrategy(context, query)
+                .onComplete(ar -> {
+                    if (ar.succeeded()) {
+                        promise.complete(ar.result());
+                    } else {
+                        vertx.eventBus().publish("log", "Dynamic strategy generation failed, using fallback" + ",1,OracleDBAnswererHost,Host,System");
+                        promise.complete(getFallbackStrategySelection());
+                    }
+                });
+        } else {
+            // Use legacy static strategy selection
+            UniversalMCPClient intentClient = mcpClients.get("query-intent");
+            if (intentClient == null || !intentClient.isReady()) {
+                promise.complete(getFallbackStrategySelection());
+                return promise.future();
+            }
+            
+            JsonObject selectionArgs = new JsonObject()
+                .put("query", query)
+                .put("conversationHistory", context.getRecentHistory(5));
+            
+            intentClient.callTool("select_tool_strategy", selectionArgs)
+                .compose(toolDecision -> {
+                    context.storeStepResult("tool_strategy_decision", toolDecision);
+                    
+                    String strategy = toolDecision.getString("strategy");
+                    if ("ORCHESTRATION".equals(strategy)) {
+                        String orchestrationName = toolDecision.getString("orchestrationName");
+                        JsonObject strategyResult = new JsonObject()
+                            .put("selectedStrategy", orchestrationName)
+                            .put("selectedHost", "oracledbanswerer")
+                            .put("confidence", toolDecision.getDouble("confidence", 0.8))
+                            .put("reasoning", toolDecision.getString("reasoning"))
+                            .put("method", "intelligent_selection");
+                        return Future.succeededFuture(strategyResult);
+                    } else {
+                        return Future.succeededFuture(getFallbackStrategySelection());
+                    }
+                })
+                .onComplete(ar -> {
+                    if (ar.succeeded()) {
+                        promise.complete(ar.result());
+                    } else {
+                        promise.complete(getFallbackStrategySelection());
+                    }
+                });
+        }
+        
+        return promise.future();
+    }
+    
+    /**
+     * Generate a dynamic strategy using the new MCP servers
+     */
+    private Future<JsonObject> generateDynamicStrategy(ConversationContext context, String query) {
+        Promise<JsonObject> promise = Promise.<JsonObject>promise();
+        
+        // Step 1: Analyze intent
+        UniversalMCPClient intentClient = mcpClients.get("intent-analysis");
+        UniversalMCPClient strategyGenClient = mcpClients.get("strategy-generation");
+        
+        if (intentClient == null || strategyGenClient == null) {
+            promise.fail("Required strategy generation clients not available");
             return promise.future();
         }
         
-        // Use the comprehensive tool selection logic
-        JsonObject selectionArgs = new JsonObject()
+        // Analyze intent first
+        JsonObject intentArgs = new JsonObject()
             .put("query", query)
-            .put("conversationHistory", context.getRecentHistory(5));
+            .put("conversation_history", context.getRecentHistory(5))
+            .put("user_profile", new JsonObject()
+                .put("expertise_level", "intermediate")); // Could be dynamic
         
-        intentClient.callTool("select_tool_strategy", selectionArgs)
-            .compose(toolDecision -> {
-                context.storeStepResult("tool_strategy_decision", toolDecision);
+        intentClient.callTool("intent_analysis__extract_intent", intentArgs)
+            .compose(intentResult -> {
+                context.storeStepResult("intent_analysis", intentResult);
                 
-                // Map tool decision to orchestration strategy
-                String strategy = toolDecision.getString("strategy");
-                if ("ORCHESTRATION".equals(strategy)) {
-                    // Direct orchestration selection from tool
-                    String orchestrationName = toolDecision.getString("orchestrationName");
-                    JsonObject strategyResult = new JsonObject()
-                        .put("selectedStrategy", orchestrationName)
-                        .put("selectedHost", "oracledbanswerer")
-                        .put("confidence", toolDecision.getDouble("confidence", 0.8))
-                        .put("reasoning", toolDecision.getString("reasoning"))
-                        .put("method", "intelligent_selection");
-                    return Future.succeededFuture(strategyResult);
-                } else {
-                    // For non-orchestration strategies, use default pipeline
-                    JsonObject strategyResult = new JsonObject()
-                        .put("selectedStrategy", "oracle_full_pipeline")
-                        .put("selectedHost", "oracledbanswerer")
-                        .put("confidence", 0.7)
-                        .put("reasoning", "Default pipeline for " + strategy)
-                        .put("method", "default");
-                    return Future.succeededFuture(strategyResult);
-                }
+                // Analyze complexity
+                JsonObject complexityArgs = new JsonObject()
+                    .put("query", query)
+                    .put("context", new JsonObject()
+                        .put("previous_queries", context.getRecentHistory(3)));
+                
+                return strategyGenClient.callTool("strategy_generation__analyze_complexity", complexityArgs)
+                    .map(complexity -> {
+                        context.storeStepResult("complexity_analysis", complexity);
+                        return new JsonObject()
+                            .put("intent", intentResult)
+                            .put("complexity", complexity);
+                    });
+            })
+            .compose(analysis -> {
+                // Generate strategy
+                JsonObject strategyArgs = new JsonObject()
+                    .put("query", query)
+                    .put("intent", analysis.getJsonObject("intent"))
+                    .put("complexity_analysis", analysis.getJsonObject("complexity"))
+                    .put("constraints", new JsonObject()
+                        .put("max_steps", 12)
+                        .put("timeout_seconds", 60));
+                
+                return strategyGenClient.callTool("strategy_generation__create_strategy", strategyArgs);
             })
             .onComplete(ar -> {
                 if (ar.succeeded()) {
-                    context.storeStepResult("strategy_selection", ar.result());
-                    promise.complete(ar.result());
+                    JsonObject generatedStrategy = ar.result();
+                    context.storeStepResult("generated_strategy", generatedStrategy);
+                    
+                    // Format result for compatibility
+                    JsonObject result = new JsonObject()
+                        .put("selectedStrategy", "dynamic_generated")
+                        .put("strategy", generatedStrategy) // The actual strategy object
+                        .put("confidence", 0.9)
+                        .put("method", "dynamic_generation")
+                        .put("reasoning", "Dynamically generated based on query analysis");
+                    
+                    promise.complete(result);
                 } else {
-                    vertx.eventBus().publish("log", "Strategy selection failed" + ",0,OracleDBAnswererHost,Host,System");
-                    // Fallback to default
-                    promise.complete(new JsonObject()
-                        .put("selectedStrategy", "oracle_full_pipeline")
-                        .put("selectedHost", "oracledbanswerer")
-                        .put("confidence", 0.5)
-                        .put("method", "fallback"));
+                    promise.fail(ar.cause());
                 }
             });
         
         return promise.future();
+    }
+    
+    private JsonObject getFallbackStrategySelection() {
+        return new JsonObject()
+            .put("selectedStrategy", "oracle_full_pipeline")
+            .put("selectedHost", "oracledbanswerer")
+            .put("confidence", 0.5)
+            .put("method", "fallback")
+            .put("reasoning", "Using default pipeline");
     }
     
     /**
@@ -457,16 +570,38 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
         String strategyName = strategySelection.getString("selectedStrategy");
-        JsonObject strategy = strategies.getJsonObject(strategyName);
+        JsonObject strategy;
+        JsonArray steps;
         
-        if (strategy == null) {
-            promise.fail("Strategy not found: " + strategyName);
-            return promise.future();
+        if ("dynamic_generated".equals(strategyName)) {
+            // Use the dynamically generated strategy
+            strategy = strategySelection.getJsonObject("strategy");
+            if (strategy == null) {
+                promise.fail("Dynamic strategy not found in selection");
+                return promise.future();
+            }
+            steps = strategy.getJsonArray("steps", new JsonArray());
+            
+            // If dynamic strategies enabled, use adaptive execution
+            if (useDynamicStrategies) {
+                return executeAdaptiveStrategy(context, strategy, streaming);
+            }
+        } else {
+            // Use static strategy from configuration
+            if (fallbackStrategies != null) {
+                strategy = fallbackStrategies.getJsonObject(strategyName);
+            } else {
+                strategy = null;
+            }
+            
+            if (strategy == null) {
+                promise.fail("Strategy not found: " + strategyName);
+                return promise.future();
+            }
+            steps = strategy.getJsonArray("steps", new JsonArray());
         }
         
-        JsonArray steps = strategy.getJsonArray("steps", new JsonArray());
-        
-        // Execute steps sequentially
+        // Execute steps sequentially (traditional approach)
         executeSteps(context, steps, 0, new JsonObject())
             .compose(finalResult -> {
                 // Compose the final answer
@@ -475,6 +610,117 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             .onComplete(promise);
         
         return promise.future();
+    }
+    
+    /**
+     * Execute strategy with adaptive capabilities
+     */
+    private Future<JsonObject> executeAdaptiveStrategy(ConversationContext context,
+                                                     JsonObject strategy,
+                                                     boolean streaming) {
+        Promise<JsonObject> promise = Promise.<JsonObject>promise();
+        
+        UniversalMCPClient orchestratorClient = mcpClients.get("strategy-orchestrator");
+        UniversalMCPClient learningClient = mcpClients.get("strategy-learning");
+        
+        JsonArray steps = strategy.getJsonArray("steps", new JsonArray());
+        
+        // Execute with adaptation
+        executeStepsWithAdaptation(context, strategy, steps, 0, new JsonObject())
+            .compose(finalResult -> {
+                // Record execution for learning
+                if (learningClient != null && learningClient.isReady()) {
+                    JsonObject recordArgs = new JsonObject()
+                        .put("strategy", strategy)
+                        .put("execution_results", new JsonObject()
+                            .put("success", true)
+                            .put("total_duration", System.currentTimeMillis() - context.startTime)
+                            .put("steps_completed", steps.size()))
+                        .put("performance_metrics", new JsonObject()
+                            .put("query_complexity", context.getStepResult("complexity_analysis")
+                                .getJsonObject("factors", new JsonObject()).getFloat("complexity_score", 0.5f)));
+                    
+                    learningClient.callTool("strategy_learning__record_execution", recordArgs)
+                        .onComplete(ar -> {
+                            if (ar.failed()) {
+                                vertx.eventBus().publish("log", "Failed to record execution: " + ar.cause() + ",1,OracleDBAnswererHost,Host,System");
+                            }
+                        });
+                }
+                
+                return composeFinalAnswer(context, finalResult, streaming);
+            })
+            .onComplete(promise);
+        
+        return promise.future();
+    }
+    
+    /**
+     * Execute steps with adaptation capability
+     */
+    private Future<JsonObject> executeStepsWithAdaptation(ConversationContext context,
+                                                        JsonObject strategy,
+                                                        JsonArray steps,
+                                                        int currentIndex,
+                                                        JsonObject accumulated) {
+        if (currentIndex >= steps.size()) {
+            return Future.succeededFuture(accumulated);
+        }
+        
+        UniversalMCPClient orchestratorClient = mcpClients.get("strategy-orchestrator");
+        JsonObject currentStep = steps.getJsonObject(currentIndex);
+        
+        // Execute current step
+        return executeStep(context, currentStep, accumulated)
+            .compose(result -> {
+                accumulated.mergeIn(new JsonObject()
+                    .put(currentStep.getString("tool") + "_result", result));
+                
+                // Evaluate progress if orchestrator available
+                if (orchestratorClient != null && orchestratorClient.isReady() && 
+                    currentIndex % 3 == 2) { // Check every 3 steps
+                    
+                    JsonObject evalArgs = new JsonObject()
+                        .put("strategy", strategy)
+                        .put("completed_steps", getCompletedSteps(steps, currentIndex + 1))
+                        .put("current_results", accumulated)
+                        .put("time_elapsed", System.currentTimeMillis() - context.startTime);
+                    
+                    return orchestratorClient.callTool("strategy_orchestrator__evaluate_progress", evalArgs)
+                        .compose(evaluation -> {
+                            if (!evaluation.getBoolean("on_track", true)) {
+                                // Adapt strategy if needed
+                                JsonObject adaptArgs = new JsonObject()
+                                    .put("current_strategy", strategy)
+                                    .put("evaluation", evaluation);
+                                
+                                return orchestratorClient.callTool("strategy_orchestrator__adapt_strategy", adaptArgs)
+                                    .map(adapted -> {
+                                        JsonArray newSteps = adapted.getJsonObject("adapted_strategy")
+                                            .getJsonArray("steps", steps);
+                                        return newSteps;
+                                    });
+                            }
+                            return Future.succeededFuture(steps);
+                        })
+                        .compose(possiblyAdaptedSteps -> {
+                            return executeStepsWithAdaptation(context, strategy, possiblyAdaptedSteps, 
+                                currentIndex + 1, accumulated);
+                        });
+                } else {
+                    // Continue without evaluation
+                    return executeStepsWithAdaptation(context, strategy, steps, 
+                        currentIndex + 1, accumulated);
+                }
+            });
+    }
+    
+    private JsonArray getCompletedSteps(JsonArray allSteps, int completedCount) {
+        JsonArray completed = new JsonArray();
+        for (int i = 0; i < completedCount && i < allSteps.size(); i++) {
+            completed.add(allSteps.getJsonObject(i));
+        }
+        return completed;
     }
     
     /**

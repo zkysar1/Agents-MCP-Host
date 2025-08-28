@@ -16,6 +16,7 @@ import io.vertx.core.eventbus.DeliveryOptions;
 import agents.director.services.MCPRouterService;
 import agents.director.services.InterruptManager;
 import agents.director.services.LogUtil;
+import agents.director.services.OracleConnectionManager;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -23,13 +24,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 /**
- * Streaming Conversation API with host-based routing.
- * This is the main entry point for all chat requests in the MCP architecture.
- * It routes requests to the appropriate host (OracleDBAnswerer, OracleSQLBuilder, or ToolFreeDirectLLM).
+ * Master Streaming Conversation API with host-based routing.
+ * This is the SOLE API entry point for all HTTP requests in the MCP architecture.
+ * Provides health, status, MCP management, and conversation endpoints.
+ * Automatically routes requests to the appropriate host based on content.
  */
 public class ConversationStreaming extends AbstractVerticle {
     
-    
+    // Service start time for uptime tracking
+    private static final long SERVICE_START_TIME = System.currentTimeMillis();
     
     private EventBus eventBus;
     private Router router;
@@ -190,6 +193,9 @@ public class ConversationStreaming extends AbstractVerticle {
         // Add handlers
         router.route().handler(BodyHandler.create());
         
+        // Root welcome page
+        router.get("/").handler(this::handleRoot);
+        
         // Main conversation endpoint
         router.post("/conversations").handler(this::handleConversation);
         router.post("/conversations/streaming").handler(this::handleStreamingConversation);
@@ -207,6 +213,7 @@ public class ConversationStreaming extends AbstractVerticle {
         
         // Health and status endpoints
         router.get("/health").handler(this::handleHealth);
+        router.get("/status").handler(this::handleStatus);
         router.get("/mcp/status").handler(this::handleMcpStatus);
         router.get("/mcp/tools").handler(this::handleMcpTools);
         router.get("/mcp/clients").handler(this::handleMcpClients);
@@ -453,11 +460,11 @@ public class ConversationStreaming extends AbstractVerticle {
                 
                 if (streaming) {
                     sendSSEEvent(context, "error", new JsonObject()
-                        .put("error", ar.cause().getMessage())
+                        .put("error", ar.cause().getMessage() != null ? ar.cause().getMessage() : "Unknown error")
                         .put("host", finalHost));
                     context.response().end();
                 } else {
-                    sendError(context, 500, "Processing failed: " + ar.cause().getMessage());
+                    sendError(context, 500, "Processing failed: " + (ar.cause().getMessage() != null ? ar.cause().getMessage() : "Unknown error"));
                 }
                 
                 // Clean up session
@@ -597,20 +604,24 @@ public class ConversationStreaming extends AbstractVerticle {
      * Send SSE event
      */
     private void sendSSEEvent(RoutingContext context, String event, JsonObject data) {
-        String eventData = "event: " + event + "\n" +
-                          "data: " + data.encode() + "\n\n";
-        
-        context.response().write(eventData);
+        if (!context.response().ended()) {
+            String eventData = "event: " + event + "\n" +
+                              "data: " + data.encode() + "\n\n";
+            
+            context.response().write(eventData);
+        }
     }
     
     /**
      * Send JSON response
      */
     private void sendJsonResponse(RoutingContext context, int statusCode, JsonObject response) {
-        context.response()
-            .setStatusCode(statusCode)
-            .putHeader("Content-Type", "application/json")
-            .end(response.encode());
+        if (!context.response().ended()) {
+            context.response()
+                .setStatusCode(statusCode)
+                .putHeader("Content-Type", "application/json")
+                .end(response.encode());
+        }
     }
     
     /**
@@ -891,13 +902,70 @@ public class ConversationStreaming extends AbstractVerticle {
     }
     
     /**
+     * Handle root endpoint - API welcome page
+     */
+    private void handleRoot(RoutingContext context) {
+        context.response()
+            .putHeader("Content-Type", "text/html")
+            .end("<h1>Welcome to ZAK-Agent Host API</h1>" +
+                 "<h2>Available Endpoints:</h2>" +
+                 "<ul>" +
+                 "<li><a href='/host/v1/health'>/host/v1/health</a> - Health check</li>" +
+                 "<li><a href='/host/v1/status'>/host/v1/status</a> - System status</li>" +
+                 "<li>/host/v1/conversations - Conversation API (POST)</li>" +
+                 "<li><a href='/host/v1/mcp/status'>/host/v1/mcp/status</a> - MCP status</li>" +
+                 "<li><a href='/host/v1/mcp/tools'>/host/v1/mcp/tools</a> - Available tools</li>" +
+                 "<li><a href='/host/v1/mcp/clients'>/host/v1/mcp/clients</a> - MCP clients</li>" +
+                 "</ul>");
+    }
+    
+    /**
+     * Handle status endpoint - comprehensive system status
+     */
+    private void handleStatus(RoutingContext context) {
+        JsonObject status = new JsonObject()
+            .put("status", "running")
+            .put("version", "1.0.0")
+            .put("timestamp", System.currentTimeMillis())
+            .put("uptime", System.currentTimeMillis() - SERVICE_START_TIME)
+            .put("environment", System.getProperty("os.name", "Unknown"))
+            .put("activeSessions", activeSessions.size())
+            .put("criticalErrors", criticalErrors.size());
+        
+        // Add database connection status
+        try {
+            OracleConnectionManager oracleManager = OracleConnectionManager.getInstance();
+            JsonObject dbStatus = oracleManager.getConnectionStatus();
+            status.put("database", dbStatus);
+        } catch (Exception e) {
+            status.put("database", new JsonObject()
+                .put("healthy", false)
+                .put("error", "Not initialized or error: " + 
+                    (e.getMessage() != null ? e.getMessage() : "Unknown error")));
+        }
+        
+        // Request MCP status from HostManager
+        eventBus.<JsonObject>request("mcp.host.status", new JsonObject())
+            .onSuccess(reply -> {
+                status.put("mcp", reply.body() != null ? reply.body() : new JsonObject());
+                sendJsonResponse(context, 200, status);
+            })
+            .onFailure(err -> {
+                status.put("mcp", new JsonObject()
+                    .put("error", "Could not retrieve MCP status")
+                    .put("message", err.getMessage() != null ? err.getMessage() : "Unknown error"));
+                sendJsonResponse(context, 200, status);
+            });
+    }
+    
+    /**
      * Handle MCP status endpoint
      */
     private void handleMcpStatus(RoutingContext context) {
         // Request MCP status via event bus
         eventBus.<JsonObject>request("mcp.status", new JsonObject(), ar -> {
-            if (ar.succeeded()) {
-                sendJsonResponse(context, 200, ar.result().body());
+            if (ar.succeeded() && ar.result() != null) {
+                sendJsonResponse(context, 200, ar.result().body() != null ? ar.result().body() : new JsonObject());
             } else {
                 sendError(context, 503, "MCP system not available");
             }
@@ -910,8 +978,8 @@ public class ConversationStreaming extends AbstractVerticle {
     private void handleMcpTools(RoutingContext context) {
         // Request tools list via event bus
         eventBus.<JsonObject>request("mcp.tools.list", new JsonObject(), ar -> {
-            if (ar.succeeded()) {
-                sendJsonResponse(context, 200, ar.result().body());
+            if (ar.succeeded() && ar.result() != null) {
+                sendJsonResponse(context, 200, ar.result().body() != null ? ar.result().body() : new JsonObject());
             } else {
                 sendError(context, 503, "Unable to retrieve MCP tools");
             }
@@ -924,8 +992,8 @@ public class ConversationStreaming extends AbstractVerticle {
     private void handleMcpClients(RoutingContext context) {
         // Request clients list via event bus
         eventBus.<JsonObject>request("mcp.clients.list", new JsonObject(), ar -> {
-            if (ar.succeeded()) {
-                sendJsonResponse(context, 200, ar.result().body());
+            if (ar.succeeded() && ar.result() != null) {
+                sendJsonResponse(context, 200, ar.result().body() != null ? ar.result().body() : new JsonObject());
             } else {
                 sendError(context, 503, "Unable to retrieve MCP clients");
             }

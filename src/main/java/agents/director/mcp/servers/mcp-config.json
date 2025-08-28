@@ -1,0 +1,159 @@
+{
+  "mcpServers": {
+    "httpServers": {
+      "strategy-generation": {
+        "enabled": true,
+        "port": 8090,
+        "description": "Dynamic strategy generation server",
+        "className": "agents.director.mcp.servers.StrategyGenerationServer"
+      },
+      "intent-analysis": {
+        "enabled": true,
+        "port": 8091,
+        "description": "User intent analysis server",
+        "className": "agents.director.mcp.servers.IntentAnalysisServer"
+      },
+      "strategy-orchestrator": {
+        "enabled": true,
+        "port": 8092,
+        "description": "Strategy execution and adaptation server",
+        "className": "agents.director.mcp.servers.StrategyOrchestratorServer"
+      },
+      "strategy-learning": {
+        "enabled": true,
+        "port": 8093,
+        "description": "Strategy learning and improvement server",
+        "className": "agents.director.mcp.servers.StrategyLearningServer"
+      },
+      "oracle-query-analysis": {
+        "enabled": true,
+        "port": 8094,
+        "description": "Oracle query semantic analysis server",
+        "className": "agents.director.mcp.servers.OracleQueryAnalysisServer"
+      },
+      "oracle-schema-intel": {
+        "enabled": true,
+        "port": 8095,
+        "description": "Oracle schema intelligence server",
+        "className": "agents.director.mcp.servers.OracleSchemaIntelligenceServer"
+      },
+      "oracle-sql-gen": {
+        "enabled": true,
+        "port": 8096,
+        "description": "Oracle SQL generation server",
+        "className": "agents.director.mcp.servers.OracleSQLGenerationServer"
+      },
+      "oracle-sql-val": {
+        "enabled": true,
+        "port": 8097,
+        "description": "Oracle SQL validation server",
+        "className": "agents.director.mcp.servers.OracleSQLValidationServer"
+      },
+      "oracle-db": {
+        "enabled": true,
+        "port": 8098,
+        "description": "Oracle query execution server",
+        "className": "agents.director.mcp.servers.OracleQueryExecutionServer"
+      },
+      "query-intent": {
+        "enabled": true,
+        "port": 8099,
+        "description": "Query intent evaluation server",
+        "className": "agents.director.mcp.servers.QueryIntentEvaluationServer"
+      },
+      "business-map": {
+        "enabled": true,
+        "port": 8100,
+        "description": "Business term mapping server",
+        "className": "agents.director.mcp.servers.BusinessMappingServer"
+      }
+    },
+    "localServers": {}
+  },
+  "clientConfigurations": {
+    "universal": {
+      "enabled": true,
+      "description": "Universal MCP client used by hosts",
+      "connects": {
+        "strategy-generation": true,
+        "intent-analysis": true,
+        "strategy-orchestrator": true,
+        "strategy-learning": true,
+        "oracle-query-analysis": true,
+        "oracle-schema-intel": true,
+        "oracle-sql-gen": true,
+        "oracle-sql-val": true,
+        "oracle-db": true,
+        "query-intent": true,
+        "business-map": true
+      }
+    }
+  },
+  "toolNaming": {
+    "usePrefixing": true,
+    "prefixSeparator": "__",
+    "supportUnprefixed": true
+  },
+  "transport": {
+    "httpTimeout": 30000,
+    "sseReconnectDelay": 5000,
+    "stdioBufferSize": 8192
+  },
+  "servers": {
+    "strategy-generation": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/strategy-gen",
+      "description": "Dynamic strategy generation"
+    },
+    "intent-analysis": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/intent-analysis",
+      "description": "User intent analysis"
+    },
+    "strategy-orchestrator": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/strategy-orchestrator",
+      "description": "Strategy execution orchestration"
+    },
+    "strategy-learning": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/strategy-learning",
+      "description": "Learning from strategy execution"
+    },
+    "oracle-query-analysis": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/oracle-query-analysis",
+      "description": "Oracle query semantic analysis"
+    },
+    "oracle-schema-intel": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/oracle-schema-intel",
+      "description": "Oracle schema intelligence"
+    },
+    "oracle-sql-gen": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/oracle-sql-gen",
+      "description": "Oracle SQL generation"
+    },
+    "oracle-sql-val": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/oracle-sql-val",
+      "description": "Oracle SQL validation"
+    },
+    "oracle-db": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/oracle-db",
+      "description": "Oracle query execution"
+    },
+    "query-intent": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/query-intent",
+      "description": "Query intent evaluation"
+    },
+    "business-map": {
+      "type": "http",
+      "baseUrl": "http://localhost:8080/mcp/servers/business-mapping",
+      "description": "Business term mapping"
+    }
+  }
+}
