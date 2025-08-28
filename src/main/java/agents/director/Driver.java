@@ -3,7 +3,6 @@ package agents.director;
 import agents.director.services.MCPRouterService;
 import agents.director.services.LlmAPIService;
 import agents.director.services.Logger;
-import agents.director.services.LogUtil;
 import agents.director.services.OracleConnectionManager;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
@@ -74,16 +73,16 @@ public class Driver {
   
   // New deployment methods following MCP architecture
   private void deployMCPRouter() {
-    LogUtil.logInfo(vertx, "Deploying MCP Router Service...", "Driver", "StartUp", "MCP", true);
+    if (logLevel >= 1) vertx.eventBus().publish("log", "Deploying MCP Router Service...,1,Driver,StartUp,MCP");
     
     vertx.deployVerticle(new MCPRouterService(), res -> {
       if (res.succeeded()) {
-        LogUtil.logInfo(vertx, "MCPRouterService deployed successfully", "Driver", "StartUp", "MCP", true);
-        LogUtil.logDebug(vertx, "MCP Router deployed", "Driver", "StartUp", "MCP");
+        if (logLevel >= 1) vertx.eventBus().publish("log", "MCPRouterService deployed successfully,1,Driver,StartUp,MCP");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "MCP Router deployed,3,Driver,StartUp,MCP");
       } else {
         // Fatal error - keep console output
         vertx.eventBus().publish("log", "MCPRouterService deployment failed: " + res.cause().getMessage() + ",0,Driver,System,System");
-        LogUtil.logError(vertx, "MCPRouterService deployment failed", res.cause(), "Driver", "StartUp", "MCP", false);
+        vertx.eventBus().publish("log", "MCPRouterService deployment failed: " + res.cause().getMessage() + ",0,Driver,StartUp,MCP");
         res.cause().printStackTrace();
         System.exit(1); // Fatal error - cannot continue without router
       }
@@ -91,17 +90,17 @@ public class Driver {
   }
   
   private void deployMCPServers() {
-    LogUtil.logInfo(vertx, "Deploying MCP Servers...", "Driver", "StartUp", "MCP", true);
+    if (logLevel >= 1) vertx.eventBus().publish("log", "Deploying MCP Servers...,1,Driver,StartUp,MCP");
     
     // Initialize OracleConnectionManager first, then deploy all servers
     System.out.println("[Driver] Starting OracleConnectionManager initialization...");
     OracleConnectionManager.getInstance().initialize(vertx).onComplete(ar -> {
       if (ar.succeeded()) {
         System.out.println("[Driver] OracleConnectionManager initialization complete");
-        LogUtil.logInfo(vertx, "Oracle Connection Manager initialized", "Driver", "StartUp", "Database", true);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "Oracle Connection Manager initialized,1,Driver,StartUp,Database");
       } else {
         System.out.println("[Driver] OracleConnectionManager initialization failed: " + ar.cause().getMessage());
-        LogUtil.logError(vertx, "Failed to initialize Oracle Connection Manager", ar.cause(), "Driver", "StartUp", "Database", true);
+        vertx.eventBus().publish("log", "Failed to initialize Oracle Connection Manager: " + ar.cause().getMessage() + ",0,Driver,StartUp,Database");
       }
       
       // Deploy all servers AFTER Oracle initialization completes (whether success or failure)
@@ -219,23 +218,23 @@ public class Driver {
     // Wait for all servers to deploy
     CompositeFuture.all(deploymentFutures).onComplete(ar -> {
       if (ar.succeeded()) {
-        LogUtil.logInfo(vertx, "All MCP servers deployed successfully", "Driver", "StartUp", "MCP", true);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "All MCP servers deployed successfully,1,Driver,StartUp,MCP");
         System.out.println("All MCP servers deployed successfully");
         vertx.eventBus().publish("mcp.servers.ready", new JsonObject()
           .put("serverCount", deploymentFutures.size())
           .put("timestamp", System.currentTimeMillis()));
       } else {
-        LogUtil.logError(vertx, "Failed to deploy MCP servers", ar.cause(), "Driver", "StartUp", "MCP", true);
+        vertx.eventBus().publish("log", "Failed to deploy MCP servers: " + ar.cause().getMessage() + ",0,Driver,StartUp,MCP");
       }
     });
   }
   
   private void deployHosts() {
-    LogUtil.logInfo(vertx, "Deploying Host Applications...", "Driver", "StartUp", "Host", true);
+    if (logLevel >= 1) vertx.eventBus().publish("log", "Deploying Host Applications...,1,Driver,StartUp,Host");
     
     // Deploy core services first
     System.out.println("[Driver] Setting up Logger...");
-    //setLogger();
+    setLogger();
     System.out.println("[Driver] Setting up LLM API Service...");
     setLlmAPIService();
     System.out.println("[Driver] LLM API Service setup complete");
@@ -274,7 +273,7 @@ public class Driver {
     // Wait for all hosts to deploy
     CompositeFuture.all(hostFutures).onComplete(ar -> {
       if (ar.succeeded()) {
-        LogUtil.logInfo(vertx, "All host applications deployed successfully", "Driver", "StartUp", "Host", true);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "All host applications deployed successfully,1,Driver,StartUp,Host");
         
         // Deploy API endpoints after hosts are ready
         setConversationAPI();
@@ -284,7 +283,7 @@ public class Driver {
           .put("hostCount", hostFutures.size())
           .put("timestamp", System.currentTimeMillis()));
       } else {
-        LogUtil.logError(vertx, "Failed to deploy hosts", ar.cause(), "Driver", "StartUp", "Host", true);
+        vertx.eventBus().publish("log", "Failed to deploy hosts: " + ar.cause().getMessage() + ",0,Driver,StartUp,Host");
       }
     });
   }
@@ -294,7 +293,7 @@ public class Driver {
     vertx.eventBus().consumer("mcp.router.ready", msg -> {
       JsonObject status = (JsonObject) msg.body();
       mcpRouterReady = true;
-      LogUtil.logInfo(vertx, "MCP Router Ready on port: " + status.getInteger("port"), "Driver", "StartUp", "MCP", true);
+      if (logLevel >= 1) vertx.eventBus().publish("log", "MCP Router Ready on port: " + status.getInteger("port") + ",1,Driver,StartUp,MCP");
       // Deploy MCP servers after router is ready
       deployMCPServers();
     });
@@ -302,7 +301,7 @@ public class Driver {
     // Listen for MCP servers ready event
     vertx.eventBus().consumer("mcp.servers.ready", msg -> {
       mcpServersReady = true;
-      LogUtil.logInfo(vertx, "All MCP Servers Ready", "Driver", "StartUp", "MCP", true);
+      if (logLevel >= 1) vertx.eventBus().publish("log", "All MCP Servers Ready,1,Driver,StartUp,MCP");
       // Deploy hosts after servers are ready
       System.out.println("All MCP Servers Ready, deploy host");
       deployHosts();
@@ -311,7 +310,7 @@ public class Driver {
     // Listen for hosts ready event
     vertx.eventBus().consumer("hosts.ready", msg -> {
       hostsReady = true;
-      LogUtil.logInfo(vertx, "All Host Applications Ready", "Driver", "StartUp", "Host", true);
+      if (logLevel >= 1) vertx.eventBus().publish("log", "All Host Applications Ready,1,Driver,StartUp,Host");
       checkSystemReady();
     });
   }
@@ -332,20 +331,20 @@ public class Driver {
         .put("hosts", hostsReady)
         .put("timestamp", System.currentTimeMillis()));
       
-      LogUtil.logInfo(vertx, "Published system.fully.ready - System is now operational", "Driver", "StartUp", "System", true);
+      if (logLevel >= 1) vertx.eventBus().publish("log", "Published system.fully.ready - System is now operational,1,Driver,StartUp,System");
     } else {
-      LogUtil.logDebug(vertx, "Waiting for components - Router: " + mcpRouterReady + 
-                       ", Servers: " + mcpServersReady + ", Hosts: " + hostsReady, "Driver", "StartUp", "System");
+      if (logLevel >= 3) vertx.eventBus().publish("log", "Waiting for components - Router: " + mcpRouterReady + 
+                       "; Servers: " + mcpServersReady + "; Hosts: " + hostsReady + ",3,Driver,StartUp,System");
     }
   }
 
   private void setLogger() {
     vertx.deployVerticle(new Logger(), res -> {
       if (res.succeeded()) {
-        LogUtil.logInfo(vertx, "Logger Verticle initialized successfully", "Driver", "StartUp", "System", true);
-        LogUtil.logDebug(vertx, "Logger deployed", "Driver", "StartUp", "System");
+        if (logLevel >= 1) vertx.eventBus().publish("log", "Logger Verticle initialized successfully,1,Driver,StartUp,System");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Logger deployed,3,Driver,StartUp,System");
       } else {
-        LogUtil.logError(vertx, "Logger deployment failed", res.cause(), "Driver", "StartUp", "System", true);
+        vertx.eventBus().publish("log", "Logger deployment failed: " + res.cause().getMessage() + ",0,Driver,StartUp,System");
       }
     });
   }
@@ -355,10 +354,10 @@ public class Driver {
     // Deploy the streaming conversation API with host routing
     vertx.deployVerticle(new ConversationStreaming(), res -> {
       if (res.succeeded()) {
-        LogUtil.logInfo(vertx, "Conversation API initialized successfully", "Driver", "StartUp", "API", true);
-        LogUtil.logDebug(vertx, "Streaming conversation API deployed", "Driver", "StartUp", "API");
+        if (logLevel >= 1) vertx.eventBus().publish("log", "Conversation API initialized successfully,1,Driver,StartUp,API");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Streaming conversation API deployed,3,Driver,StartUp,API");
       } else {
-        LogUtil.logError(vertx, "Conversation API deployment failed", res.cause(), "Driver", "StartUp", "API", true);
+        vertx.eventBus().publish("log", "Conversation API deployment failed: " + res.cause().getMessage() + ",0,Driver,StartUp,API");
       }
     });
   }
@@ -368,13 +367,13 @@ public class Driver {
     boolean initialized = LlmAPIService.getInstance().setupService(vertx);
     
     if (initialized) {
-      LogUtil.logInfo(vertx, "OpenAI API service initialized successfully", "Driver", "StartUp", "System", true);
-      LogUtil.logDebug(vertx, "LLM API service initialized", "Driver", "StartUp", "System");
+      if (logLevel >= 1) vertx.eventBus().publish("log", "OpenAI API service initialized successfully,1,Driver,StartUp,System");
+      if (logLevel >= 3) vertx.eventBus().publish("log", "LLM API service initialized,3,Driver,StartUp,System");
     } else {
       // Keep warning in console - important configuration issue
       System.out.println("WARNING: OpenAI API service not initialized (missing API key)");
       System.out.println("Set OPENAI_API_KEY environment variable to enable LLM responses");
-      LogUtil.logError(vertx, "OpenAI API service not initialized (missing API key)", "Driver", "StartUp", "System", false);
+      vertx.eventBus().publish("log", "OpenAI API service not initialized (missing API key),0,Driver,StartUp,System");
     }
   }
 }

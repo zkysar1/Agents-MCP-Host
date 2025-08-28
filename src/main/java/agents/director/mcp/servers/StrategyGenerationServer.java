@@ -4,7 +4,6 @@ import agents.director.mcp.base.MCPServerBase;
 import agents.director.mcp.base.MCPTool;
 import agents.director.mcp.base.MCPResponse;
 import agents.director.services.LlmAPIService;
-import agents.director.services.LogUtil;
 import io.vertx.core.Promise;
 import io.vertx.core.Future;
 import io.vertx.core.json.JsonObject;
@@ -13,6 +12,7 @@ import io.vertx.ext.web.RoutingContext;
 
 import java.util.*;
 import java.util.regex.Pattern;
+import static agents.director.Driver.logLevel;
 import java.util.regex.Matcher;
 
 /**
@@ -85,8 +85,7 @@ public class StrategyGenerationServer extends MCPServerBase {
         llmService = LlmAPIService.getInstance();
         
         if (!llmService.isInitialized()) {
-            LogUtil.logInfo(vertx, "LLM service not initialized - will use fallback strategies only", 
-                "StrategyGenerationServer", "Init", "Warning", false);
+            if (logLevel >= 1) vertx.eventBus().publish("log", "LLM service not initialized - will use fallback strategies only,1,StrategyGenerationServer,Init,Warning");
         }
         
         super.start(startPromise);
@@ -192,8 +191,7 @@ public class StrategyGenerationServer extends MCPServerBase {
         String query = arguments.getString("query");
         JsonObject context = arguments.getJsonObject("context", new JsonObject());
         
-        LogUtil.logDebug(vertx, "Analyzing complexity for query: " + query, 
-            "StrategyGenerationServer", "Complexity", "Analysis");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Analyzing complexity for query: " + query + ",3,StrategyGenerationServer,Complexity,Analysis");
         
         // Analyze various complexity factors
         float complexityScore = 0.0f;
@@ -277,13 +275,11 @@ public class StrategyGenerationServer extends MCPServerBase {
         JsonObject complexityAnalysis = arguments.getJsonObject("complexity_analysis");
         JsonObject constraints = arguments.getJsonObject("constraints", new JsonObject());
         
-        LogUtil.logInfo(vertx, "Creating dynamic strategy for query: " + query, 
-            "StrategyGenerationServer", "Strategy", "Create", false);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "Creating dynamic strategy for query: " + query + ",1,StrategyGenerationServer,Strategy,Create");
         
         // If LLM is not available, use fallback immediately
         if (!llmService.isInitialized()) {
-            LogUtil.logInfo(vertx, "LLM service not available - using fallback strategy", 
-                "StrategyGenerationServer", "Strategy", "Fallback", false);
+            if (logLevel >= 1) vertx.eventBus().publish("log", "LLM service not available - using fallback strategy,1,StrategyGenerationServer,Strategy,Fallback");
             JsonObject fallback = selectFallbackStrategy(intent, complexityAnalysis);
             fallback.put("generation_method", "fallback_no_llm");
             sendSuccess(ctx, requestId, new JsonObject().put("result", fallback));
@@ -296,8 +292,7 @@ public class StrategyGenerationServer extends MCPServerBase {
                 if (ar.succeeded()) {
                     sendSuccess(ctx, requestId, new JsonObject().put("result", ar.result()));
                 } else {
-                    LogUtil.logError(vertx, "Strategy generation failed after retries", ar.cause(),
-                        "StrategyGenerationServer", "Strategy", "Failed", false);
+                    vertx.eventBus().publish("log", "Strategy generation failed after retries: " + ar.cause().getMessage() + ",0,StrategyGenerationServer,Strategy,Failed");
                     
                     // Use fallback strategy
                     JsonObject fallback = selectFallbackStrategy(intent, complexityAnalysis);
@@ -342,22 +337,19 @@ public class StrategyGenerationServer extends MCPServerBase {
                         ValidationResult validation = validateStrategySchema(strategy);
                         
                         if (validation.isValid()) {
-                            LogUtil.logInfo(vertx, "Successfully generated valid strategy on attempt " + (attempt + 1),
-                                "StrategyGenerationServer", "Strategy", "Valid", false);
+                            if (logLevel >= 1) vertx.eventBus().publish("log", "Successfully generated valid strategy on attempt " + (attempt + 1) + ",1,StrategyGenerationServer,Strategy,Valid");
                             strategy.put("generation_method", "dynamic_llm");
                             promise.complete(strategy);
                         } else {
-                            LogUtil.logInfo(vertx, "Strategy validation failed on attempt " + (attempt + 1) + ": " + 
-                                String.join(", ", validation.getErrors()),
-                                "StrategyGenerationServer", "Strategy", "Invalid", false);
+                            if (logLevel >= 1) vertx.eventBus().publish("log", "Strategy validation failed on attempt " + (attempt + 1) + ": " + 
+                                String.join("; ", validation.getErrors()) + ",1,StrategyGenerationServer,Strategy,Invalid");
                             
                             // Retry
                             generateStrategyWithRetry(query, intent, complexityAnalysis, constraints, attempt + 1)
                                 .onComplete(promise);
                         }
                     } catch (Exception e) {
-                        LogUtil.logError(vertx, "Failed to parse strategy JSON", e,
-                            "StrategyGenerationServer", "Strategy", "Parse", false);
+                        vertx.eventBus().publish("log", "Failed to parse strategy JSON: " + e.getMessage() + ",0,StrategyGenerationServer,Strategy,Parse");
                         
                         // Retry
                         generateStrategyWithRetry(query, intent, complexityAnalysis, constraints, attempt + 1)
@@ -627,9 +619,8 @@ public class StrategyGenerationServer extends MCPServerBase {
         String primaryIntent = intent.getString("primary_intent", "unknown");
         float complexityScore = complexityAnalysis.getFloat("complexity_score", 0.5f);
         
-        LogUtil.logInfo(vertx, "Selecting fallback strategy for intent: " + primaryIntent + 
-            ", complexity: " + complexityScore,
-            "StrategyGenerationServer", "Fallback", "Select", false);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "Selecting fallback strategy for intent: " + primaryIntent + 
+            "; complexity: " + complexityScore + ",1,StrategyGenerationServer,Fallback,Select");
         
         // Select based on intent first, then complexity
         if (primaryIntent.equals("get_sql_only")) {
@@ -651,8 +642,7 @@ public class StrategyGenerationServer extends MCPServerBase {
         JsonArray optimizationGoals = arguments.getJsonArray("optimization_goals", new JsonArray());
         JsonObject performanceHistory = arguments.getJsonObject("performance_history", new JsonObject());
         
-        LogUtil.logDebug(vertx, "Optimizing strategy: " + strategy.getString("name"),
-            "StrategyGenerationServer", "Strategy", "Optimize");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Optimizing strategy: " + strategy.getString("name") + ",3,StrategyGenerationServer,Strategy,Optimize");
         
         // Simple optimization logic for now
         JsonObject optimized = strategy.copy();

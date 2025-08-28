@@ -4,7 +4,6 @@ import agents.director.mcp.base.MCPServerBase;
 import agents.director.mcp.base.MCPTool;
 import agents.director.mcp.base.MCPResponse;
 import agents.director.services.LlmAPIService;
-import agents.director.services.LogUtil;
 import io.vertx.core.Promise;
 import io.vertx.core.Future;
 import io.vertx.core.json.JsonObject;
@@ -13,6 +12,7 @@ import io.vertx.ext.web.RoutingContext;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import static agents.director.Driver.logLevel;
 
 /**
  * MCP Server for orchestrating strategy execution with real-time adaptation.
@@ -38,8 +38,7 @@ public class StrategyOrchestratorServer extends MCPServerBase {
         llmService = LlmAPIService.getInstance();
         
         if (!llmService.isInitialized()) {
-            LogUtil.logInfo(vertx, "LLM service not initialized - adaptation capabilities limited", 
-                "StrategyOrchestratorServer", "Init", "Warning", false);
+            if (logLevel >= 1) vertx.eventBus().publish("log", "LLM service not initialized - adaptation capabilities limited,1,StrategyOrchestratorServer,Init,Warning");
         }
         
         // Start cleanup timer for old execution contexts
@@ -163,8 +162,7 @@ public class StrategyOrchestratorServer extends MCPServerBase {
         String server = step.getString("server");
         boolean optional = step.getBoolean("optional", false);
         
-        LogUtil.logDebug(vertx, "Executing step: " + tool + " on server: " + server,
-            "StrategyOrchestratorServer", "Execute", "Step");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Executing step: " + tool + " on server: " + server + ",3,StrategyOrchestratorServer,Execute,Step");
         
         long startTime = System.currentTimeMillis();
         
@@ -239,8 +237,7 @@ public class StrategyOrchestratorServer extends MCPServerBase {
             k -> new ExecutionContext(executionId, strategy));
         execContext.updateProgress(completedSteps, currentResults, timeElapsed);
         
-        LogUtil.logDebug(vertx, "Evaluating progress for execution: " + executionId,
-            "StrategyOrchestratorServer", "Progress", "Evaluate");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Evaluating progress for execution: " + executionId + ",3,StrategyOrchestratorServer,Progress,Evaluate");
         
         JsonArray allSteps = strategy.getJsonArray("steps", new JsonArray());
         int totalSteps = allSteps.size();
@@ -316,8 +313,7 @@ public class StrategyOrchestratorServer extends MCPServerBase {
         String userFeedback = arguments.getString("user_feedback", "");
         JsonObject constraints = arguments.getJsonObject("constraints", new JsonObject());
         
-        LogUtil.logInfo(vertx, "Adapting strategy based on evaluation",
-            "StrategyOrchestratorServer", "Strategy", "Adapt", false);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "Adapting strategy based on evaluation,1,StrategyOrchestratorServer,Strategy,Adapt");
         
         // If no LLM available, use rule-based adaptation
         if (!llmService.isInitialized()) {
@@ -366,8 +362,7 @@ public class StrategyOrchestratorServer extends MCPServerBase {
                         JsonObject adapted = parseAdaptedStrategy(content);
                         promise.complete(wrapAdaptationResult(adapted, currentStrategy));
                     } catch (Exception e) {
-                        LogUtil.logError(vertx, "Failed to parse adapted strategy", e,
-                            "StrategyOrchestratorServer", "Adapt", "Parse", false);
+                        vertx.eventBus().publish("log", "Failed to parse adapted strategy: " + e.getMessage() + ",0,StrategyOrchestratorServer,Adapt,Parse");
                         promise.fail(e);
                     }
                 } else {
@@ -639,8 +634,7 @@ public class StrategyOrchestratorServer extends MCPServerBase {
         activeExecutions.entrySet().removeIf(entry -> {
             ExecutionContext context = entry.getValue();
             if (context.lastUpdateTime < cutoffTime) {
-                LogUtil.logDebug(vertx, "Removing old execution context: " + entry.getKey(),
-                    "StrategyOrchestratorServer", "Cleanup", "Context");
+                if (logLevel >= 3) vertx.eventBus().publish("log", "Removing old execution context: " + entry.getKey() + ",3,StrategyOrchestratorServer,Cleanup,Context");
                 return true;
             }
             return false;

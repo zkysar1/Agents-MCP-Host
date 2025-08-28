@@ -14,8 +14,8 @@ import io.vertx.core.http.HttpServerResponse;
 
 import agents.director.services.MCPRouterService;
 import agents.director.services.InterruptManager;
-import agents.director.services.LogUtil;
 import agents.director.services.OracleConnectionManager;
+import static agents.director.Driver.logLevel;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -85,7 +85,7 @@ public class ConversationStreaming extends AbstractVerticle {
                 } catch (Exception e) {
                     // Response closed during write
                     responseEnded = true;
-                    LogUtil.logDebug(vertx, "SSE write failed - connection likely closed", "ConversationStreaming", "SSE", "Write");
+                    if (logLevel >= 3) vertx.eventBus().publish("log", "SSE write failed - connection likely closed,3,ConversationStreaming,SSE,Write");
                 }
             }
         }
@@ -150,7 +150,7 @@ public class ConversationStreaming extends AbstractVerticle {
         // Listen for system ready event
         eventBus.consumer("system.fully.ready", msg -> {
             systemReady = true;
-            LogUtil.logInfo(vertx, "System fully ready - accepting requests", "ConversationStreaming", "System", "Ready", true);
+            if (logLevel >= 1) vertx.eventBus().publish("log", "System fully ready - accepting requests,1,ConversationStreaming,System,Ready");
         });
         
         // Listen for critical error events
@@ -159,7 +159,7 @@ public class ConversationStreaming extends AbstractVerticle {
             String errorId = "error_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString();
             criticalErrors.put(errorId, error);
             
-            LogUtil.logError(vertx, "[CRITICAL ERROR] " + error.encode(), "ConversationStreaming", "Error", "Critical", true);
+            vertx.eventBus().publish("log", "[CRITICAL ERROR] " + error.encode() + ",0,ConversationStreaming,Error,Critical");
             
             // Auto-cleanup after 5 minutes
             vertx.setTimer(300000, id -> criticalErrors.remove(errorId));
@@ -225,7 +225,7 @@ public class ConversationStreaming extends AbstractVerticle {
         // Periodic cleanup
         startSessionCleanup();
         
-        LogUtil.logInfo(vertx, "ConversationStreaming API initialized", "ConversationStreaming", "API", "System", true);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "ConversationStreaming API initialized,1,ConversationStreaming,API,System");
         startPromise.complete();
     }
     
@@ -236,7 +236,7 @@ public class ConversationStreaming extends AbstractVerticle {
         // Check if system is ready
         if (!systemReady) {
             sendError(context, 503, "System is starting up. Please try again in a few seconds.");
-            LogUtil.logDebug(vertx, "Request rejected - system not ready", "ConversationStreaming", "Request", "Validation");
+            if (logLevel >= 3) vertx.eventBus().publish("log", "Request rejected - system not ready,3,ConversationStreaming,Request,Validation");
             return;
         }
         
@@ -246,7 +246,7 @@ public class ConversationStreaming extends AbstractVerticle {
             String userErrorMessage = firstError.getString("userMessage", 
                 "System critical error occurred. Please restart the system or contact support.");
             sendError(context, 503, userErrorMessage);
-            LogUtil.logError(vertx, "Request blocked due to critical error", "ConversationStreaming", "Request", "Critical", true);
+            vertx.eventBus().publish("log", "Request blocked due to critical error,0,ConversationStreaming,Request,Critical");
             return;
         }
         
@@ -326,7 +326,7 @@ public class ConversationStreaming extends AbstractVerticle {
                 sendError(context, 503, "No available hosts to process request");
                 return;
             }
-            LogUtil.logInfo(vertx, "Original host unavailable, falling back to: " + selectedHost, "ConversationStreaming", "API", "System", false);
+            if (logLevel >= 1) vertx.eventBus().publish("log", "Original host unavailable; falling back to: " + selectedHost + ",1,ConversationStreaming,API,System");
         }
         final String finalHost = selectedHost;
         
@@ -373,7 +373,7 @@ public class ConversationStreaming extends AbstractVerticle {
                 setupEventConsumers(enhancedSession, options);
             } catch (Exception e) {
                 // Clean up on error
-                LogUtil.logError(vertx, "Failed to setup event consumers", e, "ConversationStreaming", "Session", "Setup", false);
+                vertx.eventBus().publish("log", "Failed to setup event consumers: " + e.getMessage() + ",0,ConversationStreaming,Session,Setup");
                 activeSessions.remove(sessionId);
                 sendError(context, 500, "Failed to initialize streaming session");
                 return;
@@ -385,13 +385,13 @@ public class ConversationStreaming extends AbstractVerticle {
             context.response().closeHandler(v -> {
                 finalEnhancedSession.responseEnded = true;
                 cleanupSession(finalSessionId);
-                LogUtil.logDebug(vertx, "Client closed connection for session: " + finalSessionId, "ConversationStreaming", "Session", "Cleanup");
+                if (logLevel >= 3) vertx.eventBus().publish("log", "Client closed connection for session: " + finalSessionId + ",3,ConversationStreaming,Session,Cleanup");
             });
             
             context.response().exceptionHandler(err -> {
                 finalEnhancedSession.responseEnded = true;
                 cleanupSession(finalSessionId);
-                LogUtil.logError(vertx, "Connection error for session: " + finalSessionId, err, "ConversationStreaming", "Session", "Error", false);
+                vertx.eventBus().publish("log", "Connection error for session: " + finalSessionId + " - " + err.getMessage() + ",0,ConversationStreaming,Session,Error");
             });
         }
         final String finalSessionId = sessionId;
@@ -419,16 +419,25 @@ public class ConversationStreaming extends AbstractVerticle {
             if (ar.succeeded()) {
                 Message<JsonObject> result = ar.result();
                 if (result == null || result.body() == null) {
-                    // Handle null response
+                    // Handle null response with context
+                    String errorMessage = String.format("Host '%s' returned null response after %dms", 
+                        finalHost, duration);
+                    JsonObject errorDetails = new JsonObject()
+                        .put("error", errorMessage)
+                        .put("host", finalHost)
+                        .put("requestId", requestId)
+                        .put("duration", duration)
+                        .put("timestamp", System.currentTimeMillis())
+                        .put("querySnippet", query.length() > 100 ? query.substring(0, 100) + "..." : query);
+                    
                     if (streaming && finalSessionId != null) {
-                        sendSSEEvent(context, "error", new JsonObject()
-                            .put("error", "Null response from host")
-                            .put("host", finalHost));
+                        sendSSEEvent(context, "error", errorDetails);
                         context.response().end();
                         cleanupSession(finalSessionId);
                     } else {
-                        sendError(context, 500, "Null response from host");
+                        sendError(context, 500, errorMessage);
                     }
+                    vertx.eventBus().publish("log", errorMessage + ",0,ConversationStreaming,Host,NullResponse");
                     return;
                 }
                 
@@ -454,15 +463,51 @@ public class ConversationStreaming extends AbstractVerticle {
                     sendJsonResponse(context, 200, response);
                 }
             } else {
-                vertx.eventBus().publish("log", "Host processing failed for " + finalHost + ": " + ar.cause() + "" + ",0,ConversationStreaming,API,System");
+                // Enhanced error handling with context
+                Throwable cause = ar.cause();
+                String errorType = "Unknown error";
+                String errorMessage = null;
+                
+                if (cause != null) {
+                    errorMessage = cause.getMessage();
+                    // Classify error types
+                    if (errorMessage != null) {
+                        if (errorMessage.contains("NO_HANDLERS") || errorMessage.contains("No handlers")) {
+                            errorType = "Host not available";
+                            errorMessage = String.format("Host '%s' is not available. The service may not be deployed or is not responding.", finalHost);
+                        } else if (errorMessage.contains("timed out") || errorMessage.contains("timeout")) {
+                            errorType = "Request timeout";
+                            errorMessage = String.format("Host '%s' did not respond within the timeout period", finalHost);
+                        } else if (errorMessage.contains("LLM") || errorMessage.contains("OpenAI")) {
+                            errorType = "LLM service error";
+                        }
+                    } else {
+                        errorMessage = "Host processing failed without error details";
+                    }
+                } else {
+                    errorMessage = String.format("Host '%s' processing failed with null error", finalHost);
+                }
+                
+                // Log detailed error
+                vertx.eventBus().publish("log", String.format(
+                    "Host processing failed - Type: %s, Host: %s, RequestId: %s, Error: %s",
+                    errorType, finalHost, requestId, errorMessage) + ",0,ConversationStreaming,API,System");
+                
+                // Create detailed error object
+                JsonObject errorDetails = new JsonObject()
+                    .put("error", errorMessage)
+                    .put("errorType", errorType)
+                    .put("host", finalHost)
+                    .put("requestId", requestId)
+                    .put("duration", duration)
+                    .put("timestamp", System.currentTimeMillis())
+                    .put("querySnippet", query.length() > 100 ? query.substring(0, 100) + "..." : query);
                 
                 if (streaming) {
-                    sendSSEEvent(context, "error", new JsonObject()
-                        .put("error", ar.cause().getMessage() != null ? ar.cause().getMessage() : "Unknown error")
-                        .put("host", finalHost));
+                    sendSSEEvent(context, "error", errorDetails);
                     context.response().end();
                 } else {
-                    sendError(context, 500, "Processing failed: " + (ar.cause().getMessage() != null ? ar.cause().getMessage() : "Unknown error"));
+                    sendError(context, 500, errorMessage);
                 }
                 
                 // Clean up session
@@ -628,7 +673,16 @@ public class ConversationStreaming extends AbstractVerticle {
     private void sendError(RoutingContext context, int statusCode, String message) {
         JsonObject error = new JsonObject()
             .put("error", message)
-            .put("timestamp", System.currentTimeMillis());
+            .put("statusCode", statusCode)
+            .put("timestamp", System.currentTimeMillis())
+            .put("service", "ConversationStreaming");
+        
+        // Add request context if available
+        if (context.body() != null && context.body().asJsonObject() != null) {
+            JsonObject requestBody = context.body().asJsonObject();
+            String host = requestBody.getString("host", "unknown");
+            error.put("requestedHost", host);
+        }
         
         sendJsonResponse(context, statusCode, error);
     }
@@ -749,7 +803,7 @@ public class ConversationStreaming extends AbstractVerticle {
             }
         });
         
-        LogUtil.logDebug(vertx, "Set up " + session.consumers.size() + " event consumers for session: " + sessionId, "ConversationStreaming", "Session", "Setup");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Set up " + session.consumers.size() + " event consumers for session: " + sessionId + ",3,ConversationStreaming,Session,Setup");
     }
     
     /**
@@ -760,7 +814,7 @@ public class ConversationStreaming extends AbstractVerticle {
         if (session != null && session instanceof EnhancedStreamingSession) {
             EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
             enhancedSession.cleanup();
-            LogUtil.logDebug(vertx, "Cleaned up session: " + sessionId, "ConversationStreaming", "Session", "Cleanup");
+            if (logLevel >= 3) vertx.eventBus().publish("log", "Cleaned up session: " + sessionId + ",3,ConversationStreaming,Session,Cleanup");
         }
         
         // Clean up interrupt manager state
@@ -813,7 +867,7 @@ public class ConversationStreaming extends AbstractVerticle {
             .put("sessionId", sessionId)
             .put("graceful", graceful));
         
-        LogUtil.logInfo(vertx, "Session interrupted: " + sessionId + " - " + reason, "ConversationStreaming", "Session", "Interrupt", false);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "Session interrupted: " + sessionId + " - " + reason + ",1,ConversationStreaming,Session,Interrupt");
     }
     
     /**
@@ -826,7 +880,7 @@ public class ConversationStreaming extends AbstractVerticle {
         StreamingSession session = activeSessions.get(sessionId);
         if (session == null) {
             // Session might have completed, but we can still accept feedback
-            LogUtil.logDebug(vertx, "Feedback received for completed session: " + sessionId, "ConversationStreaming", "Session", "Feedback");
+            if (logLevel >= 3) vertx.eventBus().publish("log", "Feedback received for completed session: " + sessionId + ",3,ConversationStreaming,Session,Feedback");
         }
         
         // Add metadata to feedback
@@ -1028,8 +1082,7 @@ public class ConversationStreaming extends AbstractVerticle {
             
             // Log cleanup statistics
             if (!sessionsToRemove.isEmpty()) {
-                LogUtil.logDebug(vertx, "Session cleanup: removed " + sessionsToRemove.size() + " sessions, active: " + activeSessions.size(), 
-                                 "ConversationStreaming", "Session", "Cleanup");
+                if (logLevel >= 3) vertx.eventBus().publish("log", "Session cleanup: removed " + sessionsToRemove.size() + " sessions; active: " + activeSessions.size() + ",3,ConversationStreaming,Session,Cleanup");
             }
         });
     }

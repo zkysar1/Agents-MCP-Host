@@ -4,7 +4,6 @@ import agents.director.mcp.base.MCPServerBase;
 import agents.director.mcp.base.MCPTool;
 import agents.director.mcp.base.MCPResponse;
 import agents.director.services.LlmAPIService;
-import agents.director.services.LogUtil;
 import io.vertx.core.Promise;
 import io.vertx.core.Future;
 import io.vertx.core.json.JsonObject;
@@ -12,6 +11,7 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.RoutingContext;
 
 import java.util.*;
+import static agents.director.Driver.logLevel;
 
 /**
  * MCP Server for analyzing user intent and determining desired output formats.
@@ -65,8 +65,7 @@ public class IntentAnalysisServer extends MCPServerBase {
         llmService = LlmAPIService.getInstance();
         
         if (!llmService.isInitialized()) {
-            LogUtil.logInfo(vertx, "LLM service not initialized - will use keyword-based analysis only", 
-                "IntentAnalysisServer", "Init", "Warning", false);
+            if (logLevel >= 1) vertx.eventBus().publish("log", "LLM service not initialized - will use keyword-based analysis only,1,IntentAnalysisServer,Init,Warning");
         }
         
         super.start(startPromise);
@@ -173,8 +172,7 @@ public class IntentAnalysisServer extends MCPServerBase {
         JsonArray conversationHistory = arguments.getJsonArray("conversation_history", new JsonArray());
         JsonObject userProfile = arguments.getJsonObject("user_profile", new JsonObject());
         
-        LogUtil.logDebug(vertx, "Extracting intent from query: " + query, 
-            "IntentAnalysisServer", "Intent", "Extract");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Extracting intent from query: " + query + ",3,IntentAnalysisServer,Intent,Extract");
         
         // If LLM is available, use it for deep analysis
         if (llmService.isInitialized()) {
@@ -221,8 +219,7 @@ public class IntentAnalysisServer extends MCPServerBase {
                         JsonObject intent = parseIntentFromLLM(content);
                         promise.complete(intent);
                     } catch (Exception e) {
-                        LogUtil.logError(vertx, "Failed to parse intent from LLM", e,
-                            "IntentAnalysisServer", "Intent", "Parse", false);
+                        vertx.eventBus().publish("log", "Failed to parse intent from LLM: " + e.getMessage() + ",0,IntentAnalysisServer,Intent,Parse");
                         promise.fail(e);
                     }
                 } else {
@@ -370,8 +367,7 @@ public class IntentAnalysisServer extends MCPServerBase {
         
         String primaryIntent = intent.getString("primary_intent", "answer_question");
         
-        LogUtil.logDebug(vertx, "Determining output format for intent: " + primaryIntent,
-            "IntentAnalysisServer", "Format", "Determine");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Determining output format for intent: " + primaryIntent + ",3,IntentAnalysisServer,Format,Determine");
         
         // Start with default format for the intent
         JsonObject format = DEFAULT_OUTPUT_FORMATS.getOrDefault(primaryIntent, 
@@ -415,8 +411,7 @@ public class IntentAnalysisServer extends MCPServerBase {
         String userExpertise = arguments.getString("user_expertise", "intermediate");
         Float queryComplexity = arguments.getFloat("query_complexity", 0.5f);
         
-        LogUtil.logDebug(vertx, "Suggesting interaction style for expertise: " + userExpertise,
-            "IntentAnalysisServer", "Style", "Suggest");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Suggesting interaction style for expertise: " + userExpertise + ",3,IntentAnalysisServer,Style,Suggest");
         
         JsonObject interactionStyle = new JsonObject();
         JsonArray confirmationPoints = new JsonArray();

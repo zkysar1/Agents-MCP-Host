@@ -4,7 +4,6 @@ import agents.director.mcp.base.MCPServerBase;
 import agents.director.mcp.base.MCPTool;
 import agents.director.mcp.base.MCPResponse;
 import agents.director.services.LlmAPIService;
-import agents.director.services.LogUtil;
 import io.vertx.core.Promise;
 import io.vertx.core.Future;
 import io.vertx.core.json.JsonObject;
@@ -13,6 +12,7 @@ import io.vertx.ext.web.RoutingContext;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import static agents.director.Driver.logLevel;
 import java.util.stream.Collectors;
 
 /**
@@ -42,8 +42,7 @@ public class StrategyLearningServer extends MCPServerBase {
         llmService = LlmAPIService.getInstance();
         
         if (!llmService.isInitialized()) {
-            LogUtil.logInfo(vertx, "LLM service not initialized - learning insights will be limited", 
-                "StrategyLearningServer", "Init", "Warning", false);
+            if (logLevel >= 1) vertx.eventBus().publish("log", "LLM service not initialized - learning insights will be limited,1,StrategyLearningServer,Init,Warning");
         }
         
         // Start periodic cleanup of old history
@@ -179,8 +178,7 @@ public class StrategyLearningServer extends MCPServerBase {
         String recordId = UUID.randomUUID().toString();
         String strategyName = strategy.getString("name", "Unknown Strategy");
         
-        LogUtil.logDebug(vertx, "Recording execution for strategy: " + strategyName,
-            "StrategyLearningServer", "Record", "Execution");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Recording execution for strategy: " + strategyName + ",3,StrategyLearningServer,Record,Execution");
         
         // Create execution record
         ExecutionRecord record = new ExecutionRecord(
@@ -224,8 +222,7 @@ public class StrategyLearningServer extends MCPServerBase {
         JsonArray failurePatterns = arguments.getJsonArray("failure_patterns", new JsonArray());
         JsonObject context = arguments.getJsonObject("context", new JsonObject());
         
-        LogUtil.logDebug(vertx, "Suggesting improvements for strategy type: " + strategyType,
-            "StrategyLearningServer", "Suggest", "Improvements");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Suggesting improvements for strategy type: " + strategyType + ",3,StrategyLearningServer,Suggest,Improvements");
         
         // Get historical data for this strategy type
         List<ExecutionRecord> historicalRecords = getHistoricalRecords(strategyType);
@@ -277,8 +274,7 @@ public class StrategyLearningServer extends MCPServerBase {
         String timeWindow = arguments.getString("time_window", "last_day");
         String focusArea = arguments.getString("focus_area", "performance");
         
-        LogUtil.logInfo(vertx, "Analyzing patterns for " + focusArea + " in " + timeWindow,
-            "StrategyLearningServer", "Pattern", "Analysis", false);
+        if (logLevel >= 1) vertx.eventBus().publish("log", "Analyzing patterns for " + focusArea + " in " + timeWindow + ",1,StrategyLearningServer,Pattern,Analysis");
         
         // Filter records by time window
         long cutoffTime = calculateCutoffTime(timeWindow);
@@ -569,8 +565,7 @@ public class StrategyLearningServer extends MCPServerBase {
                         JsonArray improvements = parseImprovementsFromLLM(content);
                         promise.complete(improvements);
                     } catch (Exception e) {
-                        LogUtil.logError(vertx, "Failed to parse LLM improvements", e,
-                            "StrategyLearningServer", "Improvements", "Parse", false);
+                        vertx.eventBus().publish("log", "Failed to parse LLM improvements: " + e.getMessage() + ",0,StrategyLearningServer,Improvements,Parse");
                         promise.complete(new JsonArray());
                     }
                 } else {
@@ -878,8 +873,7 @@ public class StrategyLearningServer extends MCPServerBase {
         toRemove.forEach(executionHistory::remove);
         
         if (!toRemove.isEmpty()) {
-            LogUtil.logDebug(vertx, "Cleaned up " + toRemove.size() + " old execution records",
-                "StrategyLearningServer", "Cleanup", "History");
+            if (logLevel >= 3) vertx.eventBus().publish("log", "Cleaned up " + toRemove.size() + " old execution records,3,StrategyLearningServer,Cleanup,History");
         }
     }
     
@@ -887,9 +881,8 @@ public class StrategyLearningServer extends MCPServerBase {
         // This runs periodically to update pattern statistics
         patternStats.forEach((strategyType, stats) -> {
             if (stats.lastUpdated > System.currentTimeMillis() - 300000) { // Updated in last 5 min
-                LogUtil.logDebug(vertx, "Pattern analysis for " + strategyType + 
-                    ": success=" + ((float) stats.successfulExecutions / stats.totalExecutions),
-                    "StrategyLearningServer", "Pattern", "Update");
+                if (logLevel >= 3) vertx.eventBus().publish("log", "Pattern analysis for " + strategyType + 
+                    ": success=" + ((float) stats.successfulExecutions / stats.totalExecutions) + ",3,StrategyLearningServer,Pattern,Update");
             }
         });
     }

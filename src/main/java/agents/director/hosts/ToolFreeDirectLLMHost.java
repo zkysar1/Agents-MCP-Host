@@ -12,6 +12,7 @@ import io.vertx.core.json.JsonArray;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import static agents.director.Driver.logLevel;
 
 /**
  * Tool-Free Direct LLM Host - Provides direct LLM responses without any tools.
@@ -124,7 +125,9 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
         
         // Check if LLM service is available
         if (!llmService.isInitialized()) {
-            vertx.eventBus().publish("log", "LLM service not initialized - responses will be limited,1,ToolFreeDirectLLMHost,Host,System");
+            String warningMsg = "LLM service not initialized - API key may be missing or invalid";
+            vertx.eventBus().publish("log", warningMsg + ",1,ToolFreeDirectLLMHost,Host,System");
+            // Already logged above
         }
         
         // Register event bus consumers
@@ -166,13 +169,14 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
      * Process incoming query
      */
     private void processQuery(Message<JsonObject> message) {
-        JsonObject request = message.body();
-        String query = request.getString("query");
-        String conversationId = request.getString("conversationId", UUID.randomUUID().toString());
-        String sessionId = request.getString("sessionId"); // For streaming
-        JsonArray history = request.getJsonArray("history", new JsonArray());
-        boolean streaming = request.getBoolean("streaming", false);
-        JsonObject options = request.getJsonObject("options", new JsonObject());
+        try {
+            JsonObject request = message.body();
+            String query = request.getString("query");
+            String conversationId = request.getString("conversationId", UUID.randomUUID().toString());
+            String sessionId = request.getString("sessionId"); // For streaming
+            JsonArray history = request.getJsonArray("history", new JsonArray());
+            boolean streaming = request.getBoolean("streaming", false);
+            JsonObject options = request.getJsonObject("options", new JsonObject());
         
         vertx.eventBus().publish("log", "Processing direct LLM query for conversation " + conversationId + ": " + query + "" + ",2,ToolFreeDirectLLMHost,Host,System");
         
@@ -254,35 +258,75 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
                         // Add assistant response to conversation
                         conversation.addMessage("assistant", response.getString("answer"));
                     } else {
-                        vertx.eventBus().publish("log", "LLM processing failed" + ",0,ToolFreeDirectLLMHost,Host,System");
+                        String errorMsg = ar.cause() != null && ar.cause().getMessage() != null ? 
+                            ar.cause().getMessage() : "LLM processing failed";
+                        
+                        // Check for specific error types
+                        if (errorMsg.contains("API key") || errorMsg.contains("401")) {
+                            errorMsg = "LLM service authentication failed - please check API key configuration";
+                        } else if (errorMsg.contains("timeout")) {
+                            errorMsg = "LLM service request timed out - OpenAI may be slow or unavailable";
+                        } else if (errorMsg.contains("Rate limit") || errorMsg.contains("429")) {
+                            errorMsg = "LLM service rate limit exceeded - too many requests";
+                        }
+                        
+                        vertx.eventBus().publish("log", "LLM processing failed: " + errorMsg + ",0,ToolFreeDirectLLMHost,Host,System");
                         
                         // Publish error event if streaming
                         if (sessionId != null && streaming) {
                             publishStreamingEvent(conversationId, "error", new JsonObject()
-                                .put("error", ar.cause().getMessage())
+                                .put("error", errorMsg)
                                 .put("severity", "ERROR")
-                                .put("tool", "direct_llm_chat"));
+                                .put("tool", "direct_llm_chat")
+                                .put("errorType", "LLM processing error"));
                         }
                         
-                        message.fail(500, ar.cause().getMessage());
+                        message.fail(500, errorMsg);
                     }
                 });
         } else {
+            // LLM service not initialized - provide detailed error
+            String errorMsg = "LLM service not initialized - OpenAI API key may be missing or invalid. Please set OPENAI_API_KEY environment variable.";
+            
             // Publish error for no LLM
             if (sessionId != null && streaming) {
                 publishStreamingEvent(conversationId, "error", new JsonObject()
-                    .put("error", "LLM service not available")
-                    .put("severity", "WARNING"));
+                    .put("error", errorMsg)
+                    .put("severity", "ERROR")
+                    .put("errorType", "Service unavailable")
+                    .put("suggestion", "Set OPENAI_API_KEY environment variable and restart the service"));
             }
             
-            // Fallback response when LLM is not available
-            JsonObject response = createFallbackResponse(query);
-            response.put("conversationId", conversationId);
-            response.put("duration", System.currentTimeMillis() - startTime);
-            response.put("method", "fallback");
-            message.reply(response);
+            // Create error response instead of fallback
+            JsonObject errorResponse = new JsonObject()
+                .put("error", errorMsg)
+                .put("errorType", "Service unavailable")
+                .put("host", "ToolFreeDirectLLMHost")
+                .put("conversationId", conversationId)
+                .put("duration", System.currentTimeMillis() - startTime)
+                .put("timestamp", System.currentTimeMillis());
             
-            conversation.addMessage("assistant", response.getString("answer"));
+            // Log the error
+            vertx.eventBus().publish("log", errorMsg + ",0,ToolFreeDirectLLMHost,Host,System");
+            
+            // Fail the message with proper error
+            message.fail(503, errorMsg);
+        }
+        } catch (Exception e) {
+            // Handle any unexpected errors
+            String errorMessage = "Failed to process query: " + (e.getMessage() != null ? e.getMessage() : "Internal error");
+            vertx.eventBus().publish("log", errorMessage + ": " + e.getMessage() + ",0,ToolFreeDirectLLMHost,ProcessQuery,Error");
+            
+            // Send error response
+            JsonObject errorResponse = new JsonObject()
+                .put("error", errorMessage)
+                .put("errorType", "Processing error")
+                .put("host", "ToolFreeDirectLLMHost")
+                .put("timestamp", System.currentTimeMillis());
+            
+            if (message != null) {
+                message.fail(500, errorMessage);
+            }
         }
     }
     

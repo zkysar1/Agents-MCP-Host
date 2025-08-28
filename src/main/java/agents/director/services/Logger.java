@@ -72,11 +72,11 @@ public class Logger extends AbstractVerticle {
           if (x.succeeded()) {
             ready.run();
           } else {
-            vertx.eventBus().publish("log", "Failed to write initial log file: " + x.cause().getMessage() + ",0,LoggerVerticle,StartUp,System");
+            System.err.println("Failed to write initial log file: " + x.cause().getMessage());
           }
         });
       } else {
-        vertx.eventBus().publish("log", "Failed to create logs directory: " + r.cause().getMessage() + ",0,LoggerVerticle,StartUp,System");
+        System.err.println("Failed to create logs directory: " + r.cause().getMessage());
       }
     });
   }
@@ -89,12 +89,13 @@ public class Logger extends AbstractVerticle {
       buffer.add(msg.body() + "," + sequenceCounter + "," + now + "\n");
 
       if (logLevel >= 2) {
-        vertx.eventBus().publish("log", "[LOG] " + msg.body() + ",2,Logger,System,System");
+        System.out.println("[LOG] " + msg.body());
       }
     });
 
-    vertx.eventBus().consumer("saveAllDataToFiles_OnTermination", m -> flushBuffer(ar ->
-            vertx.eventBus().publish("log", "Logs flushed manually,0,LoggerVerticle,Terminate,System")));
+    vertx.eventBus().consumer("saveAllDataToFiles_OnTermination", m -> flushBuffer(ar -> {
+      // Flush complete, no need to log this
+    }));
   }
 
   /* ---------- periodic tasks ---------- */
