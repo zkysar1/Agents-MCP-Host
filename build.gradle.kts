@@ -20,8 +20,7 @@ repositories {
 }
 
 val junitJupiterVersion = "5.9.1"
-val vertxVersion = "4.5.7"
-val awsSDKVersion = "2.25.31"
+val vertxVersion = "4.5.10"
 val mcpVersion = "0.11.0"
 val reactorVersion = "3.6.0"
 val launcherClassName = "agents.director.Driver"
@@ -31,28 +30,13 @@ application {
 }
 
 dependencies {
-  // MCP SDK dependencies
-  implementation("io.modelcontextprotocol.sdk:mcp:$mcpVersion")
-  
-  // Reactor dependencies for MCP SDK
-  implementation("io.projectreactor:reactor-core:$reactorVersion")
   
   // Vert.x dependencies
   implementation(platform("io.vertx:vertx-stack-depchain:$vertxVersion"))
   implementation("io.vertx:vertx-web-client")
   implementation("io.vertx:vertx-config")
-  implementation("io.vertx:vertx-auth-jwt")
   implementation("io.vertx:vertx-web")
-  implementation("io.vertx:vertx-health-check")
-  implementation(platform("software.amazon.awssdk:bom:$awsSDKVersion"))
-  implementation("software.amazon.awssdk:dynamodb")
-  implementation("software.amazon.awssdk:ec2")
-  implementation("software.amazon.awssdk:lambda")
-  implementation("software.amazon.awssdk:cloudwatch")
-  implementation("software.amazon.awssdk:route53")
-  implementation("software.amazon.awssdk:s3")
-  implementation("software.amazon.awssdk:ssm")
-  implementation("software.amazon.awssdk:netty-nio-client")
+  // AWS SDK removed - was causing memory issues
   testImplementation("io.vertx:vertx-junit5")
   testImplementation("org.junit.jupiter:junit-jupiter:$junitJupiterVersion")
   testImplementation("org.mockito:mockito-core:5.11.0")
@@ -68,9 +52,7 @@ dependencies {
   
   // SQL parsing and manipulation
   implementation("com.github.jsqlparser:jsqlparser:4.7")
-  
-  // Natural language processing
-  implementation("org.apache.opennlp:opennlp-tools:2.3.1")
+
 }
 
 java {
@@ -113,15 +95,18 @@ tasks.named<JavaExec>("run") {
     
     // Add JVM arguments for better Windows compatibility
     jvmArgs = listOf(
-        "-Xmx4g",  // Increased heap size for Oracle UCP
-        "-Xms1g",  // Initial heap size
+        "-Xmx4g",  // 4GB should be sufficient without AWS SDK
+        "-Xms1g",  // Standard initial heap size
         "-XX:+UseG1GC",  // G1 garbage collector for better memory management
         "-XX:+HeapDumpOnOutOfMemoryError",  // Create heap dump on OOM
         "-XX:HeapDumpPath=./heapdump.hprof",  // Heap dump location
-        "-XX:MaxMetaspaceSize=512m",  // Limit metaspace
+        "-XX:MaxMetaspaceSize=256m",  // Reduced metaspace without AWS SDK
         "-Doracle.ucp.PreCreatedConnectionsCount=0",  // Don't pre-create connections
         "-Dfile.encoding=UTF-8",
-        "-Djava.awt.headless=true"
+        "-Djava.awt.headless=true",
+        "-XX:+PrintGCDetails",  // Print GC details to help diagnose memory issues
+        "-XX:+PrintGCTimeStamps",  // Print timestamps with GC events
+        "-Xlog:gc*:file=./gc.log:time,uptime,level,tags"  // Log GC events to file
     )
     
     // Set working directory
