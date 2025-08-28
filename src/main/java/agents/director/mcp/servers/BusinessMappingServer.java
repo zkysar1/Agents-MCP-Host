@@ -45,16 +45,25 @@ public class BusinessMappingServer extends MCPServerBase {
     private static final long ENUM_CACHE_TTL = 600000; // 10 minutes
     
     // Common business term patterns (for fallback when LLM unavailable)
-    private static final Map<String, List<String>> COMMON_TERM_PATTERNS = Map.of(
-        "customer", Arrays.asList("customer", "client", "account", "user", "member"),
-        "order", Arrays.asList("order", "purchase", "transaction", "sale"),
-        "product", Arrays.asList("product", "item", "sku", "merchandise", "goods"),
-        "employee", Arrays.asList("employee", "staff", "worker", "personnel", "emp"),
-        "date", Arrays.asList("date", "datetime", "timestamp", "created", "modified"),
-        "status", Arrays.asList("status", "state", "flag", "active", "enabled"),
-        "amount", Arrays.asList("amount", "total", "sum", "price", "cost", "value"),
-        "name", Arrays.asList("name", "title", "description", "label")
-    );
+    private static final Map<String, List<String>> COMMON_TERM_PATTERNS = new HashMap<>();
+    
+    static {
+        COMMON_TERM_PATTERNS.put("customer", Arrays.asList("customer", "client", "account", "user", "member"));
+        COMMON_TERM_PATTERNS.put("order", Arrays.asList("order", "purchase", "transaction", "sale"));
+        COMMON_TERM_PATTERNS.put("product", Arrays.asList("product", "item", "sku", "merchandise", "goods"));
+        COMMON_TERM_PATTERNS.put("employee", Arrays.asList("employee", "staff", "worker", "personnel", "emp"));
+        COMMON_TERM_PATTERNS.put("date", Arrays.asList("date", "datetime", "timestamp", "created", "modified"));
+        COMMON_TERM_PATTERNS.put("status", Arrays.asList("status", "state", "flag", "active", "enabled"));
+        COMMON_TERM_PATTERNS.put("amount", Arrays.asList("amount", "total", "sum", "price", "cost", "value"));
+        COMMON_TERM_PATTERNS.put("name", Arrays.asList("name", "title", "description", "label"));
+        COMMON_TERM_PATTERNS.put("location", Arrays.asList("state", "province", "region", "territory", "prov"));
+        COMMON_TERM_PATTERNS.put("postal", Arrays.asList("zip", "zipcode", "postal", "postal_code", "postcode"));
+        // Add specific US->Canadian mappings
+        COMMON_TERM_PATTERNS.put("province", Arrays.asList("state", "province", "prov"));  
+        COMMON_TERM_PATTERNS.put("postal_code", Arrays.asList("zip", "zipcode", "postal_code"));
+        COMMON_TERM_PATTERNS.put("phone", Arrays.asList("phone", "telephone", "tel", "mobile", "cell"));
+        COMMON_TERM_PATTERNS.put("address", Arrays.asList("address", "addr", "street", "location"));
+    }
     
     // Inner class for enum mappings
     private static class EnumMapping {
@@ -315,15 +324,37 @@ public class BusinessMappingServer extends MCPServerBase {
         
         String systemPrompt = """
             You are a database schema expert. Map business terms to database columns based on:
-            1. The provided schema information and context
-            2. Common database naming conventions
-            3. The semantic meaning of terms
+            1. The ACTUAL database schema provided (fullDatabaseSchema)
+            2. The provided schema information and context
+            3. Common database naming conventions
+            4. The semantic meaning of terms
+            5. Regional terminology variations
+            
+            CRITICAL: When fullDatabaseSchema is provided, use ONLY columns that exist in that schema!
             
             Consider:
             - Business terms may map to multiple columns
-            - Use the schema matches and query analysis context
+            - Use the actual schema first, then schema matches and query analysis context
             - Prefer exact matches, then semantic matches
             - Consider compound terms (e.g., "employee name" -> EMPLOYEE.FULL_NAME)
+            - Be aware of regional variations:
+              * "state" might need to map to "CITY" if "PROVINCE" doesn't exist
+              * "California" is a US state, so might be in CITY column if no STATE/PROVINCE exists
+              * "zip code" maps to "POSTAL_CODE"
+              * "SSN" maps to "SIN" (Social Insurance Number)
+            - Common column name patterns:
+              * Location fields: STATE, PROVINCE, REGION, TERRITORY, CITY
+              * Postal codes: ZIP, POSTAL_CODE, POSTCODE
+              * Phone numbers: PHONE, TEL, MOBILE, CELL
+              * Status fields: STATUS, STATUS_ID, STATUS_CODE
+            
+            For location queries like "California":
+            - Check if STATE/PROVINCE columns exist
+            - If not, consider CITY column (many databases store US states in CITY field)
+            - Consider COUNTRY_ID for country-level filtering
+            - ALWAYS suggest checking BOTH customer location AND shipping location:
+              * Customer location: CUSTOMERS.CITY, CUSTOMERS.COUNTRY_ID
+              * Shipping location: ORDERS.SHIPPING_CITY, ORDERS.SHIPPING_COUNTRY
             
             Respond with a JSON array of mappings.
             Each mapping should have:
@@ -351,6 +382,14 @@ public class BusinessMappingServer extends MCPServerBase {
         // Add any schema information from context
         if (context.containsKey("schemaMatches")) {
             promptData.put("availableSchema", context.getJsonObject("schemaMatches"));
+        }
+        
+        // Add full schema information if available
+        if (context.containsKey("fullSchema")) {
+            JsonObject fullSchema = context.getJsonObject("fullSchema");
+            if (fullSchema != null && fullSchema.containsKey("tables")) {
+                promptData.put("fullDatabaseSchema", fullSchema.getJsonArray("tables"));
+            }
         }
         
         List<JsonObject> messages = Arrays.asList(
@@ -392,17 +431,52 @@ public class BusinessMappingServer extends MCPServerBase {
                 
                 // Check if term matches any pattern
                 for (String pattern : patterns) {
-                    if (term.contains(pattern)) {
-                        // Create generic mapping suggestions
+                    if (term.contains(pattern) || pattern.contains(term)) {
+                        // Create more specific mapping suggestions based on pattern
+                        String columnPattern = pattern.toUpperCase();
+                        
+                        // Special handling for known variations
+                        if ("location".equals(category) || "province".equals(category)) {
+                            if (term.contains("state") || term.equals("california") || term.contains("california")) {
+                                // For US states like California, suggest both CITY and shipping fields
+                                termMappings.add(new JsonObject()
+                                    .put("table", "CUSTOMERS")
+                                    .put("column", "CITY")
+                                    .put("confidence", 0.9)
+                                    .put("reason", "US state name often stored in CITY field"));
+                                termMappings.add(new JsonObject()
+                                    .put("table", "ORDERS")
+                                    .put("column", "SHIPPING_CITY")
+                                    .put("confidence", 0.9)
+                                    .put("reason", "Check shipping location for orders"));
+                                // Still suggest PROVINCE in case it exists
+                                termMappings.add(new JsonObject()
+                                    .put("table", "*")
+                                    .put("column", "PROVINCE")
+                                    .put("confidence", 0.7)
+                                    .put("reason", "Geographic location mapping (US state -> Canadian province)"));
+                                continue; // Skip the generic pattern addition
+                            } else if (term.contains("province")) {
+                                columnPattern = "PROVINCE";
+                            }
+                        } else if ("postal".equals(category) || "postal_code".equals(category)) {
+                            columnPattern = "POSTAL_CODE";
+                            termMappings.add(new JsonObject()
+                                .put("table", "*")
+                                .put("column", "POSTAL_CODE")
+                                .put("confidence", 0.85)
+                                .put("reason", "Postal code mapping (zip -> postal_code)"));
+                        }
+                        
                         JsonObject suggestion = new JsonObject()
                             .put("table", "*")
-                            .put("column", pattern.toUpperCase() + "_*")
-                            .put("confidence", 0.6)
-                            .put("reason", "Pattern match for " + category);
+                            .put("column", columnPattern)
+                            .put("confidence", 0.7)
+                            .put("reason", "Pattern match for " + category + " (term: " + term + ")");
                         
                         // If we have table context, be more specific
                         if (!tableContext.isEmpty()) {
-                            suggestion.put("table", tableContext.getString(0) + " (or similar)");
+                            suggestion.put("table", tableContext.getString(0));
                         }
                         
                         termMappings.add(suggestion);

@@ -1156,19 +1156,21 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                     JsonArray entities = queryAnalysis.getJsonArray("entities", new JsonArray());
                     args.put("terms", entities);
                     
-                    // Add context from schema matching
+                    // Add full schema to context
+                    JsonObject fullSchema = context.getStepResult("get_oracle_schema");
                     JsonObject schemaContext = context.getStepResult("match_oracle_schema");
-                    if (schemaContext != null) {
-                        args.put("context", new JsonObject()
-                            .put("schemaMatches", schemaContext)
-                            .put("queryAnalysis", queryAnalysis));
-                    }
+                    
+                    args.put("context", new JsonObject()
+                        .put("schemaMatches", schemaContext)
+                        .put("queryAnalysis", queryAnalysis)
+                        .put("fullSchema", fullSchema));  // NEW: Add full schema
                 }
                 break;
                 
             case "generate_oracle_sql":
                 args.put("analysis", context.getStepResult("analyze_query"));
                 args.put("schemaMatches", context.getStepResult("match_oracle_schema"));
+                args.put("fullSchema", context.getStepResult("get_oracle_schema")); // NEW: Add full schema
                 args.put("includeEnums", true);
                 args.put("maxComplexity", determineComplexity(context));
                 break;
@@ -1191,6 +1193,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                     args.put("sql", sql);
                     args.put("checkPermissions", true);
                     args.put("suggestFixes", true);
+                    args.put("fullSchema", context.getStepResult("get_oracle_schema")); // NEW: Add full schema
                 }
                 break;
                 

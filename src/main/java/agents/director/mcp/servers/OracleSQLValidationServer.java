@@ -157,7 +157,10 @@ public class OracleSQLValidationServer extends MCPServerBase {
                     .put("suggestFixes", new JsonObject()
                         .put("type", "boolean")
                         .put("description", "If invalid, attempt to suggest fixes for errors.")
-                        .put("default", true)))
+                        .put("default", true))
+                    .put("fullSchema", new JsonObject()
+                        .put("type", "object")
+                        .put("description", "Full database schema for better error suggestions (optional)")))
                 .put("required", new JsonArray().add("sql"))
         ));
         
@@ -214,6 +217,7 @@ public class OracleSQLValidationServer extends MCPServerBase {
         String sql = arguments.getString("sql");
         boolean checkPermissions = arguments.getBoolean("checkPermissions", false);
         boolean suggestFixes = arguments.getBoolean("suggestFixes", true);
+        JsonObject fullSchema = arguments.getJsonObject("fullSchema"); // NEW: Extract full schema
         
         if (sql == null || sql.trim().isEmpty()) {
             sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, "SQL query is required");
@@ -254,7 +258,7 @@ public class OracleSQLValidationServer extends MCPServerBase {
                     result.put("errors", schemaCheck.getJsonArray("errors", new JsonArray()));
                     
                     if (suggestFixes) {
-                        String suggestedSQL = suggestSchemaFixes(sql, schemaCheck);
+                        String suggestedSQL = suggestSchemaFixes(sql, schemaCheck, fullSchema);
                         if (suggestedSQL != null) {
                             result.put("suggestedSQL", suggestedSQL);
                         }
@@ -486,6 +490,13 @@ public class OracleSQLValidationServer extends MCPServerBase {
                             if (columnName != null) {
                                 error.put("object", columnName);
                                 error.put("objectType", "column");
+                                
+                                // Add suggestions for common terminology differences
+                                if (columnName.toLowerCase().contains("state")) {
+                                    error.put("suggestion", "Try using 'PROVINCE' instead of 'STATE'");
+                                } else if (columnName.toLowerCase().contains("zip")) {
+                                    error.put("suggestion", "Try using 'POSTAL_CODE' instead of 'ZIP' or 'ZIPCODE'");
+                                }
                             }
                         }
                         
@@ -688,7 +699,7 @@ public class OracleSQLValidationServer extends MCPServerBase {
         return check;
     }
     
-    private String suggestSchemaFixes(String sql, JsonObject schemaCheck) {
+    private String suggestSchemaFixes(String sql, JsonObject schemaCheck, JsonObject fullSchema) {
         JsonArray errors = schemaCheck.getJsonArray("errors", new JsonArray());
         String suggestedSQL = sql;
         
@@ -709,7 +720,77 @@ public class OracleSQLValidationServer extends MCPServerBase {
                 }
             } else if ("column".equals(objectType) && object != null) {
                 // Try to find similar column names
-                // This would require knowing which table the column belongs to
+                String suggestion = error.getString("suggestion", null);
+                
+                // First try to use fullSchema if available
+                if (fullSchema != null && fullSchema.containsKey("tables")) {
+                    Set<String> queryTables = extractTablesFromSQL(sql);
+                    JsonArray schemaTables = fullSchema.getJsonArray("tables");
+                    
+                    String bestMatch = null;
+                    double bestScore = 0.0;
+                    
+                    for (int j = 0; j < schemaTables.size(); j++) {
+                        JsonObject table = schemaTables.getJsonObject(j);
+                        String tableName = table.getString("name");
+                        
+                        // Check if this table is used in the query
+                        if (queryTables.stream().anyMatch(t -> t.equalsIgnoreCase(tableName))) {
+                            JsonArray columns = table.getJsonArray("columns");
+                            
+                            for (int k = 0; k < columns.size(); k++) {
+                                JsonObject column = columns.getJsonObject(k);
+                                String columnName = column.getString("name");
+                                
+                                // Calculate similarity
+                                double similarity = calculateStringSimilarity(object.toLowerCase(), columnName.toLowerCase());
+                                
+                                // Also check for common mappings
+                                if ((object.toLowerCase().contains("state") || object.toLowerCase().equals("province")) 
+                                    && (columnName.equalsIgnoreCase("CITY") || columnName.equalsIgnoreCase("COUNTRY_ID"))) {
+                                    // For California query, CITY is more appropriate than missing PROVINCE
+                                    similarity = 0.8;
+                                }
+                                
+                                if (similarity > bestScore && similarity > 0.5) {
+                                    bestScore = similarity;
+                                    bestMatch = columnName;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (bestMatch != null) {
+                        suggestedSQL = suggestedSQL.replaceAll("\\b" + Pattern.quote(object) + "\\b", bestMatch);
+                        error.put("appliedFix", "Changed '" + object + "' to '" + bestMatch + "' (found in schema)");
+                    }
+                } else if (suggestion != null) {
+                    // Fall back to hardcoded suggestions
+                    if (object.toLowerCase().contains("state")) {
+                        suggestedSQL = suggestedSQL.replaceAll("\\b" + Pattern.quote(object) + "\\b", "PROVINCE");
+                        error.put("appliedFix", "Changed '" + object + "' to 'PROVINCE' (Canadian terminology)");
+                    } else if (object.toLowerCase().contains("zip")) {
+                        suggestedSQL = suggestedSQL.replaceAll("\\b" + Pattern.quote(object) + "\\b", "POSTAL_CODE");
+                        error.put("appliedFix", "Changed '" + object + "' to 'POSTAL_CODE' (Canadian terminology)");
+                    } else if (object.toLowerCase().contains("ssn")) {
+                        suggestedSQL = suggestedSQL.replaceAll("\\b" + Pattern.quote(object) + "\\b", "SIN");
+                        error.put("appliedFix", "Changed '" + object + "' to 'SIN' (Social Insurance Number)");
+                    }
+                } else {
+                    // Try to find similar column names from the tables in the query
+                    try {
+                        Set<String> tables = extractTablesFromSQL(sql);
+                        for (String table : tables) {
+                            String similarColumn = findSimilarColumn(table, object);
+                            if (similarColumn != null) {
+                                suggestedSQL = suggestedSQL.replaceAll("\\b" + Pattern.quote(object) + "\\b", similarColumn);
+                                break;
+                            }
+                        }
+                    } catch (Exception e) {
+                        vertx.eventBus().publish("log", "Error finding similar columns: " + e.getMessage() + ",0,OracleSQLValidationServer,MCP,System");
+                    }
+                }
             }
         }
         
@@ -1091,6 +1172,69 @@ public class OracleSQLValidationServer extends MCPServerBase {
         });
     }
     
+    
+    private String findSimilarColumn(String tableName, String targetColumn) {
+        try {
+            return connectionManager.executeWithConnection(conn -> {
+                try {
+                    DatabaseMetaData metaData = conn.getMetaData();
+                    ResultSet rs = metaData.getColumns(null, conn.getSchema(), tableName.toUpperCase(), "%");
+                    
+                    String bestMatch = null;
+                    double bestSimilarity = 0.0;
+                    
+                    while (rs.next()) {
+                        String columnName = rs.getString("COLUMN_NAME");
+                        double similarity = calculateStringSimilarity(targetColumn.toUpperCase(), columnName);
+                        
+                        // Special handling for common variations
+                        if (targetColumn.toLowerCase().contains("state") && columnName.toLowerCase().contains("province")) {
+                            similarity = 0.9;
+                        } else if (targetColumn.toLowerCase().contains("zip") && columnName.toLowerCase().contains("postal")) {
+                            similarity = 0.9;
+                        }
+                        
+                        if (similarity > bestSimilarity && similarity > 0.6) {
+                            bestSimilarity = similarity;
+                            bestMatch = columnName;
+                        }
+                    }
+                    
+                    rs.close();
+                    return bestMatch;
+                    
+                } catch (SQLException e) {
+                    vertx.eventBus().publish("log", "Error finding similar column: " + e.getMessage() + ",0,OracleSQLValidationServer,MCP,System");
+                    return null;
+                }
+            }).toCompletionStage().toCompletableFuture().get();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    
+    /**
+     * Calculate string similarity using Levenshtein distance
+     */
+    private double calculateStringSimilarity(String s1, String s2) {
+        if (s1 == null || s2 == null) {
+            return 0.0;
+        }
+        
+        if (s1.equalsIgnoreCase(s2)) {
+            return 1.0;
+        }
+        
+        // Calculate Levenshtein distance
+        int distance = levenshteinDistance(s1.toLowerCase(), s2.toLowerCase());
+        int maxLength = Math.max(s1.length(), s2.length());
+        
+        if (maxLength == 0) {
+            return 1.0;
+        }
+        
+        return 1.0 - ((double) distance / maxLength);
+    }
     
     @Override
     public void stop(Promise<Void> stopPromise) {

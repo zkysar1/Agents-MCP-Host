@@ -434,9 +434,10 @@ public class StrategyGenerationServer extends MCPServerBase {
               "description": "Streamlined pipeline for straightforward single-table queries",
               "steps": [
                 {"step": 1, "tool": "analyze_query", "server": "OracleQueryAnalysis", "description": "Quick semantic analysis"},
-                {"step": 2, "tool": "match_oracle_schema", "server": "OracleSchemaIntelligence", "description": "Find the target table"},
-                {"step": 3, "tool": "generate_oracle_sql", "server": "OracleSQLGeneration", "description": "Generate simple SQL"},
-                {"step": 4, "tool": "run_oracle_query", "server": "OracleQueryExecution", "description": "Execute and return results"}
+                {"step": 2, "tool": "get_oracle_schema", "server": "OracleQueryExecution", "description": "Get actual database schema"},
+                {"step": 3, "tool": "match_oracle_schema", "server": "OracleSchemaIntelligence", "description": "Find the target table"},
+                {"step": 4, "tool": "generate_oracle_sql", "server": "OracleSQLGeneration", "description": "Generate simple SQL"},
+                {"step": 5, "tool": "run_oracle_query", "server": "OracleQueryExecution", "description": "Execute and return results"}
               ],
               "adaptation_rules": {"allow_runtime_modification": false, "max_retries_per_step": 1}
             }
@@ -485,12 +486,30 @@ public class StrategyGenerationServer extends MCPServerBase {
             
             NOTE: decision_points are optional and only needed for complex conditional logic.
             
+            4. FILTERED QUERY (with status/location filters):
+            {
+              "name": "Filtered Query Pipeline",
+              "description": "For queries with specific filters like status or location",
+              "steps": [
+                {"step": 1, "tool": "analyze_query", "server": "OracleQueryAnalysis", "description": "Extract filters and conditions"},
+                {"step": 2, "tool": "get_oracle_schema", "server": "OracleQueryExecution", "description": "Retrieve actual table schemas"},
+                {"step": 3, "tool": "map_business_terms", "server": "BusinessMapping", "description": "Map filter terms to database columns"},
+                {"step": 4, "tool": "match_oracle_schema", "server": "OracleSchemaIntelligence", "description": "Match tables with mapped terms"},
+                {"step": 5, "tool": "generate_oracle_sql", "server": "OracleSQLGeneration", "description": "Generate SQL with proper columns"},
+                {"step": 6, "tool": "validate_oracle_sql", "server": "OracleSQLValidation", "description": "Validate column names"},
+                {"step": 7, "tool": "run_oracle_query", "server": "OracleQueryExecution", "description": "Execute validated query"},
+                {"step": 8, "tool": "format_results", "server": "OracleQueryExecution", "description": "Format the results"}
+              ],
+              "adaptation_rules": {"allow_runtime_modification": true, "max_retries_per_step": 2}
+            }
+            
             Now generate an optimal strategy for the given query. Consider:
             - The specific intent type: %s
             - Complexity score of %s suggests a %s approach
             - Whether validation steps are critical for this query type
             - Which steps can run in parallel to improve performance
             - Appropriate decision points for runtime adaptation
+            - FOR QUERIES WITH FILTERS: Always include get_oracle_schema early to ensure correct column names
             
             Remember: Output ONLY the JSON strategy, no other text.
             """, 

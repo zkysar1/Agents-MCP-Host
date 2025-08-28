@@ -248,6 +248,19 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                     .limit(maxSuggestions)
                     .collect(Collectors.toList());
                 
+                // FALLBACK: If LLM rejected all matches but we have fuzzy matches, use them with reduced confidence
+                if (finalMatches.isEmpty() && !fuzzyMatches.isEmpty()) {
+                    vertx.eventBus().publish("log", "LLM rejected all matches, using top fuzzy matches as fallback,2,OracleSchemaIntelligenceServer,MCP,System");
+                    finalMatches = fuzzyMatches.stream()
+                        .peek(match -> {
+                            match.confidence *= 0.7; // Reduce confidence
+                            match.reason += " (Fuzzy match fallback - LLM verification inconclusive)";
+                        })
+                        .sorted((a, b) -> Double.compare(b.confidence, a.confidence))
+                        .limit(Math.min(3, maxSuggestions)) // Take top 3 fuzzy matches
+                        .collect(Collectors.toList());
+                }
+                
                 // Build response
                 JsonObject result = new JsonObject();
                 JsonArray matches = new JsonArray();
@@ -451,7 +464,13 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         String[] words = originalQuery.toLowerCase().split("\\s+");
         for (String word : words) {
             if (word.length() > 2 && !isCommonWord(word)) {
+                // Add the original term
                 terms.add(word);
+                // Also add mapped equivalent if different
+                String mapped = mapTermToDbEquivalent(word);
+                if (!mapped.equals(word)) {
+                    terms.add(mapped);
+                }
             }
         }
         
@@ -492,11 +511,22 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 for (ColumnInfo column : table.columns) {
                     for (String term : searchTerms) {
                         double similarity = calculateSimilarity(column.columnName.toLowerCase(), term);
+                        
+                        // Special handling for common variations
+                        if (term.equals("state") && column.columnName.toLowerCase().contains("province")) {
+                            similarity = 0.9; // High similarity for state->province mapping
+                        } else if (term.equals("zip") && column.columnName.toLowerCase().contains("postal")) {
+                            similarity = 0.9; // High similarity for zip->postal mapping
+                        }
+                        
                         if (similarity > 0.6) {
                             matchedColumns.add(column.columnName);
                             tableScore = Math.max(tableScore, similarity * 0.8); // Slightly lower weight for column match
                             if (matchReason.isEmpty()) {
                                 matchReason = "Column '" + column.columnName + "' matches '" + term + "'";
+                                if (term.equals("state") && column.columnName.toLowerCase().contains("province")) {
+                                    matchReason += " (state maps to province)";
+                                }
                             }
                         }
                     }
@@ -531,6 +561,11 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 2. Column names that would contain the requested data
                 3. Common database naming patterns
                 4. Likely join relationships
+                5. IMPORTANT: Tables may still be relevant even if they don't contain all filter columns
+                   (e.g., ORDERS table is relevant for "orders in California" even if location is in CUSTOMERS)
+                
+                Be INCLUSIVE rather than exclusive - if a table contains the main entity (orders, customers, etc.)
+                it should have high confidence even if filters require joins to other tables.
                 
                 Respond with a JSON array of matches with adjusted confidence scores and reasons.
                 """;
@@ -638,6 +673,21 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                                         "to", "for", "of", "with", "by", "from", "is", "are", 
                                         "was", "were", "been", "have", "has", "had");
         return commonWords.contains(word);
+    }
+    
+    /**
+     * Maps common user terms to their database equivalents
+     */
+    private String mapTermToDbEquivalent(String term) {
+        Map<String, String> termMappings = new HashMap<>();
+        termMappings.put("state", "province");
+        termMappings.put("zip", "postal");
+        termMappings.put("zipcode", "postal_code");
+        termMappings.put("phone", "tel");
+        termMappings.put("cell", "mobile");
+        
+        String lowerTerm = term.toLowerCase();
+        return termMappings.getOrDefault(lowerTerm, lowerTerm);
     }
     
     private JsonObject analyzeColumnSemantics(String tableName, String columnName, int sampleSize) 

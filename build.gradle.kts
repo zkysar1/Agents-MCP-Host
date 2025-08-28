@@ -104,9 +104,7 @@ tasks.named<JavaExec>("run") {
         "-Doracle.ucp.PreCreatedConnectionsCount=0",  // Don't pre-create connections
         "-Dfile.encoding=UTF-8",
         "-Djava.awt.headless=true",
-        "-XX:+PrintGCDetails",  // Print GC details to help diagnose memory issues
-        "-XX:+PrintGCTimeStamps",  // Print timestamps with GC events
-        "-Xlog:gc*:file=./gc.log:time,uptime,level,tags"  // Log GC events to file
+        "-Xlog:gc*:file=./gc.log:time,uptime,level,tags"  // Log GC events to file (replaces PrintGCDetails and PrintGCTimeStamps)
     )
     
     // Set working directory

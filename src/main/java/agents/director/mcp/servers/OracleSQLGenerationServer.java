@@ -90,7 +90,10 @@ public class OracleSQLGenerationServer extends MCPServerBase {
                         .put("type", "string")
                         .put("enum", new JsonArray().add("simple").add("medium").add("complex"))
                         .put("description", "If set, limit the complexity of generated SQL (e.g., number of JOINs).")
-                        .put("default", "complex")))
+                        .put("default", "complex"))
+                    .put("fullSchema", new JsonObject()
+                        .put("type", "object")
+                        .put("description", "Full database schema from get_oracle_schema (optional but strongly recommended)")))
                 .put("required", new JsonArray().add("analysis").add("schemaMatches"))
         ));
         
@@ -134,6 +137,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
     private void generateSQL(RoutingContext ctx, String requestId, JsonObject arguments) {
         JsonObject analysis = arguments.getJsonObject("analysis");
         JsonObject schemaMatches = arguments.getJsonObject("schemaMatches");
+        JsonObject fullSchema = arguments.getJsonObject("fullSchema"); // NEW: Extract full schema
         boolean includeEnums = arguments.getBoolean("includeEnums", true);
         String maxComplexity = arguments.getString("maxComplexity", "complex");
         
@@ -150,7 +154,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
                 
                 if (llmService.isInitialized()) {
                     // Use LLM for SQL generation
-                    sql = generateSQLWithLLM(analysis, schemaMatches, includeEnums, maxComplexity);
+                    sql = generateSQLWithLLM(analysis, schemaMatches, fullSchema, includeEnums, maxComplexity);
                 } else {
                     // Fall back to template-based generation
                     sql = generateSQLWithTemplates(analysis, schemaMatches);
@@ -242,13 +246,14 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         });
     }
     
-    private String generateSQLWithLLM(JsonObject analysis, JsonObject schemaMatches, 
+    private String generateSQLWithLLM(JsonObject analysis, JsonObject schemaMatches, JsonObject fullSchema,
                                      boolean includeEnums, String maxComplexity) throws Exception {
         String systemPrompt = """
             You are an Oracle SQL expert. Generate precise, efficient Oracle SQL queries based on:
             1. The user's analyzed intent
             2. The matched schema elements
-            3. Oracle SQL best practices
+            3. The ACTUAL database schema provided
+            4. Oracle SQL best practices
             
             Rules:
             - Use proper Oracle syntax (e.g., ROWNUM for limiting rows)
@@ -259,6 +264,34 @@ public class OracleSQLGenerationServer extends MCPServerBase {
             - Respect the maxComplexity setting
             - Use table aliases for clarity
             - Include ORDER BY when relevant
+            
+            CRITICAL: You MUST use ONLY columns that actually exist in the provided schema!
+            - If availableSchema is provided, use ONLY those exact table and column names
+            - DO NOT guess or assume column names like "state" or "province" exist
+            - Check the actual column names in the schema before using them
+            - For location filters, check what location columns actually exist (e.g., CITY, COUNTRY_ID)
+            - For status filters, check if there's a STATUS_ID that needs joining with enum tables
+            
+            IMPORTANT: Always use case-insensitive comparisons:
+            - For string comparisons, use UPPER() function: UPPER(column) = 'VALUE'
+            - For location queries, check BOTH customer and shipping locations when applicable:
+              Example: (UPPER(c.CITY) = 'CALIFORNIA' OR UPPER(o.SHIPPING_CITY) = 'CALIFORNIA')
+            - For status comparisons with enum tables, also use UPPER()
+            
+            CRITICAL for location-based queries:
+            - When the query mentions a location (state, city, region), always check BOTH:
+              1. Customer's location (usually in CUSTOMERS table: CITY, COUNTRY_ID, etc.)
+              2. Shipping location (usually in ORDERS table: SHIPPING_CITY, SHIPPING_COUNTRY, etc.)
+            - Use OR condition to include orders from either location
+            - Example: "orders in California" should check both c.CITY and o.SHIPPING_CITY
+            
+            IMPORTANT Column Naming Patterns:
+            - "state" often maps to "PROVINCE" (Canadian terminology) - BUT CHECK IF IT EXISTS
+            - "zip" often maps to "POSTAL_CODE" - BUT CHECK IF IT EXISTS
+            - "status" columns might be STATUS_ID requiring joins to enum tables
+            - Customer location info is typically in CUSTOMERS table, not ORDERS
+            
+            If the required columns don't exist for the query, generate the best possible SQL with available columns.
             
             Respond with ONLY the SQL query, no explanations.
             """;
@@ -281,9 +314,54 @@ public class OracleSQLGenerationServer extends MCPServerBase {
                 .put("relevantColumns", match.getJsonArray("relevantColumns", new JsonArray()))
                 .put("confidence", match.getDouble("confidence")));
         }
+        
+        // If no matches, add common table hints based on entities
+        if (tablesInfo.isEmpty()) {
+            JsonArray entities = analysis.getJsonArray("entities", new JsonArray());
+            for (int i = 0; i < entities.size(); i++) {
+                String entity = entities.getString(i).toLowerCase();
+                if (entity.contains("order")) {
+                    tablesInfo.add(new JsonObject()
+                        .put("tableName", "ORDERS")
+                        .put("hint", "Common table for order data")
+                        .put("confidence", 0.7));
+                }
+                if (entity.contains("customer")) {
+                    tablesInfo.add(new JsonObject()
+                        .put("tableName", "CUSTOMERS")
+                        .put("hint", "Common table for customer data")
+                        .put("confidence", 0.7));
+                }
+            }
+        }
+        
         promptData.put("matchedTables", tablesInfo);
         promptData.put("includeEnums", includeEnums);
         promptData.put("maxComplexity", maxComplexity);
+        
+        // Add full schema information if available
+        if (fullSchema != null && fullSchema.containsKey("tables")) {
+            JsonArray schemaTables = fullSchema.getJsonArray("tables");
+            JsonArray schemaInfo = new JsonArray();
+            for (int i = 0; i < schemaTables.size(); i++) {
+                JsonObject table = schemaTables.getJsonObject(i);
+                JsonObject tableInfo = new JsonObject()
+                    .put("tableName", table.getString("name"))
+                    .put("columns", table.getJsonArray("columns").stream()
+                        .map(c -> ((JsonObject)c).getString("name") + " (" + ((JsonObject)c).getString("type") + ")")
+                        .collect(Collectors.toList()));
+                schemaInfo.add(tableInfo);
+            }
+            promptData.put("availableSchema", schemaInfo);
+            
+            // Add hint about location fields
+            if (analysis.getString("intent", "").toLowerCase().contains("location") ||
+                analysis.getJsonArray("entities", new JsonArray()).toString().toLowerCase().contains("california") ||
+                analysis.getJsonArray("entities", new JsonArray()).toString().toLowerCase().contains("state") ||
+                analysis.getJsonArray("entities", new JsonArray()).toString().toLowerCase().contains("city")) {
+                promptData.put("locationQueryHint", "This is a location-based query. Check both customer location (CUSTOMERS.CITY) and shipping location (ORDERS.SHIPPING_CITY) fields.");
+            }
+        }
         
         // Add complexity constraints
         if ("simple".equals(maxComplexity)) {
