@@ -18,6 +18,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import static agents.director.Driver.logLevel;
 
 /**
  * Universal MCP client that uses VertxStreamableHttpTransport for communication.
@@ -51,6 +52,10 @@ public class UniversalMCPClient extends AbstractVerticle {
     // Event bus address for this client
     private String eventBusAddress;
     
+    // Registry integration
+    private final String clientId = UUID.randomUUID().toString();
+    private Long heartbeatTimerId;
+    
     /**
      * Create a new MCP client for a server
      * @param serverName Friendly name for the server
@@ -60,13 +65,29 @@ public class UniversalMCPClient extends AbstractVerticle {
         this.serverName = serverName;
         this.serverUrl = serverUrl;
         
-        // Parse URL
+        // Parse URL more robustly
         if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
-            String[] parts = serverUrl.substring(serverUrl.indexOf("://") + 3).split(":");
-            String hostAndPath = parts[1];
-            String[] pathParts = hostAndPath.split("/", 2);
-            this.port = Integer.parseInt(pathParts[0]);
-            this.basePath = "/" + (pathParts.length > 1 ? pathParts[1] : "");
+            try {
+                // Remove protocol
+                String afterProtocol = serverUrl.substring(serverUrl.indexOf("://") + 3);
+                
+                // Find the path start
+                int pathStart = afterProtocol.indexOf('/');
+                String hostAndPort = pathStart > 0 ? afterProtocol.substring(0, pathStart) : afterProtocol;
+                this.basePath = pathStart > 0 ? afterProtocol.substring(pathStart) : "/";
+                
+                // Parse host and port
+                if (hostAndPort.contains(":")) {
+                    String[] hostPortParts = hostAndPort.split(":");
+                    // host is hostPortParts[0], which we don't need
+                    this.port = Integer.parseInt(hostPortParts[1]);
+                } else {
+                    // Default ports
+                    this.port = serverUrl.startsWith("https://") ? 443 : 80;
+                }
+            } catch (Exception e) {
+                throw new IllegalArgumentException("Invalid server URL format: " + serverUrl, e);
+            }
         } else {
             throw new IllegalArgumentException("Invalid server URL: " + serverUrl);
         }
@@ -89,6 +110,30 @@ public class UniversalMCPClient extends AbstractVerticle {
         
         // Register event bus consumer
         vertx.eventBus().<JsonObject>consumer(eventBusAddress, this::handleEventBusMessage);
+        
+        // Register with MCPRegistryService
+        JsonObject registration = new JsonObject()
+            .put("clientId", clientId)
+            .put("serverName", serverName)
+            .put("serverUrl", serverUrl)
+            .put("eventBusAddress", eventBusAddress)
+            .put("metadata", new JsonObject()
+                .put("basePath", basePath)
+                .put("port", port));
+        
+        vertx.eventBus().<JsonObject>request("mcp.registry.register", registration, regReply -> {
+            if (regReply.succeeded()) {
+                vertx.eventBus().publish("log", "Registered " + serverName + " with MCPRegistry (ID: " + clientId + ")" + ",3,UniversalMCPClient,MCP,System");
+            } else {
+                vertx.eventBus().publish("log", "Failed to register " + serverName + " with MCPRegistry: " + regReply.cause() + ",1,UniversalMCPClient,MCP,System");
+            }
+        });
+        
+        // Start periodic heartbeat
+        heartbeatTimerId = vertx.setPeriodic(30000, id -> {
+            vertx.eventBus().send("mcp.registry.heartbeat", new JsonObject()
+                .put("clientId", clientId));
+        });
         
         // Discover tools on startup
         discoverTools().onComplete(ar -> {
@@ -127,12 +172,25 @@ public class UniversalMCPClient extends AbstractVerticle {
                         JsonArray toolsArray = result.getJsonArray("tools", new JsonArray());
                         
                         tools.clear();
+                        JsonArray discoveredTools = new JsonArray();
+                        
                         for (int i = 0; i < toolsArray.size(); i++) {
                             JsonObject toolJson = toolsArray.getJsonObject(i);
                             MCPTool tool = MCPTool.fromJson(toolJson);
                             tools.put(tool.getName(), tool);
                             vertx.eventBus().publish("log", "Discovered tool: " + tool.getName() + " - {}" + ",3,UniversalMCPClient,MCP,System");
+                            
+                            // Build tool info for registry
+                            discoveredTools.add(new JsonObject()
+                                .put("name", tool.getName())
+                                .put("description", tool.getDescription() != null ? tool.getDescription() : "")
+                                .put("inputSchema", tool.getInputSchema() != null ? tool.getInputSchema() : new JsonObject()));
                         }
+                        
+                        // Report tools to registry
+                        vertx.eventBus().send("mcp.registry.tools.discovered", new JsonObject()
+                            .put("clientId", clientId)
+                            .put("tools", discoveredTools));
                         
                         toolsLoaded.set(true);
                         promise.complete();
@@ -169,9 +227,20 @@ public class UniversalMCPClient extends AbstractVerticle {
         
         vertx.eventBus().publish("log", "Calling tool " + toolName + " on " + serverName + " with args: " + arguments.encode() + "" + ",3,UniversalMCPClient,MCP,System");
         
+        long startTime = System.currentTimeMillis();
+        
         return makeRequest("/tools/call", request.toJson())
             .compose(response -> {
+                long duration = System.currentTimeMillis() - startTime;
                 MCPResponse mcpResponse = MCPResponse.fromJson(response);
+                
+                // Report tool usage
+                vertx.eventBus().send("mcp.registry.tool.usage", new JsonObject()
+                    .put("clientId", clientId)
+                    .put("toolName", toolName)
+                    .put("success", mcpResponse.isSuccess())
+                    .put("duration", duration));
+                
                 if (mcpResponse.isSuccess()) {
                     return Future.succeededFuture(mcpResponse.getResult());
                 } else {
@@ -378,6 +447,15 @@ public class UniversalMCPClient extends AbstractVerticle {
     
     @Override
     public void stop(Promise<Void> stopPromise) {
+        // Cancel heartbeat timer
+        if (heartbeatTimerId != null) {
+            vertx.cancelTimer(heartbeatTimerId);
+        }
+        
+        // Deregister from MCPRegistryService
+        vertx.eventBus().send("mcp.registry.deregister", new JsonObject()
+            .put("clientId", clientId));
+        
         if (webClient != null) {
             try {
                 webClient.close();

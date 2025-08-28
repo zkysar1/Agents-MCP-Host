@@ -302,7 +302,7 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
                     
                     message.reply(response);
                 } else {
-                    vertx.eventBus().publish("log", "SQL generation failed for request " + requestId + "" + ",0,OracleSQLBuilderHost,Host,System");
+                    vertx.eventBus().publish("log", "SQL generation failed for request " + requestId + ": " + ar.cause().getMessage() + ",0,OracleSQLBuilderHost,Host,System");
                     
                     // Publish error event if streaming
                     if (sessionId != null && streaming) {
@@ -400,27 +400,63 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
             .put("query", query)
             .put("conversation_history", new JsonArray());
         
-        intentClient.callTool("intent_analysis__extract_intent", intentArgs)
-            .compose(intentResult -> {
-                // Force intent to SQL generation mode
-                intentResult.put("primary_intent", "get_sql_only");
+        // First, fetch available tools from MCP Registry
+        Promise<JsonArray> toolsPromise = Promise.promise();
+        eventBus.request("mcp.tools.list", new JsonObject(), ar -> {
+            if (ar.succeeded()) {
+                JsonObject toolsResponse = (JsonObject) ar.result().body();
+                JsonArray tools = toolsResponse.getJsonArray("tools", new JsonArray());
                 
+                // Transform tools into the format needed by strategy generation
+                JsonArray availableTools = new JsonArray();
+                for (int i = 0; i < tools.size(); i++) {
+                    JsonObject tool = tools.getJsonObject(i);
+                    String toolName = tool.getString("name");
+                    
+                    // Get the server name from the first client detail
+                    JsonArray clientDetails = tool.getJsonArray("clientDetails", new JsonArray());
+                    if (clientDetails.size() > 0) {
+                        String serverName = clientDetails.getJsonObject(0).getString("serverName", "unknown");
+                        availableTools.add(new JsonObject()
+                            .put("name", toolName)
+                            .put("server", serverName));
+                    }
+                }
+                toolsPromise.complete(availableTools);
+            } else {
+                vertx.eventBus().publish("log", "Failed to fetch available tools: " + ar.cause() + ",1,OracleSQLBuilderHost,Host,System");
+                // Continue with empty tools list
+                toolsPromise.complete(new JsonArray());
+            }
+        });
+        
+        toolsPromise.future()
+            .compose(availableTools -> 
+                intentClient.callTool("intent_analysis__extract_intent", intentArgs)
+                    .map(intentResult -> {
+                        // Force intent to SQL generation mode
+                        intentResult.put("primary_intent", "get_sql_only");
+                        return new JsonObject()
+                            .put("intent", intentResult)
+                            .put("availableTools", availableTools);
+                    })
+            )
+            .compose(data -> {
                 // Analyze complexity
                 JsonObject complexityArgs = new JsonObject()
                     .put("query", query)
                     .put("context", new JsonObject());
                 
                 return strategyGenClient.callTool("strategy_generation__analyze_complexity", complexityArgs)
-                    .map(complexity -> new JsonObject()
-                        .put("intent", intentResult)
-                        .put("complexity", complexity));
+                    .map(complexity -> data.put("complexity", complexity));
             })
             .compose(analysis -> {
-                // Generate SQL-specific strategy
+                // Generate SQL-specific strategy with available tools
                 JsonObject strategyArgs = new JsonObject()
                     .put("query", query)
                     .put("intent", analysis.getJsonObject("intent"))
                     .put("complexity_analysis", analysis.getJsonObject("complexity"))
+                    .put("available_tools", analysis.getJsonArray("availableTools"))
                     .put("constraints", new JsonObject()
                         .put("max_steps", 8)  // Fewer steps for SQL-only
                         .put("required_validations", new JsonArray()
@@ -612,6 +648,7 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
                     
                     promise.complete(ar.result());
                 } else {
+                    vertx.eventBus().publish("log", "Step " + tool + " failed: " + ar.cause().getMessage() + ",0,OracleSQLBuilderHost,Host,System");
                     promise.fail("Step " + tool + " failed: " + ar.cause().getMessage());
                 }
             });

@@ -5,6 +5,7 @@ import io.vertx.core.Promise;
 import io.vertx.core.eventbus.EventBus;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.eventbus.MessageConsumer;
+import io.vertx.core.eventbus.DeliveryOptions;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.Router;
@@ -412,7 +413,10 @@ public class ConversationStreaming extends AbstractVerticle {
         // Send to host via event bus
         String hostAddress = "host." + finalHost.toLowerCase() + ".process";
         
-        eventBus.<JsonObject>request(hostAddress, hostMessage, ar -> {
+        // Use custom timeout for event bus request (2 minutes instead of default 30 seconds)
+        DeliveryOptions deliveryOptions = new DeliveryOptions().setSendTimeout(DEFAULT_TIMEOUT);
+        
+        eventBus.<JsonObject>request(hostAddress, hostMessage, deliveryOptions, ar -> {
             long duration = System.currentTimeMillis() - requestMetrics.getOrDefault(requestId, System.currentTimeMillis());
             requestMetrics.remove(requestId);
             
@@ -446,17 +450,19 @@ public class ConversationStreaming extends AbstractVerticle {
                 response.put("processingTime", duration);
                 
                 if (streaming && finalSessionId != null) {
-                    // Send as SSE event
-                    sendSSEEvent(context, "message", response);
-                    sendSSEEvent(context, "complete", new JsonObject().put("sessionId", finalSessionId));
-                    context.response().end();
+                    // For streaming, the host will publish events to the event bus
+                    // We just need to wait for them. The response here is just an acknowledgment.
+                    // Do NOT send the response body or end the stream here!
                     
-                    // Mark session complete and clean up
-                    StreamingSession session = activeSessions.get(finalSessionId);
-                    if (session != null) {
-                        session.completed = true;
-                        // Schedule cleanup
-                        vertx.setTimer(5000, id -> cleanupSession(finalSessionId));
+                    // The event consumers set up earlier will handle:
+                    // - progress events
+                    // - tool events  
+                    // - final response event (which will end the stream)
+                    // - error events
+                    
+                    // Log that streaming has started
+                    if (logLevel >= 3) {
+                        vertx.eventBus().publish("log", "Streaming started for session " + finalSessionId + " with host " + finalHost + ",3,ConversationStreaming,Streaming,Started");
                     }
                 } else {
                     // Send as regular JSON response

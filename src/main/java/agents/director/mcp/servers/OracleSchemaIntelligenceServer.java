@@ -225,6 +225,9 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 // Extract search terms from analysis
                 List<String> searchTerms = extractSearchTerms(analysis);
                 
+                // Log the analysis object for debugging
+                vertx.eventBus().publish("log", "Analysis object: " + analysis.encodePrettily() + ",3,OracleSchemaIntelligenceServer,MCP,System");
+                
                 // STEP 1: Fuzzy matching
                 vertx.eventBus().publish("log", "Step 1: Performing fuzzy matching for terms: " + searchTerms + "" + ",2,OracleSchemaIntelligenceServer,MCP,System");
                 List<SchemaMatch> fuzzyMatches = performFuzzyMatching(searchTerms);
@@ -266,7 +269,7 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 promise.complete(result);
                 
             } catch (Exception e) {
-                vertx.eventBus().publish("log", "Schema matching failed" + ",0,OracleSchemaIntelligenceServer,MCP,System");
+                vertx.eventBus().publish("log", "Schema matching failed: " + e.getMessage() + ",0,OracleSchemaIntelligenceServer,MCP,System");
                 promise.fail(e);
             }
         }, res -> {
@@ -368,11 +371,21 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     // Helper methods for schema matching
     
     private void loadSchemaIfNeeded() throws Exception {
-        if (System.currentTimeMillis() - cacheTimestamp > CACHE_TTL || schemaCache.isEmpty()) {
-            vertx.eventBus().publish("log", "Loading schema metadata from database,2,OracleSchemaIntelligenceServer,MCP,System");
-            schemaCache.clear();
-            
-            // Use connection manager to load schema
+        long now = System.currentTimeMillis();
+        
+        // Check if cache is still valid
+        if (!schemaCache.isEmpty() && (now - cacheTimestamp < CACHE_TTL)) {
+            return;
+        }
+        
+        vertx.eventBus().publish("log", "Loading Oracle schema metadata" + ",2,OracleSchemaIntelligenceServer,MCP,System");
+        
+        // Check connection health first
+        if (!connectionManager.isConnectionHealthy()) {
+            throw new RuntimeException("Oracle connection is not healthy");
+        }
+        
+        try {
             Map<String, List<TableInfo>> newCache = connectionManager.executeWithConnection(conn -> {
                 try {
                     Map<String, List<TableInfo>> tempCache = new HashMap<>();
@@ -408,13 +421,17 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                     
                     return tempCache;
                 } catch (SQLException e) {
-                    throw new RuntimeException("Failed to load schema metadata", e);
+                    throw new RuntimeException("Failed to load schema metadata: " + e.getMessage(), e);
                 }
             }).toCompletionStage().toCompletableFuture().get();
             
+            schemaCache.clear();
             schemaCache.putAll(newCache);
             cacheTimestamp = System.currentTimeMillis();
             vertx.eventBus().publish("log", "Loaded " + schemaCache.size() + " schemas with tables" + ",2,OracleSchemaIntelligenceServer,MCP,System");
+        } catch (Exception e) {
+            vertx.eventBus().publish("log", "Failed to load schema: " + e.getMessage() + ",0,OracleSchemaIntelligenceServer,MCP,System");
+            throw e;
         }
     }
     
@@ -444,6 +461,13 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     private List<SchemaMatch> performFuzzyMatching(List<String> searchTerms) {
         List<SchemaMatch> matches = new ArrayList<>();
         
+        if (schemaCache.isEmpty()) {
+            vertx.eventBus().publish("log", "Warning: Schema cache is empty during fuzzy matching,1,OracleSchemaIntelligenceServer,MCP,System");
+            return matches;
+        }
+        
+        vertx.eventBus().publish("log", "Performing fuzzy matching on " + schemaCache.size() + " schemas,3,OracleSchemaIntelligenceServer,MCP,System");
+        
         for (List<TableInfo> tables : schemaCache.values()) {
             for (TableInfo table : tables) {
                 double tableScore = 0;
@@ -456,6 +480,11 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                     if (similarity > 0.6) {
                         tableScore = Math.max(tableScore, similarity);
                         matchReason = "Table name matches '" + term + "'";
+                    }
+                    
+                    // Log potential matches for debugging
+                    if (term.contains("order") && table.tableName.toLowerCase().contains("order")) {
+                        vertx.eventBus().publish("log", "Found potential order table: " + table.tableName + " (similarity: " + similarity + "),3,OracleSchemaIntelligenceServer,MCP,System");
                     }
                 }
                 

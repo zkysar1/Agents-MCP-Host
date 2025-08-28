@@ -25,7 +25,7 @@ public class LlmAPIService {
   private WebClient webClient;
   private Vertx vertx;
   private String apiKey;
-  private static final String OPENAI_API_URL = "apis.openai.com";
+  private static final String OPENAI_API_URL = "api.openai.com";
   private static final String CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
   private static final String MODEL = "gpt-4o-mini-2024-07-18";
   private static final int REQUEST_TIMEOUT_MS = 30000; // 30 seconds
@@ -133,6 +133,9 @@ public class LlmAPIService {
       .putHeader("Authorization", "Bearer " + apiKey)
       .putHeader("Content-Type", "application/json");
     
+    // Log the API call
+    vertx.eventBus().publish("log", "Calling OpenAI API at " + OPENAI_API_URL + CHAT_COMPLETIONS_PATH + ",2,LlmAPIService,API,Request");
+    
     // Send the request
     request.sendJsonObject(requestBody, ar -> {
       if (ar.succeeded()) {
@@ -150,13 +153,17 @@ public class LlmAPIService {
               vertx.eventBus().publish("log", "[DEBUG] OpenAI response body: " + responseBody.encodePrettily() + ",2,LlmAPIService,Service,System");
             }
             
+            // Log token usage
+            JsonObject usage = responseBody.getJsonObject("usage", new JsonObject());
             vertx.eventBus().publish("log", 
-              "OpenAI API call successful,2,LlmAPIService,API,Success");
+              "OpenAI API call successful - Tokens: " + usage.getInteger("total_tokens", 0) + 
+              " (prompt: " + usage.getInteger("prompt_tokens", 0) + 
+              ", completion: " + usage.getInteger("completion_tokens", 0) + "),2,LlmAPIService,API,Success");
             
             // Publish LLM response event if streaming
             if (streamId != null) {
               StreamingEventPublisher publisher = new StreamingEventPublisher(vertx, streamId);
-              JsonObject usage = responseBody.getJsonObject("usage", new JsonObject());
+              // usage already declared above
               JsonObject metadata = new JsonObject()
                 .put("model", responseBody.getString("model"))
                 .put("totalTokens", usage.getInteger("total_tokens", 0))
@@ -267,6 +274,9 @@ public class LlmAPIService {
       .timeout(REQUEST_TIMEOUT_MS)
       .putHeader("Authorization", "Bearer " + apiKey)
       .putHeader("Content-Type", "application/json");
+    
+    // Log the API call
+    vertx.eventBus().publish("log", "Calling OpenAI API at " + OPENAI_API_URL + CHAT_COMPLETIONS_PATH + ",2,LlmAPIService,API,Request");
     
     // Send the request
     request.sendJsonObject(requestBody, ar -> {

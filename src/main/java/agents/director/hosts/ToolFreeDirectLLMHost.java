@@ -169,13 +169,18 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
      * Process incoming query
      */
     private void processQuery(Message<JsonObject> message) {
+        // Declare variables outside try block so they're accessible in catch block
+        String conversationId = null;
+        String sessionId = null;
+        boolean streaming = false;
+        
         try {
             JsonObject request = message.body();
             String query = request.getString("query");
-            String conversationId = request.getString("conversationId", UUID.randomUUID().toString());
-            String sessionId = request.getString("sessionId"); // For streaming
+            conversationId = request.getString("conversationId", UUID.randomUUID().toString());
+            sessionId = request.getString("sessionId"); // For streaming
             JsonArray history = request.getJsonArray("history", new JsonArray());
-            boolean streaming = request.getBoolean("streaming", false);
+            streaming = request.getBoolean("streaming", false);
             JsonObject options = request.getJsonObject("options", new JsonObject());
         
         vertx.eventBus().publish("log", "Processing direct LLM query for conversation " + conversationId + ": " + query + "" + ",2,ToolFreeDirectLLMHost,Host,System");
@@ -227,33 +232,43 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
                         .put("model", options.getString("model", "default"))
                         .put("temperature", options.getDouble("temperature", 0.7))));
             }
+            
+            // Create final copies for use in lambda
+            final String finalConversationId = conversationId;
+            final String finalSessionId = sessionId;
+            final boolean finalStreaming = streaming;
+            
             processWithLLM(conversation, query, options, streaming)
                 .onComplete(ar -> {
                     long duration = System.currentTimeMillis() - startTime;
-                    responseMetrics.put(conversationId + "-" + System.currentTimeMillis(), duration);
+                    responseMetrics.put(finalConversationId + "-" + System.currentTimeMillis(), duration);
                     
                     if (ar.succeeded()) {
                         JsonObject response = ar.result();
-                        response.put("conversationId", conversationId);
+                        response.put("conversationId", finalConversationId);
                         response.put("duration", duration);
                         response.put("method", "llm");
                         
                         // Publish complete event if streaming
-                        if (sessionId != null && streaming) {
-                            publishStreamingEvent(conversationId, "tool.complete", new JsonObject()
+                        if (finalSessionId != null && finalStreaming) {
+                            publishStreamingEvent(finalConversationId, "tool.complete", new JsonObject()
                                 .put("tool", "direct_llm_chat")
                                 .put("success", true)
                                 .put("resultSummary", "Generated response of " + 
                                     response.getString("answer", "").length() + " characters"));
                             
                             // Publish final event
-                            publishStreamingEvent(conversationId, "final", new JsonObject()
+                            publishStreamingEvent(finalConversationId, "final", new JsonObject()
                                 .put("content", response.getString("answer", ""))
-                                .put("conversationId", conversationId)
+                                .put("conversationId", finalConversationId)
                                 .put("method", "llm"));
                         }
                         
-                        message.reply(response);
+                        // For streaming, we don't reply - only publish events
+                        // The streaming events above handle the response
+                        if (finalSessionId == null || !finalStreaming) {
+                            message.reply(response);
+                        }
                         
                         // Add assistant response to conversation
                         conversation.addMessage("assistant", response.getString("answer"));
@@ -273,15 +288,24 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
                         vertx.eventBus().publish("log", "LLM processing failed: " + errorMsg + ",0,ToolFreeDirectLLMHost,Host,System");
                         
                         // Publish error event if streaming
-                        if (sessionId != null && streaming) {
-                            publishStreamingEvent(conversationId, "error", new JsonObject()
+                        if (finalSessionId != null && finalStreaming) {
+                            publishStreamingEvent(finalConversationId, "error", new JsonObject()
                                 .put("error", errorMsg)
                                 .put("severity", "ERROR")
                                 .put("tool", "direct_llm_chat")
                                 .put("errorType", "LLM processing error"));
+                            
+                            // Must publish final event to properly close the stream
+                            publishStreamingEvent(finalConversationId, "final", new JsonObject()
+                                .put("content", "")
+                                .put("error", errorMsg)
+                                .put("conversationId", finalConversationId));
                         }
                         
-                        message.fail(500, errorMsg);
+                        // Only fail the message if not streaming
+                        if (finalSessionId == null || !finalStreaming) {
+                            message.fail(500, errorMsg);
+                        }
                     }
                 });
         } else {
@@ -295,6 +319,12 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
                     .put("severity", "ERROR")
                     .put("errorType", "Service unavailable")
                     .put("suggestion", "Set OPENAI_API_KEY environment variable and restart the service"));
+                
+                // Must publish final event to properly close the stream
+                publishStreamingEvent(conversationId, "final", new JsonObject()
+                    .put("content", "")
+                    .put("error", errorMsg)
+                    .put("conversationId", conversationId));
             }
             
             // Create error response instead of fallback
@@ -309,8 +339,10 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
             // Log the error
             vertx.eventBus().publish("log", errorMsg + ",0,ToolFreeDirectLLMHost,Host,System");
             
-            // Fail the message with proper error
-            message.fail(503, errorMsg);
+            // Only fail the message if not streaming
+            if (sessionId == null || !streaming) {
+                message.fail(503, errorMsg);
+            }
         }
         } catch (Exception e) {
             // Handle any unexpected errors
@@ -324,7 +356,20 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
                 .put("host", "ToolFreeDirectLLMHost")
                 .put("timestamp", System.currentTimeMillis());
             
-            if (message != null) {
+            // Publish error event if streaming
+            if (sessionId != null && streaming) {
+                publishStreamingEvent(conversationId, "error", new JsonObject()
+                    .put("error", errorMessage)
+                    .put("severity", "ERROR")
+                    .put("errorType", "Processing error"));
+                // Must publish final event to close the stream
+                publishStreamingEvent(conversationId, "final", new JsonObject()
+                    .put("content", "")
+                    .put("error", errorMessage));
+            }
+            
+            // Only fail the message if not streaming
+            if (message != null && (sessionId == null || !streaming)) {
                 message.fail(500, errorMessage);
             }
         }
@@ -393,26 +438,29 @@ public class ToolFreeDirectLLMHost extends AbstractVerticle {
                                     Promise<JsonObject> promise) {
         llmService.chatCompletion(messages, temperature, maxTokens)
             .whenComplete((result, error) -> {
-                if (error == null) {
-                    try {
-                        String answer = result.getJsonArray("choices")
-                            .getJsonObject(0)
-                            .getJsonObject("message")
-                            .getString("content");
-                        
-                        JsonObject response = new JsonObject()
-                            .put("answer", answer)
-                            .put("model", result.getString("model", "unknown"))
-                            .put("usage", result.getJsonObject("usage", new JsonObject()));
-                        
-                        promise.complete(response);
-                    } catch (Exception e) {
-                        vertx.eventBus().publish("log", "Failed to parse LLM response" + ",0,ToolFreeDirectLLMHost,Host,System");
-                        promise.fail(e);
+                // Ensure we run on Vert.x context to avoid threading issues
+                vertx.getOrCreateContext().runOnContext(v -> {
+                    if (error == null) {
+                        try {
+                            String answer = result.getJsonArray("choices")
+                                .getJsonObject(0)
+                                .getJsonObject("message")
+                                .getString("content");
+                            
+                            JsonObject response = new JsonObject()
+                                .put("answer", answer)
+                                .put("model", result.getString("model", "unknown"))
+                                .put("usage", result.getJsonObject("usage", new JsonObject()));
+                            
+                            promise.complete(response);
+                        } catch (Exception e) {
+                            vertx.eventBus().publish("log", "Failed to parse LLM response" + ",0,ToolFreeDirectLLMHost,Host,System");
+                            promise.fail(e);
+                        }
+                    } else {
+                        promise.fail(error);
                     }
-                } else {
-                    promise.fail(error);
-                }
+                });
             });
     }
     

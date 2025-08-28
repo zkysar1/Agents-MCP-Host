@@ -1,6 +1,7 @@
 package agents.director;
 
 import agents.director.services.MCPRouterService;
+import agents.director.services.MCPRegistryService;
 import agents.director.services.LlmAPIService;
 import agents.director.services.Logger;
 import agents.director.services.OracleConnectionManager;
@@ -235,6 +236,8 @@ public class Driver {
     // Deploy core services first
     System.out.println("[Driver] Setting up Logger...");
     setLogger();
+    System.out.println("[Driver] Setting up MCP Registry Service...");
+    setMCPRegistryService();
     System.out.println("[Driver] Setting up LLM API Service...");
     setLlmAPIService();
     System.out.println("[Driver] LLM API Service setup complete");
@@ -345,6 +348,17 @@ public class Driver {
         if (logLevel >= 3) vertx.eventBus().publish("log", "Logger deployed,3,Driver,StartUp,System");
       } else {
         vertx.eventBus().publish("log", "Logger deployment failed: " + res.cause().getMessage() + ",0,Driver,StartUp,System");
+      }
+    });
+  }
+  
+  private void setMCPRegistryService() {
+    vertx.deployVerticle("agents.director.services.MCPRegistryService", res -> {
+      if (res.succeeded()) {
+        if (logLevel >= 1) vertx.eventBus().publish("log", "MCP Registry Service initialized successfully,1,Driver,StartUp,System");
+        if (logLevel >= 3) vertx.eventBus().publish("log", "MCP Registry deployed,3,Driver,StartUp,System");
+      } else {
+        vertx.eventBus().publish("log", "MCP Registry deployment failed: " + res.cause().getMessage() + ",0,Driver,StartUp,System");
       }
     });
   }

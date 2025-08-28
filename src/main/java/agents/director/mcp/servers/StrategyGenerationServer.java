@@ -132,6 +132,14 @@ public class StrategyGenerationServer extends MCPServerBase {
                     .put("complexity_analysis", new JsonObject()
                         .put("type", "object")
                         .put("description", "Complexity analysis result"))
+                    .put("available_tools", new JsonObject()
+                        .put("type", "array")
+                        .put("description", "List of available tools with their servers")
+                        .put("items", new JsonObject()
+                            .put("type", "object")
+                            .put("properties", new JsonObject()
+                                .put("name", new JsonObject().put("type", "string"))
+                                .put("server", new JsonObject().put("type", "string")))))
                     .put("constraints", new JsonObject()
                         .put("type", "object")
                         .put("description", "Optional constraints")
@@ -145,7 +153,7 @@ public class StrategyGenerationServer extends MCPServerBase {
                             .put("required_validations", new JsonObject()
                                 .put("type", "array")
                                 .put("items", new JsonObject().put("type", "string"))))))
-                .put("required", new JsonArray().add("query").add("intent").add("complexity_analysis"))
+                .put("required", new JsonArray().add("query").add("intent").add("complexity_analysis").add("available_tools"))
         ));
         
         // Register optimize_strategy tool
@@ -273,6 +281,7 @@ public class StrategyGenerationServer extends MCPServerBase {
         String query = arguments.getString("query");
         JsonObject intent = arguments.getJsonObject("intent");
         JsonObject complexityAnalysis = arguments.getJsonObject("complexity_analysis");
+        JsonArray availableTools = arguments.getJsonArray("available_tools");
         JsonObject constraints = arguments.getJsonObject("constraints", new JsonObject());
         
         if (logLevel >= 1) vertx.eventBus().publish("log", "Creating dynamic strategy for query: " + query + ",1,StrategyGenerationServer,Strategy,Create");
@@ -287,7 +296,7 @@ public class StrategyGenerationServer extends MCPServerBase {
         }
         
         // Attempt to generate strategy with LLM
-        generateStrategyWithRetry(query, intent, complexityAnalysis, constraints, 0)
+        generateStrategyWithRetry(query, intent, complexityAnalysis, availableTools, constraints, 0)
             .onComplete(ar -> {
                 if (ar.succeeded()) {
                     sendSuccess(ctx, requestId, new JsonObject().put("result", ar.result()));
@@ -304,7 +313,8 @@ public class StrategyGenerationServer extends MCPServerBase {
     }
     
     private Future<JsonObject> generateStrategyWithRetry(String query, JsonObject intent, 
-                                                       JsonObject complexityAnalysis, 
+                                                       JsonObject complexityAnalysis,
+                                                       JsonArray availableTools,
                                                        JsonObject constraints, int attempt) {
         Promise<JsonObject> promise = Promise.promise();
         
@@ -313,7 +323,7 @@ public class StrategyGenerationServer extends MCPServerBase {
             return promise.future();
         }
         
-        String prompt = buildStrategyPrompt(query, intent, complexityAnalysis);
+        String prompt = buildStrategyPrompt(query, intent, complexityAnalysis, availableTools);
         
         // Convert prompt to messages array for chatCompletion
         JsonArray messages = new JsonArray()
@@ -345,14 +355,14 @@ public class StrategyGenerationServer extends MCPServerBase {
                                 String.join("; ", validation.getErrors()) + ",1,StrategyGenerationServer,Strategy,Invalid");
                             
                             // Retry
-                            generateStrategyWithRetry(query, intent, complexityAnalysis, constraints, attempt + 1)
+                            generateStrategyWithRetry(query, intent, complexityAnalysis, availableTools, constraints, attempt + 1)
                                 .onComplete(promise);
                         }
                     } catch (Exception e) {
                         vertx.eventBus().publish("log", "Failed to parse strategy JSON: " + e.getMessage() + ",0,StrategyGenerationServer,Strategy,Parse");
                         
                         // Retry
-                        generateStrategyWithRetry(query, intent, complexityAnalysis, constraints, attempt + 1)
+                        generateStrategyWithRetry(query, intent, complexityAnalysis, availableTools, constraints, attempt + 1)
                             .onComplete(promise);
                     }
                 } else {
@@ -363,7 +373,17 @@ public class StrategyGenerationServer extends MCPServerBase {
         return promise.future();
     }
     
-    private String buildStrategyPrompt(String query, JsonObject intent, JsonObject complexityAnalysis) {
+    private String buildStrategyPrompt(String query, JsonObject intent, JsonObject complexityAnalysis, JsonArray availableTools) {
+        // Build a formatted list of available tools
+        StringBuilder toolsList = new StringBuilder();
+        toolsList.append("AVAILABLE TOOLS (You MUST only use these tools):\n");
+        for (int i = 0; i < availableTools.size(); i++) {
+            JsonObject tool = availableTools.getJsonObject(i);
+            String toolName = tool.getString("name");
+            String server = tool.getString("server");
+            toolsList.append(String.format("- Tool: %s, Server: %s\n", toolName, server));
+        }
+        
         return String.format("""
             Generate a dynamic orchestration strategy for this database query.
             
@@ -371,7 +391,10 @@ public class StrategyGenerationServer extends MCPServerBase {
             Intent: %s
             Complexity: %s
             
+            %s
+            
             IMPORTANT: Output ONLY valid JSON matching the schema below. No explanations, no markdown, just JSON.
+            CRITICAL: You MUST only use tools from the AVAILABLE TOOLS list above. Do NOT invent or guess tool names.
             
             Required JSON Schema:
             {
@@ -471,6 +494,7 @@ public class StrategyGenerationServer extends MCPServerBase {
             query, 
             intent.encode(), 
             complexityAnalysis.encode(),
+            toolsList.toString(),
             intent.getString("primary_intent", "unknown"),
             complexityAnalysis.getFloat("complexity_score", 0.5f),
             complexityAnalysis.getString("suggested_strategy_type", "medium"));

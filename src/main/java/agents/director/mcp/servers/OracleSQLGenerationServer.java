@@ -173,7 +173,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
                 promise.complete(result);
                 
             } catch (Exception e) {
-                vertx.eventBus().publish("log", "SQL generation failed" + ",0,OracleSQLGenerationServer,MCP,System");
+                vertx.eventBus().publish("log", "SQL generation failed: " + e.getMessage() + ",0,OracleSQLGenerationServer,MCP,System");
                 promise.fail(e);
             }
         }, res -> {
