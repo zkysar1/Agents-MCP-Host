@@ -38,9 +38,7 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
     private EventBus eventBus;
     private LlmAPIService llmService;
     
-    // Orchestration configuration
-    private JsonObject orchestrationConfig;
-    private JsonObject strategies;
+    // Dynamic strategy references (no static config needed)
     
     // SQL generation context
     private final Map<String, SQLBuildContext> buildContexts = new ConcurrentHashMap<>();
@@ -101,20 +99,9 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
     private Future<Void> loadOrchestrationConfig() {
         Promise<Void> promise = Promise.<Void>promise();
         
-        try {
-            InputStream is = getClass().getResourceAsStream("/orchestration-strategies.json");
-            if (is != null) {
-                String content = new String(is.readAllBytes());
-                orchestrationConfig = new JsonObject(content);
-                strategies = orchestrationConfig.getJsonObject("strategies", new JsonObject());
-                vertx.eventBus().publish("log", "Loaded SQL builder configuration,2,OracleSQLBuilderHost,Host,System");
-                promise.complete();
-            } else {
-                promise.fail("orchestration-strategies.json not found");
-            }
-        } catch (Exception e) {
-            promise.fail(e);
-        }
+        // No static configuration needed - using dynamic strategies
+        vertx.eventBus().publish("log", "OracleSQLBuilderHost configured for DYNAMIC strategy generation,2,OracleSQLBuilderHost,Host,System");
+        promise.complete();
         
         return promise.future();
     }
@@ -161,6 +148,28 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
             baseUrl + "/mcp/servers/oracle-sql-val"
         );
         clientFutures.add(deployClient(sqlValClient, "oracle-sql-val"));
+        
+        // Dynamic Strategy Generation Clients
+        // Strategy Generation Client
+        UniversalMCPClient strategyGenClient = new UniversalMCPClient(
+            "StrategyGeneration",
+            baseUrl + "/mcp/servers/strategy-gen"
+        );
+        clientFutures.add(deployClient(strategyGenClient, "strategy-generation"));
+        
+        // Intent Analysis Client
+        UniversalMCPClient intentAnalysisClient = new UniversalMCPClient(
+            "IntentAnalysis",
+            baseUrl + "/mcp/servers/intent-analysis"
+        );
+        clientFutures.add(deployClient(intentAnalysisClient, "intent-analysis"));
+        
+        // Strategy Learning Client (for recording SQL-only executions)
+        UniversalMCPClient learningClient = new UniversalMCPClient(
+            "StrategyLearning",
+            baseUrl + "/mcp/servers/strategy-learning"
+        );
+        clientFutures.add(deployClient(learningClient, "strategy-learning"));
         
         // Wait for all clients
         CompositeFuture.all(clientFutures).onComplete(ar -> {
@@ -313,29 +322,177 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
     }
     
     /**
-     * Execute the SQL generation pipeline
+     * Execute the SQL generation pipeline with dynamic strategy
      */
     private Future<JsonObject> executeSQLGenerationPipeline(SQLBuildContext context, JsonObject options) {
         Promise<JsonObject> promise = Promise.promise();
         
-        // Get the SQL generation strategy
-        JsonObject strategy = strategies.getJsonObject("oracle_sql_only");
-        if (strategy == null) {
-            promise.fail("SQL generation strategy not found");
+        // First generate a dynamic strategy for SQL generation
+        generateSQLBuilderStrategy(context.originalQuery)
+            .compose(strategy -> {
+                JsonArray steps = strategy.getJsonArray("steps", new JsonArray());
+                String generationMethod = strategy.getString("generation_method", "unknown");
+                
+                // Track pipeline progress
+                if (generationMethod.startsWith("fallback")) {
+                    context.addExplanation("Using fallback SQL generation strategy");
+                    
+                    // Publish fallback notification if streaming
+                    if (context.sessionId != null && context.streaming) {
+                        publishStreamingEvent(context.conversationId, "progress", new JsonObject()
+                            .put("step", "strategy_fallback")
+                            .put("message", "Using fallback SQL generation strategy")
+                            .put("details", new JsonObject()
+                                .put("method", generationMethod)
+                                .put("reason", strategy.getString("fallback_reason", "Strategy generation failed"))));
+                    }
+                } else {
+                    context.addExplanation("Using dynamically generated SQL generation strategy");
+                    
+                    // Publish dynamic generation notification if streaming
+                    if (context.sessionId != null && context.streaming) {
+                        publishStreamingEvent(context.conversationId, "progress", new JsonObject()
+                            .put("step", "strategy_generated")
+                            .put("message", "Dynamically generated SQL-specific strategy")
+                            .put("details", new JsonObject()
+                                .put("method", generationMethod)
+                                .put("steps", steps.size())));
+                    }
+                }
+                
+                context.addExplanation("Starting SQL generation for: " + context.originalQuery);
+                
+                // Execute pipeline steps
+                return executePipelineSteps(context, steps, 0, options)
+                    .compose(result -> formatSQLResult(context, result, options));
+            })
+            .onComplete(ar -> {
+                if (ar.succeeded()) {
+                    // Record execution for learning
+                    recordSQLGenerationExecution(context, true);
+                    promise.complete(ar.result());
+                } else {
+                    recordSQLGenerationExecution(context, false);
+                    promise.fail(ar.cause());
+                }
+            });
+        
+        return promise.future();
+    }
+    
+    /**
+     * Generate a dynamic strategy specifically for SQL building
+     */
+    private Future<JsonObject> generateSQLBuilderStrategy(String query) {
+        Promise<JsonObject> promise = Promise.<JsonObject>promise();
+        
+        UniversalMCPClient intentClient = mcpClients.get("intent-analysis");
+        UniversalMCPClient strategyGenClient = mcpClients.get("strategy-generation");
+        
+        if (intentClient == null || strategyGenClient == null) {
+            // Use fallback strategy
+            promise.complete(getFallbackSQLStrategy());
             return promise.future();
         }
         
-        JsonArray steps = strategy.getJsonArray("steps", new JsonArray());
+        // Analyze intent for SQL generation
+        JsonObject intentArgs = new JsonObject()
+            .put("query", query)
+            .put("conversation_history", new JsonArray());
         
-        // Track pipeline progress
-        context.addExplanation("Starting SQL generation for: " + context.originalQuery);
-        
-        // Execute pipeline steps
-        executePipelineSteps(context, steps, 0, options)
-            .compose(result -> formatSQLResult(context, result, options))
-            .onComplete(promise);
+        intentClient.callTool("intent_analysis__extract_intent", intentArgs)
+            .compose(intentResult -> {
+                // Force intent to SQL generation mode
+                intentResult.put("primary_intent", "get_sql_only");
+                
+                // Analyze complexity
+                JsonObject complexityArgs = new JsonObject()
+                    .put("query", query)
+                    .put("context", new JsonObject());
+                
+                return strategyGenClient.callTool("strategy_generation__analyze_complexity", complexityArgs)
+                    .map(complexity -> new JsonObject()
+                        .put("intent", intentResult)
+                        .put("complexity", complexity));
+            })
+            .compose(analysis -> {
+                // Generate SQL-specific strategy
+                JsonObject strategyArgs = new JsonObject()
+                    .put("query", query)
+                    .put("intent", analysis.getJsonObject("intent"))
+                    .put("complexity_analysis", analysis.getJsonObject("complexity"))
+                    .put("constraints", new JsonObject()
+                        .put("max_steps", 8)  // Fewer steps for SQL-only
+                        .put("required_validations", new JsonArray()
+                            .add("syntax")
+                            .add("schema")));
+                
+                return strategyGenClient.callTool("strategy_generation__create_strategy", strategyArgs);
+            })
+            .onComplete(ar -> {
+                if (ar.succeeded()) {
+                    promise.complete(ar.result());
+                } else {
+                    vertx.eventBus().publish("log", "Failed to generate dynamic SQL strategy: " + ar.cause() + ",1,OracleSQLBuilderHost,Host,System");
+                    promise.complete(getFallbackSQLStrategy());
+                }
+            });
         
         return promise.future();
+    }
+    
+    /**
+     * Get a fallback SQL generation strategy
+     */
+    private JsonObject getFallbackSQLStrategy() {
+        return new JsonObject()
+            .put("name", "Fallback SQL Generation")
+            .put("generation_method", "fallback_sql_builder")
+            .put("method", "fallback")
+            .put("fallback_reason", "Strategy generation service unavailable")
+            .put("steps", new JsonArray()
+                .add(new JsonObject()
+                    .put("tool", "analyze_query")
+                    .put("server", "oracle-query-analysis")
+                    .put("description", "Analyze the natural language query"))
+                .add(new JsonObject()
+                    .put("tool", "match_oracle_schema")
+                    .put("server", "oracle-schema-intel")
+                    .put("description", "Find relevant schema elements"))
+                .add(new JsonObject()
+                    .put("tool", "generate_oracle_sql")
+                    .put("server", "oracle-sql-gen")
+                    .put("description", "Generate the SQL query"))
+                .add(new JsonObject()
+                    .put("tool", "validate_oracle_sql")
+                    .put("server", "oracle-sql-val")
+                    .put("description", "Validate the generated SQL")));
+    }
+    
+    /**
+     * Record execution for learning
+     */
+    private void recordSQLGenerationExecution(SQLBuildContext context, boolean success) {
+        UniversalMCPClient learningClient = mcpClients.get("strategy-learning");
+        if (learningClient != null && learningClient.isReady()) {
+            JsonObject recordArgs = new JsonObject()
+                .put("strategy", new JsonObject()
+                    .put("name", "SQL Generation Pipeline")
+                    .put("type", "sql_only"))
+                .put("execution_results", new JsonObject()
+                    .put("success", success)
+                    .put("total_duration", System.currentTimeMillis() - context.startTime)
+                    .put("steps_completed", context.stepResults.size()))
+                .put("performance_metrics", new JsonObject()
+                    .put("query_complexity", 0.5f)); // Could be enhanced
+            
+            learningClient.callTool("strategy_learning__record_execution", recordArgs)
+                .onComplete(ar -> {
+                    if (ar.failed()) {
+                        vertx.eventBus().publish("log", "Failed to record SQL generation: " + ar.cause() + ",1,OracleSQLBuilderHost,Host,System");
+                    }
+                });
+        }
     }
     
     /**

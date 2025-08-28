@@ -6,6 +6,7 @@ import agents.director.mcp.base.MCPResponse;
 import agents.director.services.LlmAPIService;
 import agents.director.services.LogUtil;
 import io.vertx.core.Promise;
+import io.vertx.core.Future;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.RoutingContext;
@@ -41,8 +42,8 @@ public class StrategyLearningServer extends MCPServerBase {
         llmService = LlmAPIService.getInstance();
         
         if (!llmService.isInitialized()) {
-            LogUtil.logWarning(vertx, "LLM service not initialized - learning insights will be limited", 
-                "StrategyLearningServer", "Init", "Warning");
+            LogUtil.logInfo(vertx, "LLM service not initialized - learning insights will be limited", 
+                "StrategyLearningServer", "Init", "Warning", false);
         }
         
         // Start periodic cleanup of old history
@@ -496,7 +497,7 @@ public class StrategyLearningServer extends MCPServerBase {
     
     private void generateRuleBasedImprovements(String strategyType, JsonObject performanceAnalysis,
                                              JsonArray improvements, JsonArray confidenceScores) {
-        double avgDuration = performanceAnalysis.getDouble("avg_duration", 0);
+        double avgDuration = performanceAnalysis.getDouble("avg_duration", 0.0);
         double successRate = performanceAnalysis.getDouble("success_rate", 1.0);
         
         // Performance improvements
@@ -547,13 +548,25 @@ public class StrategyLearningServer extends MCPServerBase {
         
         String prompt = buildImprovementPrompt(strategyType, history, failurePatterns, context);
         
-        llmService.complete(prompt, new JsonObject()
-            .put("temperature", 0.3)
-            .put("max_tokens", 1000))
+        // Convert prompt to messages array for chatCompletion
+        JsonArray messages = new JsonArray()
+            .add(new JsonObject()
+                .put("role", "system")
+                .put("content", "You are a strategy learning assistant. Suggest improvements for query strategies based on execution history."))
+            .add(new JsonObject()
+                .put("role", "user")
+                .put("content", prompt));
+        
+        llmService.chatCompletion(messages)
             .onComplete(ar -> {
                 if (ar.succeeded()) {
                     try {
-                        JsonArray improvements = parseImprovementsFromLLM(ar.result());
+                        JsonObject response = ar.result();
+                        JsonArray choices = response.getJsonArray("choices", new JsonArray());
+                        JsonObject firstChoice = choices.size() > 0 ? choices.getJsonObject(0) : new JsonObject();
+                        JsonObject message = firstChoice.getJsonObject("message", new JsonObject());
+                        String content = message.getString("content", "");
+                        JsonArray improvements = parseImprovementsFromLLM(content);
                         promise.complete(improvements);
                     } catch (Exception e) {
                         LogUtil.logError(vertx, "Failed to parse LLM improvements", e,
@@ -604,8 +617,8 @@ public class StrategyLearningServer extends MCPServerBase {
             ]
             """,
             strategyType,
-            recentPerf.getDouble("success_rate", 0) * 100,
-            recentPerf.getDouble("avg_duration", 0) / 1000,
+            recentPerf.getDouble("success_rate", 0.0) * 100,
+            recentPerf.getDouble("avg_duration", 0.0) / 1000,
             history.size(),
             failurePatterns.encodePrettily(),
             context.getString("user_expertise", "intermediate"),
@@ -727,7 +740,7 @@ public class StrategyLearningServer extends MCPServerBase {
             .put("pattern_type", "reliability")
             .put("failure_rate", records.isEmpty() ? 0 : (float) totalFailures / records.size())
             .put("total_failures", totalFailures)
-            .put("error_distribution", new JsonObject(errorTypes))
+            .put("error_distribution", new JsonObject(new HashMap<String, Object>(errorTypes)))
             .put("most_common_error", mostCommonError)
             .put("recommendation", totalFailures > records.size() * 0.2 ? 
                 "Focus on fixing " + mostCommonError + " errors" : "Reliability is acceptable");
@@ -742,11 +755,11 @@ public class StrategyLearningServer extends MCPServerBase {
         for (ExecutionRecord record : records) {
             JsonObject resources = record.performanceMetrics.getJsonObject("resource_usage", new JsonObject());
             if (resources.containsKey("memory_mb")) {
-                avgMemoryUsage += resources.getDouble("memory_mb", 0);
+                avgMemoryUsage += resources.getDouble("memory_mb", 0.0);
                 resourceDataCount++;
             }
             if (resources.containsKey("cpu_percent")) {
-                avgCpuUsage += resources.getDouble("cpu_percent", 0);
+                avgCpuUsage += resources.getDouble("cpu_percent", 0.0);
                 resourceDataCount++;
             }
         }

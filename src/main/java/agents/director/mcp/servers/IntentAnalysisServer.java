@@ -6,6 +6,7 @@ import agents.director.mcp.base.MCPResponse;
 import agents.director.services.LlmAPIService;
 import agents.director.services.LogUtil;
 import io.vertx.core.Promise;
+import io.vertx.core.Future;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.RoutingContext;
@@ -64,8 +65,8 @@ public class IntentAnalysisServer extends MCPServerBase {
         llmService = LlmAPIService.getInstance();
         
         if (!llmService.isInitialized()) {
-            LogUtil.logWarning(vertx, "LLM service not initialized - will use keyword-based analysis only", 
-                "IntentAnalysisServer", "Init", "Warning");
+            LogUtil.logInfo(vertx, "LLM service not initialized - will use keyword-based analysis only", 
+                "IntentAnalysisServer", "Init", "Warning", false);
         }
         
         super.start(startPromise);
@@ -177,7 +178,7 @@ public class IntentAnalysisServer extends MCPServerBase {
         
         // If LLM is available, use it for deep analysis
         if (llmService.isInitialized()) {
-            analyzIntentWithLLM(query, conversationHistory, userProfile)
+            analyzeIntentWithLLM(query, conversationHistory, userProfile)
                 .onComplete(ar -> {
                     if (ar.succeeded()) {
                         sendSuccess(ctx, requestId, new JsonObject().put("result", ar.result()));
@@ -194,19 +195,30 @@ public class IntentAnalysisServer extends MCPServerBase {
         }
     }
     
-    private Future<JsonObject> analyzIntentWithLLM(String query, JsonArray conversationHistory, JsonObject userProfile) {
+    private Future<JsonObject> analyzeIntentWithLLM(String query, JsonArray conversationHistory, JsonObject userProfile) {
         Promise<JsonObject> promise = Promise.promise();
         
         String prompt = buildIntentAnalysisPrompt(query, conversationHistory, userProfile);
         
-        llmService.complete(prompt, new JsonObject()
-            .put("temperature", 0.2)  // Low temperature for consistent analysis
-            .put("max_tokens", 500))
+        // Convert prompt to messages array for chatCompletion
+        JsonArray messages = new JsonArray()
+            .add(new JsonObject()
+                .put("role", "system")
+                .put("content", "You are an intent analysis assistant. Analyze user queries and return structured JSON responses."))
+            .add(new JsonObject()
+                .put("role", "user")
+                .put("content", prompt));
+        
+        llmService.chatCompletion(messages)
             .onComplete(ar -> {
                 if (ar.succeeded()) {
                     try {
-                        String response = ar.result();
-                        JsonObject intent = parseIntentFromLLM(response);
+                        JsonObject response = ar.result();
+                        JsonArray choices = response.getJsonArray("choices", new JsonArray());
+                        JsonObject firstChoice = choices.size() > 0 ? choices.getJsonObject(0) : new JsonObject();
+                        JsonObject message = firstChoice.getJsonObject("message", new JsonObject());
+                        String content = message.getString("content", "");
+                        JsonObject intent = parseIntentFromLLM(content);
                         promise.complete(intent);
                     } catch (Exception e) {
                         LogUtil.logError(vertx, "Failed to parse intent from LLM", e,

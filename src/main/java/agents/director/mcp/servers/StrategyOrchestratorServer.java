@@ -38,8 +38,8 @@ public class StrategyOrchestratorServer extends MCPServerBase {
         llmService = LlmAPIService.getInstance();
         
         if (!llmService.isInitialized()) {
-            LogUtil.logWarning(vertx, "LLM service not initialized - adaptation capabilities limited", 
-                "StrategyOrchestratorServer", "Init", "Warning");
+            LogUtil.logInfo(vertx, "LLM service not initialized - adaptation capabilities limited", 
+                "StrategyOrchestratorServer", "Init", "Warning", false);
         }
         
         // Start cleanup timer for old execution contexts
@@ -345,13 +345,25 @@ public class StrategyOrchestratorServer extends MCPServerBase {
         
         String prompt = buildAdaptationPrompt(currentStrategy, evaluation, userFeedback, constraints);
         
-        llmService.complete(prompt, new JsonObject()
-            .put("temperature", 0.4)  // Moderate temperature for creative adaptation
-            .put("max_tokens", 1500))
+        // Convert prompt to messages array for chatCompletion
+        JsonArray messages = new JsonArray()
+            .add(new JsonObject()
+                .put("role", "system")
+                .put("content", "You are a strategy adaptation assistant. Adapt and improve database query strategies based on feedback."))
+            .add(new JsonObject()
+                .put("role", "user")
+                .put("content", prompt));
+        
+        llmService.chatCompletion(messages)
             .onComplete(ar -> {
                 if (ar.succeeded()) {
                     try {
-                        JsonObject adapted = parseAdaptedStrategy(ar.result());
+                        JsonObject response = ar.result();
+                        JsonArray choices = response.getJsonArray("choices", new JsonArray());
+                        JsonObject firstChoice = choices.size() > 0 ? choices.getJsonObject(0) : new JsonObject();
+                        JsonObject message = firstChoice.getJsonObject("message", new JsonObject());
+                        String content = message.getString("content", "");
+                        JsonObject adapted = parseAdaptedStrategy(content);
                         promise.complete(wrapAdaptationResult(adapted, currentStrategy));
                     } catch (Exception e) {
                         LogUtil.logError(vertx, "Failed to parse adapted strategy", e,

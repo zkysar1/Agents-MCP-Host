@@ -18,7 +18,7 @@ import java.util.stream.Collectors;
 /**
  * MCP Server for query intent evaluation and strategy selection.
  * This server is database-agnostic and helps hosts decide how to handle queries.
- * It loads orchestration strategies from configuration and uses LLM for intelligent routing.
+ * It provides basic strategy structures for compatibility while the system uses dynamic strategy generation.
  */
 public class QueryIntentEvaluationServer extends MCPServerBase {
     
@@ -562,31 +562,56 @@ public class QueryIntentEvaluationServer extends MCPServerBase {
     }
     
     private void loadOrchestrationStrategies() {
-        try {
-            // Load from resources
-            InputStream is = getClass().getResourceAsStream("/orchestration-strategies.json");
-            if (is != null) {
-                String content = new String(is.readAllBytes());
-                orchestrationConfig = new JsonObject(content);
-                strategies = orchestrationConfig.getJsonObject("strategies", new JsonObject());
-                strategyRules = orchestrationConfig.getJsonObject("strategy_selection_rules", new JsonObject());
-                hosts = orchestrationConfig.getJsonObject("hosts", new JsonObject());
-                
-                vertx.eventBus().publish("log", "Loaded " + strategies.size() + " orchestration strategies" + ",2,QueryIntentEvaluationServer,MCP,System");
-            } else {
-                vertx.eventBus().publish("log", "orchestration-strategies.json not found in resources,0,QueryIntentEvaluationServer,MCP,System");
-                orchestrationConfig = new JsonObject();
-                strategies = new JsonObject();
-                strategyRules = new JsonObject();
-                hosts = new JsonObject();
-            }
-        } catch (Exception e) {
-            vertx.eventBus().publish("log", "Failed to load orchestration strategies" + ",0,QueryIntentEvaluationServer,MCP,System");
-            orchestrationConfig = new JsonObject();
-            strategies = new JsonObject();
-            strategyRules = new JsonObject();
-            hosts = new JsonObject();
-        }
+        // Initialize empty structures - strategies are now dynamically generated
+        orchestrationConfig = new JsonObject()
+            .put("description", "Dynamic strategy generation is now used instead of static configuration")
+            .put("dynamicGeneration", true);
+        
+        // Basic fallback structure for compatibility
+        strategies = new JsonObject()
+            .put("oracle_full_pipeline", new JsonObject()
+                .put("name", "Oracle Full Pipeline")
+                .put("description", "Complete Oracle database Q&A with all capabilities")
+                .put("host", "oracledbanswerer")
+                .put("capabilities", new JsonArray()
+                    .add("database_access")
+                    .add("sql_generation")
+                    .add("schema_intelligence")
+                    .add("llm_analysis")))
+            .put("sql_only_pipeline", new JsonObject()
+                .put("name", "SQL Generation Only")
+                .put("description", "Generate SQL without execution")
+                .put("host", "oraclesqlbuilder")
+                .put("capabilities", new JsonArray()
+                    .add("sql_generation")
+                    .add("schema_intelligence")))
+            .put("direct_llm_response", new JsonObject()
+                .put("name", "Direct LLM Response")
+                .put("description", "LLM-only response without database access")
+                .put("host", "toolfreedirectllm")
+                .put("capabilities", new JsonArray()
+                    .add("llm_analysis")));
+        
+        strategyRules = new JsonObject()
+            .put("default_strategy", "oracle_full_pipeline")
+            .put("confidence_threshold", 0.5);
+        
+        hosts = new JsonObject()
+            .put("oracledbanswerer", new JsonObject()
+                .put("capabilities", new JsonArray()
+                    .add("database_access")
+                    .add("sql_generation")
+                    .add("schema_intelligence")
+                    .add("llm_analysis")))
+            .put("oraclesqlbuilder", new JsonObject()
+                .put("capabilities", new JsonArray()
+                    .add("sql_generation")
+                    .add("schema_intelligence")))
+            .put("toolfreedirectllm", new JsonObject()
+                .put("capabilities", new JsonArray()
+                    .add("llm_analysis")));
+        
+        vertx.eventBus().publish("log", "QueryIntentEvaluationServer configured for dynamic strategy generation,2,QueryIntentEvaluationServer,MCP,System");
     }
     
     // Utility methods

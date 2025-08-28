@@ -39,8 +39,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     private EventBus eventBus;
     
     // Dynamic strategy configuration
-    private boolean useDynamicStrategies = true; // Feature flag
-    private JsonObject fallbackStrategies; // For backward compatibility
+    private JsonObject fallbackStrategies; // Keep minimal fallback for safety
     
     // Conversation context management
     private final Map<String, ConversationContext> conversations = new ConcurrentHashMap<>();
@@ -112,29 +111,10 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     private Future<Void> loadOrchestrationConfig() {
         Promise<Void> promise = Promise.<Void>promise();
         
-        // Check if using dynamic strategies
-        String dynamicFlag = System.getenv("USE_DYNAMIC_STRATEGIES");
-        if (dynamicFlag != null) {
-            useDynamicStrategies = Boolean.parseBoolean(dynamicFlag);
-        }
+        // Initialize with empty fallback strategies
+        fallbackStrategies = new JsonObject();
         
-        if (!useDynamicStrategies) {
-            // Load fallback strategies for backward compatibility
-            try {
-                InputStream is = getClass().getResourceAsStream("/orchestration-strategies.json");
-                if (is != null) {
-                    String content = new String(is.readAllBytes());
-                    JsonObject config = new JsonObject(content);
-                    fallbackStrategies = config.getJsonObject("strategies", new JsonObject());
-                    vertx.eventBus().publish("log", "Loaded fallback strategies for compatibility,2,OracleDBAnswererHost,Host,System");
-                }
-            } catch (Exception e) {
-                vertx.eventBus().publish("log", "Failed to load fallback strategies: " + e.getMessage() + ",1,OracleDBAnswererHost,Host,System");
-            }
-        }
-        
-        vertx.eventBus().publish("log", "OracleDBAnswererHost configured for " + 
-            (useDynamicStrategies ? "DYNAMIC" : "STATIC") + " strategy generation,2,OracleDBAnswererHost,Host,System");
+        vertx.eventBus().publish("log", "OracleDBAnswererHost configured for DYNAMIC strategy generation,2,OracleDBAnswererHost,Host,System");
         
         promise.complete();
         return promise.future();
@@ -196,36 +176,34 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         );
         clientFutures.add(deployClient(execClient, "oracle-db"));
         
-        // Dynamic Strategy Generation Clients (only if enabled)
-        if (useDynamicStrategies) {
-            // Strategy Generation Client
-            UniversalMCPClient strategyGenClient = new UniversalMCPClient(
-                "StrategyGeneration",
-                baseUrl + "/mcp/servers/strategy-gen"
-            );
-            clientFutures.add(deployClient(strategyGenClient, "strategy-generation"));
-            
-            // Intent Analysis Client
-            UniversalMCPClient intentAnalysisClient = new UniversalMCPClient(
-                "IntentAnalysis",
-                baseUrl + "/mcp/servers/intent-analysis"
-            );
-            clientFutures.add(deployClient(intentAnalysisClient, "intent-analysis"));
-            
-            // Strategy Orchestrator Client
-            UniversalMCPClient orchestratorClient = new UniversalMCPClient(
-                "StrategyOrchestrator",
-                baseUrl + "/mcp/servers/strategy-orchestrator"
-            );
-            clientFutures.add(deployClient(orchestratorClient, "strategy-orchestrator"));
-            
-            // Strategy Learning Client
-            UniversalMCPClient learningClient = new UniversalMCPClient(
-                "StrategyLearning",
-                baseUrl + "/mcp/servers/strategy-learning"
-            );
-            clientFutures.add(deployClient(learningClient, "strategy-learning"));
-        }
+        // Dynamic Strategy Generation Clients
+        // Strategy Generation Client
+        UniversalMCPClient strategyGenClient = new UniversalMCPClient(
+            "StrategyGeneration",
+            baseUrl + "/mcp/servers/strategy-gen"
+        );
+        clientFutures.add(deployClient(strategyGenClient, "strategy-generation"));
+        
+        // Intent Analysis Client
+        UniversalMCPClient intentAnalysisClient = new UniversalMCPClient(
+            "IntentAnalysis",
+            baseUrl + "/mcp/servers/intent-analysis"
+        );
+        clientFutures.add(deployClient(intentAnalysisClient, "intent-analysis"));
+        
+        // Strategy Orchestrator Client
+        UniversalMCPClient orchestratorClient = new UniversalMCPClient(
+            "StrategyOrchestrator",
+            baseUrl + "/mcp/servers/strategy-orchestrator"
+        );
+        clientFutures.add(deployClient(orchestratorClient, "strategy-orchestrator"));
+        
+        // Strategy Learning Client
+        UniversalMCPClient learningClient = new UniversalMCPClient(
+            "StrategyLearning",
+            baseUrl + "/mcp/servers/strategy-learning"
+        );
+        clientFutures.add(deployClient(learningClient, "strategy-learning"));
         
         // Wait for all clients to be ready
         CompositeFuture.all(clientFutures).onComplete(ar -> {
@@ -402,13 +380,19 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 
                 // Publish strategy selection event if streaming
                 if (context.sessionId != null && context.streaming) {
+                    String method = strategy.getString("method", "unknown");
+                    String message = method.equals("dynamic_generation") ? 
+                        "Dynamically generated orchestration strategy" :
+                        "Using fallback orchestration strategy";
+                    
                     publishStreamingEvent(context.conversationId, "progress", new JsonObject()
                         .put("step", "strategy_selected")
-                        .put("message", "Selected orchestration strategy: " + context.currentStrategy)
+                        .put("message", message)
                         .put("details", new JsonObject()
                             .put("strategy", context.currentStrategy)
                             .put("confidence", strategy.getDouble("confidence", 0.0))
-                            .put("method", strategy.getString("method", "unknown"))));
+                            .put("method", method)
+                            .put("isDynamic", method.equals("dynamic_generation"))));
                 }
                 
                 // Execute the selected strategy
@@ -425,55 +409,28 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     private Future<JsonObject> evaluateAndSelectStrategy(ConversationContext context, String query) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
-        if (useDynamicStrategies) {
-            // Use dynamic strategy generation
-            generateDynamicStrategy(context, query)
-                .onComplete(ar -> {
-                    if (ar.succeeded()) {
-                        promise.complete(ar.result());
-                    } else {
-                        vertx.eventBus().publish("log", "Dynamic strategy generation failed, using fallback" + ",1,OracleDBAnswererHost,Host,System");
-                        promise.complete(getFallbackStrategySelection());
-                    }
-                });
-        } else {
-            // Use legacy static strategy selection
-            UniversalMCPClient intentClient = mcpClients.get("query-intent");
-            if (intentClient == null || !intentClient.isReady()) {
-                promise.complete(getFallbackStrategySelection());
-                return promise.future();
-            }
-            
-            JsonObject selectionArgs = new JsonObject()
-                .put("query", query)
-                .put("conversationHistory", context.getRecentHistory(5));
-            
-            intentClient.callTool("select_tool_strategy", selectionArgs)
-                .compose(toolDecision -> {
-                    context.storeStepResult("tool_strategy_decision", toolDecision);
+        // Always use dynamic strategy generation
+        generateDynamicStrategy(context, query)
+            .onComplete(ar -> {
+                if (ar.succeeded()) {
+                    promise.complete(ar.result());
+                } else {
+                    vertx.eventBus().publish("log", "Dynamic strategy generation failed, using fallback" + ",1,OracleDBAnswererHost,Host,System");
+                    JsonObject fallback = getFallbackStrategySelection();
                     
-                    String strategy = toolDecision.getString("strategy");
-                    if ("ORCHESTRATION".equals(strategy)) {
-                        String orchestrationName = toolDecision.getString("orchestrationName");
-                        JsonObject strategyResult = new JsonObject()
-                            .put("selectedStrategy", orchestrationName)
-                            .put("selectedHost", "oracledbanswerer")
-                            .put("confidence", toolDecision.getDouble("confidence", 0.8))
-                            .put("reasoning", toolDecision.getString("reasoning"))
-                            .put("method", "intelligent_selection");
-                        return Future.succeededFuture(strategyResult);
-                    } else {
-                        return Future.succeededFuture(getFallbackStrategySelection());
+                    // Add streaming notification about fallback
+                    if (context.sessionId != null && context.streaming) {
+                        publishStreamingEvent(context.conversationId, "progress", new JsonObject()
+                            .put("step", "strategy_fallback")
+                            .put("message", "Using fallback strategy due to generation failure")
+                            .put("details", new JsonObject()
+                                .put("reason", ar.cause().getMessage())
+                                .put("method", "fallback")));
                     }
-                })
-                .onComplete(ar -> {
-                    if (ar.succeeded()) {
-                        promise.complete(ar.result());
-                    } else {
-                        promise.complete(getFallbackStrategySelection());
-                    }
-                });
-        }
+                    
+                    promise.complete(fallback);
+                }
+            });
         
         return promise.future();
     }
@@ -541,7 +498,21 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                         .put("strategy", generatedStrategy) // The actual strategy object
                         .put("confidence", 0.9)
                         .put("method", "dynamic_generation")
-                        .put("reasoning", "Dynamically generated based on query analysis");
+                        .put("reasoning", "Dynamically generated based on query analysis")
+                        .put("generation_method", generatedStrategy.getString("generation_method", "dynamic_llm"));
+                    
+                    // Add streaming notification if this was a fallback
+                    if (generatedStrategy.getString("generation_method", "").startsWith("fallback")) {
+                        if (context.sessionId != null && context.streaming) {
+                            publishStreamingEvent(context.conversationId, "progress", new JsonObject()
+                                .put("step", "strategy_generation_fallback")
+                                .put("message", "Using fallback strategy due to: " + 
+                                    generatedStrategy.getString("fallback_reason", "LLM unavailable"))
+                                .put("details", new JsonObject()
+                                    .put("method", generatedStrategy.getString("generation_method"))
+                                    .put("strategy_name", generatedStrategy.getString("name"))));
+                        }
+                    }
                     
                     promise.complete(result);
                 } else {
@@ -582,10 +553,8 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             }
             steps = strategy.getJsonArray("steps", new JsonArray());
             
-            // If dynamic strategies enabled, use adaptive execution
-            if (useDynamicStrategies) {
-                return executeAdaptiveStrategy(context, strategy, streaming);
-            }
+            // Always use adaptive execution for dynamic strategies
+            return executeAdaptiveStrategy(context, strategy, streaming);
         } else {
             // Use static strategy from configuration
             if (fallbackStrategies != null) {

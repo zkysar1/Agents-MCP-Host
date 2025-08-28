@@ -25,21 +25,27 @@ public class StrategyGenerationServer extends MCPServerBase {
     private LlmAPIService llmService;
     
     // Validation patterns
-    private static final Pattern TOOL_NAME_PATTERN = Pattern.compile("^[a-z_]+$");
+    private static final Pattern TOOL_NAME_PATTERN = Pattern.compile("^[a-z_]+(__[a-z_]+)?$");
     
     // Pre-defined fallback strategies
     private static final JsonObject FALLBACK_SIMPLE_STRATEGY = new JsonObject()
         .put("name", "Fallback Simple Pipeline")
         .put("description", "Basic query processing pipeline")
+        .put("method", "fallback")
         .put("steps", new JsonArray()
             .add(createStep(1, "analyze_query", "oracle-query-analysis", "Analyze query"))
             .add(createStep(2, "match_oracle_schema", "oracle-schema-intel", "Find tables"))
             .add(createStep(3, "generate_oracle_sql", "oracle-sql-gen", "Generate SQL"))
-            .add(createStep(4, "run_oracle_query", "oracle-db", "Execute query")));
+            .add(createStep(4, "run_oracle_query", "oracle-db", "Execute query")))
+        .put("decision_points", new JsonArray())
+        .put("adaptation_rules", new JsonObject()
+            .put("allow_runtime_modification", false)
+            .put("max_retries_per_step", 1));
     
     private static final JsonObject FALLBACK_COMPLEX_STRATEGY = new JsonObject()
         .put("name", "Fallback Complex Pipeline")
         .put("description", "Comprehensive query processing with validation")
+        .put("method", "fallback")
         .put("steps", new JsonArray()
             .add(createStep(1, "evaluate_query_intent", "query-intent", "Deep intent analysis"))
             .add(createStep(2, "analyze_query", "oracle-query-analysis", "Analyze query structure"))
@@ -50,16 +56,25 @@ public class StrategyGenerationServer extends MCPServerBase {
             .add(createStep(7, "optimize_oracle_sql", "oracle-sql-gen", "Optimize for performance", true))
             .add(createStep(8, "validate_oracle_sql", "oracle-sql-val", "Validate SQL"))
             .add(createStep(9, "run_oracle_query", "oracle-db", "Execute with monitoring"))
-            .add(createStep(10, "format_results", "oracle-db", "Format response", true)));
+            .add(createStep(10, "format_results", "oracle-db", "Format response", true)))
+        .put("decision_points", new JsonArray())
+        .put("adaptation_rules", new JsonObject()
+            .put("allow_runtime_modification", true)
+            .put("max_retries_per_step", 2));
     
     private static final JsonObject FALLBACK_SQL_ONLY_STRATEGY = new JsonObject()
         .put("name", "Fallback SQL Generation Only")
         .put("description", "Generate SQL without execution")
+        .put("method", "fallback")
         .put("steps", new JsonArray()
             .add(createStep(1, "analyze_query", "oracle-query-analysis", "Analyze query"))
             .add(createStep(2, "match_oracle_schema", "oracle-schema-intel", "Find schema elements"))
             .add(createStep(3, "generate_oracle_sql", "oracle-sql-gen", "Generate SQL"))
-            .add(createStep(4, "validate_oracle_sql", "oracle-sql-val", "Validate SQL")));
+            .add(createStep(4, "validate_oracle_sql", "oracle-sql-val", "Validate SQL")))
+        .put("decision_points", new JsonArray())
+        .put("adaptation_rules", new JsonObject()
+            .put("allow_runtime_modification", false)
+            .put("max_retries_per_step", 1));
     
     public StrategyGenerationServer() {
         super("StrategyGenerationServer", "/mcp/servers/strategy-gen");
@@ -70,8 +85,8 @@ public class StrategyGenerationServer extends MCPServerBase {
         llmService = LlmAPIService.getInstance();
         
         if (!llmService.isInitialized()) {
-            LogUtil.logWarning(vertx, "LLM service not initialized - will use fallback strategies only", 
-                "StrategyGenerationServer", "Init", "Warning");
+            LogUtil.logInfo(vertx, "LLM service not initialized - will use fallback strategies only", 
+                "StrategyGenerationServer", "Init", "Warning", false);
         }
         
         super.start(startPromise);
@@ -267,7 +282,10 @@ public class StrategyGenerationServer extends MCPServerBase {
         
         // If LLM is not available, use fallback immediately
         if (!llmService.isInitialized()) {
+            LogUtil.logInfo(vertx, "LLM service not available - using fallback strategy", 
+                "StrategyGenerationServer", "Strategy", "Fallback", false);
             JsonObject fallback = selectFallbackStrategy(intent, complexityAnalysis);
+            fallback.put("generation_method", "fallback_no_llm");
             sendSuccess(ctx, requestId, new JsonObject().put("result", fallback));
             return;
         }
@@ -283,6 +301,8 @@ public class StrategyGenerationServer extends MCPServerBase {
                     
                     // Use fallback strategy
                     JsonObject fallback = selectFallbackStrategy(intent, complexityAnalysis);
+                    fallback.put("generation_method", "fallback_after_error");
+                    fallback.put("fallback_reason", ar.cause().getMessage());
                     sendSuccess(ctx, requestId, new JsonObject().put("result", fallback));
                 }
             });
@@ -300,23 +320,36 @@ public class StrategyGenerationServer extends MCPServerBase {
         
         String prompt = buildStrategyPrompt(query, intent, complexityAnalysis);
         
-        llmService.complete(prompt, new JsonObject()
-            .put("temperature", 0.3)  // Lower temperature for more consistent JSON
-            .put("max_tokens", 2000))
+        // Convert prompt to messages array for chatCompletion
+        JsonArray messages = new JsonArray()
+            .add(new JsonObject()
+                .put("role", "system")
+                .put("content", "You are a strategy generation assistant. Generate structured JSON strategies for database queries."))
+            .add(new JsonObject()
+                .put("role", "user")
+                .put("content", prompt));
+        
+        llmService.chatCompletion(messages)
             .onComplete(ar -> {
                 if (ar.succeeded()) {
                     try {
-                        JsonObject strategy = parseStrategyFromLLM(ar.result());
+                        JsonObject response = ar.result();
+                        JsonArray choices = response.getJsonArray("choices", new JsonArray());
+                        JsonObject firstChoice = choices.size() > 0 ? choices.getJsonObject(0) : new JsonObject();
+                        JsonObject message = firstChoice.getJsonObject("message", new JsonObject());
+                        String content = message.getString("content", "");
+                        JsonObject strategy = parseStrategyFromLLM(content);
                         ValidationResult validation = validateStrategySchema(strategy);
                         
                         if (validation.isValid()) {
                             LogUtil.logInfo(vertx, "Successfully generated valid strategy on attempt " + (attempt + 1),
                                 "StrategyGenerationServer", "Strategy", "Valid", false);
+                            strategy.put("generation_method", "dynamic_llm");
                             promise.complete(strategy);
                         } else {
-                            LogUtil.logWarning(vertx, "Strategy validation failed on attempt " + (attempt + 1) + ": " + 
+                            LogUtil.logInfo(vertx, "Strategy validation failed on attempt " + (attempt + 1) + ": " + 
                                 String.join(", ", validation.getErrors()),
-                                "StrategyGenerationServer", "Strategy", "Invalid");
+                                "StrategyGenerationServer", "Strategy", "Invalid", false);
                             
                             // Retry
                             generateStrategyWithRetry(query, intent, complexityAnalysis, constraints, attempt + 1)
@@ -358,24 +391,22 @@ public class StrategyGenerationServer extends MCPServerBase {
                   "tool": "tool_name",
                   "server": "server_name",
                   "description": "what this step does",
-                  "optional": true/false,
-                  "depends_on": [step_numbers],
-                  "parallel_allowed": true/false
-                }
-              ],
-              "decision_points": [
-                {
-                  "after_step": step_number,
-                  "condition": "condition description",
-                  "action": "insert_step|skip_to_step|branch",
-                  "parameters": {}
+                  "optional": false
                 }
               ],
               "adaptation_rules": {
-                "allow_runtime_modification": true/false,
+                "allow_runtime_modification": false,
                 "max_retries_per_step": 2
               }
             }
+            
+            Optional fields for steps:
+            - "optional": true/false (default: false)
+            - "depends_on": [1, 2] (array of step numbers this depends on)
+            - "parallel_allowed": true/false (can run in parallel with other steps)
+            
+            Optional fields for strategy:
+            - "decision_points": array of decision points (see examples below)
             
             Example strategies for different scenarios:
             
@@ -402,8 +433,8 @@ public class StrategyGenerationServer extends MCPServerBase {
                 {"step": 3, "tool": "match_oracle_schema", "server": "oracle-schema-intel", "description": "Find all related tables and columns"},
                 {"step": 4, "tool": "infer_table_relationships", "server": "oracle-schema-intel", "description": "Discover join paths", "parallel_allowed": true},
                 {"step": 5, "tool": "map_business_terms", "server": "business-map", "description": "Map business terminology", "optional": true},
-                {"step": 6, "tool": "generate_oracle_sql", "server": "oracle-sql-gen", "description": "Generate complex SQL with joins"},
-                {"step": 7, "tool": "optimize_oracle_sql", "server": "oracle-sql-gen", "description": "Optimize for performance"},
+                {"step": 6, "tool": "generate_oracle_sql", "server": "oracle-sql-gen", "description": "Generate complex SQL with joins", "depends_on": [4, 5]},
+                {"step": 7, "tool": "optimize_oracle_sql", "server": "oracle-sql-gen", "description": "Optimize for performance", "optional": true},
                 {"step": 8, "tool": "validate_oracle_sql", "server": "oracle-sql-val", "description": "Comprehensive validation"},
                 {"step": 9, "tool": "run_oracle_query", "server": "oracle-db", "description": "Execute with performance monitoring"},
                 {"step": 10, "tool": "format_results", "server": "oracle-db", "description": "Format into readable response", "optional": true}
@@ -433,6 +464,8 @@ public class StrategyGenerationServer extends MCPServerBase {
               ],
               "adaptation_rules": {"allow_runtime_modification": true, "max_retries_per_step": 3}
             }
+            
+            NOTE: decision_points are optional and only needed for complex conditional logic.
             
             Now generate an optimal strategy for the given query. Consider:
             - The specific intent type: %s
@@ -552,10 +585,21 @@ public class StrategyGenerationServer extends MCPServerBase {
             JsonArray deps = step.getJsonArray("depends_on");
             if (deps != null) {
                 for (int i = 0; i < deps.size(); i++) {
-                    if (!(deps.getValue(i) instanceof Integer)) {
-                        errors.add(prefix + "depends_on must contain step numbers");
+                    Object value = deps.getValue(i);
+                    if (!(value instanceof Integer)) {
+                        errors.add(prefix + "depends_on must contain integers (step numbers), found: " + 
+                                  (value == null ? "null" : value.getClass().getSimpleName()));
+                        break;
                     }
                 }
+            }
+        }
+        
+        // Validate optional parallel_allowed field
+        if (step.containsKey("parallel_allowed")) {
+            Object value = step.getValue("parallel_allowed");
+            if (!(value instanceof Boolean)) {
+                errors.add(prefix + "parallel_allowed must be a boolean");
             }
         }
     }
