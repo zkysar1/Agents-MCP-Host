@@ -1215,6 +1215,10 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 if (finalSQL != null) {
                     args.put("sql", finalSQL);
                     args.put("maxRows", 1000);
+                    // Add sessionId for schema resolution
+                    if (context.sessionId != null) {
+                        args.put("sessionId", context.sessionId);
+                    }
                 }
                 break;
                 

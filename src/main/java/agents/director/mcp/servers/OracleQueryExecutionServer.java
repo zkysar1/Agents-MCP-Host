@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 import agents.director.services.LlmAPIService;
 import agents.director.services.OracleConnectionManager;
@@ -131,18 +133,25 @@ public class OracleQueryExecutionServer extends MCPServerBase {
     private void executeQuery(RoutingContext ctx, String requestId, JsonObject arguments) {
         String sql = arguments.getString("sql");
         int maxRows = arguments.getInteger("maxRows", 100);
+        String sessionId = arguments.getString("sessionId"); // Get session ID for schema resolution
         
         if (sql == null || sql.trim().isEmpty()) {
             sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, "SQL query is required");
             return;
         }
         
+        // ALWAYS resolve table schemas before execution
+        String resolvedSql = sql;
+        if (sessionId != null) {
+            resolvedSql = resolveTableSchemas(sql, sessionId);
+        }
+        
         // Add ROWNUM limit for SELECT queries if maxRows is specified
-        String limitedSql = sql.trim();
+        String limitedSql = resolvedSql.trim();
         if (maxRows > 0 && limitedSql.toUpperCase().startsWith("SELECT") && 
             !limitedSql.toUpperCase().contains("ROWNUM")) {
             // Simple approach - wrap in subquery with ROWNUM
-            limitedSql = "SELECT * FROM (" + sql + ") WHERE ROWNUM <= " + maxRows;
+            limitedSql = "SELECT * FROM (" + resolvedSql + ") WHERE ROWNUM <= " + maxRows;
         }
         
         // Check if it's a SELECT query or DML (INSERT/UPDATE/DELETE)
@@ -445,6 +454,108 @@ public class OracleQueryExecutionServer extends MCPServerBase {
             .put("method", "simple");
     }
     
+    /**
+     * Resolve table schemas by calling the SessionSchemaResolverServer
+     * @param sql Original SQL query
+     * @param sessionId Session ID for schema resolution
+     * @return SQL with resolved schema prefixes
+     */
+    private String resolveTableSchemas(String sql, String sessionId) {
+        // Pattern to find table references after FROM, JOIN, INTO, UPDATE, DELETE FROM
+        Pattern tablePattern = Pattern.compile(
+            "\\b(FROM|JOIN|INTO|UPDATE|DELETE\\s+FROM)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s|,|$)",
+            Pattern.CASE_INSENSITIVE | Pattern.MULTILINE
+        );
+        
+        Matcher matcher = tablePattern.matcher(sql);
+        StringBuffer resolvedSql = new StringBuffer();
+        
+        while (matcher.find()) {
+            String keyword = matcher.group(1);
+            String tableName = matcher.group(2);
+            String trailing = matcher.group(3);
+            
+            // Check if table already has schema prefix by looking back
+            int startPos = matcher.start();
+            boolean hasSchema = false;
+            if (startPos > 0) {
+                // Look for pattern like "schema." before the table name
+                String beforeTable = sql.substring(Math.max(0, startPos - 50), startPos);
+                if (beforeTable.matches(".*\\b\\w+\\.$")) {
+                    hasSchema = true;
+                }
+            }
+            
+            if (!hasSchema) {
+                // Call schema resolver synchronously (blocking since we're in a Worker thread)
+                String resolvedSchema = resolveSchemaForTable(tableName, sessionId);
+                
+                if (resolvedSchema != null) {
+                    // Replace with schema.table
+                    matcher.appendReplacement(resolvedSql, 
+                        keyword + " " + resolvedSchema + "." + tableName + trailing);
+                    
+                    vertx.eventBus().publish("log", 
+                        "Resolved table " + tableName + " to " + resolvedSchema + "." + tableName + 
+                        ",3,OracleQueryExecutionServer,SchemaResolution,Success");
+                } else {
+                    // Keep original if no schema found
+                    matcher.appendReplacement(resolvedSql, matcher.group());
+                }
+            } else {
+                // Already has schema, keep as is
+                matcher.appendReplacement(resolvedSql, matcher.group());
+            }
+        }
+        
+        matcher.appendTail(resolvedSql);
+        return resolvedSql.toString();
+    }
+    
+    /**
+     * Call the SessionSchemaResolverServer to resolve a single table
+     */
+    private String resolveSchemaForTable(String tableName, String sessionId) {
+        try {
+            // Create request to schema resolver
+            JsonObject request = new JsonObject()
+                .put("action", "call")
+                .put("tool", "resolve_table_schema")
+                .put("arguments", new JsonObject()
+                    .put("tableName", tableName)
+                    .put("sessionId", sessionId));
+            
+            // Call resolver via event bus (blocking since we're in Worker thread)
+            CompletableFuture<String> future = new CompletableFuture<>();
+            
+            vertx.eventBus().<JsonObject>request("mcp.client.sessionschemaresolver", request, reply -> {
+                if (reply.succeeded()) {
+                    JsonObject response = reply.result().body();
+                    if (response.containsKey("result")) {
+                        JsonObject result = response.getJsonObject("result");
+                        String schema = result.getString("schema");
+                        future.complete(schema);
+                    } else {
+                        future.complete(null);
+                    }
+                } else {
+                    vertx.eventBus().publish("log", 
+                        "Schema resolution failed for " + tableName + ": " + reply.cause() + 
+                        ",2,OracleQueryExecutionServer,SchemaResolution,Error");
+                    future.complete(null);
+                }
+            });
+            
+            // Wait for result (acceptable in Worker thread)
+            return future.get();
+            
+        } catch (Exception e) {
+            vertx.eventBus().publish("log", 
+                "Error resolving schema for " + tableName + ": " + e.getMessage() + 
+                ",1,OracleQueryExecutionServer,SchemaResolution,Error");
+            return null;
+        }
+    }
     
     @Override
     public void stop(Promise<Void> stopPromise) {

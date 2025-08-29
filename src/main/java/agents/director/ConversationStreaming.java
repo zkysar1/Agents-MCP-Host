@@ -337,6 +337,11 @@ public class ConversationStreaming extends AbstractVerticle {
             .put("host", finalHost)
             .put("timestamp", System.currentTimeMillis()));
         
+        // Notify schema resolver about new session
+        eventBus.publish("session.schema.resolver.init", new JsonObject()
+            .put("sessionId", sessionId)
+            .put("timestamp", System.currentTimeMillis()));
+        
         // Set up event consumers BEFORE sending to host
         boolean setupSuccessful = false;
         try {
@@ -837,6 +842,11 @@ public class ConversationStreaming extends AbstractVerticle {
         if (interruptManager != null) {
             interruptManager.clearInterrupt(sessionId);
         }
+        
+        // Notify schema resolver about session cleanup
+        eventBus.publish("session.schema.resolver.cleanup", new JsonObject()
+            .put("sessionId", sessionId)
+            .put("timestamp", System.currentTimeMillis()));
     }
     
     /**
