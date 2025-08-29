@@ -72,7 +72,10 @@ public class OracleQueryExecutionServer extends MCPServerBase {
                     .put("maxRows", new JsonObject()
                         .put("type", "integer")
                         .put("description", "Maximum rows to return")
-                        .put("default", 100)))
+                        .put("default", 100))
+                    .put("sessionId", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Session ID for schema resolution")))
                 .put("required", new JsonArray().add("sql"))
         ));
         
@@ -462,8 +465,12 @@ public class OracleQueryExecutionServer extends MCPServerBase {
      */
     private String resolveTableSchemas(String sql, String sessionId) {
         // Pattern to find table references after FROM, JOIN, INTO, UPDATE, DELETE FROM
+        // This pattern handles:
+        // - Table names with optional aliases
+        // - Multiple tables separated by commas
+        // - Different SQL keywords
         Pattern tablePattern = Pattern.compile(
-            "\\b(FROM|JOIN|INTO|UPDATE|DELETE\\s+FROM)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s|,|$)",
+            "\\b(FROM|JOIN|INTO|UPDATE|DELETE\\s+FROM)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+(?:AS\\s+)?[A-Za-z_][A-Za-z0-9_]*)?(?=\\s*(?:,|\\s|JOIN|WHERE|GROUP|ORDER|HAVING|$))",
             Pattern.CASE_INSENSITIVE | Pattern.MULTILINE
         );
         
@@ -473,15 +480,14 @@ public class OracleQueryExecutionServer extends MCPServerBase {
         while (matcher.find()) {
             String keyword = matcher.group(1);
             String tableName = matcher.group(2);
-            String trailing = matcher.group(3);
             
             // Check if table already has schema prefix by looking back
-            int startPos = matcher.start();
+            int tableStartPos = matcher.start(2); // Start position of table name
             boolean hasSchema = false;
-            if (startPos > 0) {
-                // Look for pattern like "schema." before the table name
-                String beforeTable = sql.substring(Math.max(0, startPos - 50), startPos);
-                if (beforeTable.matches(".*\\b\\w+\\.$")) {
+            if (tableStartPos > 0) {
+                // Look for pattern like "schema." immediately before the table name
+                String beforeTable = sql.substring(Math.max(0, tableStartPos - 50), tableStartPos);
+                if (beforeTable.matches(".*\\b[A-Za-z_][A-Za-z0-9_]*\\.$")) {
                     hasSchema = true;
                 }
             }
@@ -491,9 +497,12 @@ public class OracleQueryExecutionServer extends MCPServerBase {
                 String resolvedSchema = resolveSchemaForTable(tableName, sessionId);
                 
                 if (resolvedSchema != null) {
-                    // Replace with schema.table
-                    matcher.appendReplacement(resolvedSql, 
-                        keyword + " " + resolvedSchema + "." + tableName + trailing);
+                    // Replace with schema.table, preserving the rest of the match
+                    String replacement = matcher.group().replaceFirst(
+                        "(" + keyword + "\\s+)(" + tableName + ")",
+                        "$1" + resolvedSchema + "." + tableName
+                    );
+                    matcher.appendReplacement(resolvedSql, replacement);
                     
                     vertx.eventBus().publish("log", 
                         "Resolved table " + tableName + " to " + resolvedSchema + "." + tableName + 

@@ -52,6 +52,8 @@ public class SessionSchemaResolverServer extends MCPServerBase {
         final Map<String, Float> schemaAffinities = new ConcurrentHashMap<>();
         final Set<String> availableSchemas = ConcurrentHashMap.newKeySet();
         final Map<String, Integer> schemaUsageCount = new ConcurrentHashMap<>();
+        // Request-scoped cache to avoid repeated lookups in same request
+        final Map<String, Boolean> requestScopedVerifyCache = new ConcurrentHashMap<>();
         String dominantSchema = null;
         long createdAt = System.currentTimeMillis();
         boolean discoveryComplete = false;
@@ -204,6 +206,16 @@ public class SessionSchemaResolverServer extends MCPServerBase {
         String sessionId = arguments.getString("sessionId");
         JsonObject queryContext = arguments.getJsonObject("queryContext", new JsonObject());
         
+        // Validate inputs
+        if (tableName == null || tableName.trim().isEmpty()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, "tableName is required");
+            return;
+        }
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, "sessionId is required");
+            return;
+        }
+        
         // Execute as blocking operation
         executeBlocking(Promise.<JsonObject>promise(), promise -> {
             try {
@@ -222,7 +234,7 @@ public class SessionSchemaResolverServer extends MCPServerBase {
                 
                 // 2. Try pattern-based guess (FAST)
                 String patternGuess = guessSchemaFromPattern(tableName);
-                if (patternGuess != null && quickVerifyTable(patternGuess, tableName)) {
+                if (patternGuess != null && quickVerifyTable(patternGuess, tableName, session)) {
                     session.recordSuccess(tableName, patternGuess);
                     promise.complete(new JsonObject()
                         .put("schema", patternGuess)
@@ -232,7 +244,7 @@ public class SessionSchemaResolverServer extends MCPServerBase {
                 }
                 
                 // 3. Use session affinity (FAST)
-                if (session.dominantSchema != null && quickVerifyTable(session.dominantSchema, tableName)) {
+                if (session.dominantSchema != null && quickVerifyTable(session.dominantSchema, tableName, session)) {
                     session.recordSuccess(tableName, session.dominantSchema);
                     promise.complete(new JsonObject()
                         .put("schema", session.dominantSchema)
@@ -349,21 +361,24 @@ public class SessionSchemaResolverServer extends MCPServerBase {
                     
                         session.discoveryComplete = true;
                         
-                        promise.complete(new JsonObject()
+                        return new JsonObject()
                             .put("schemas", schemas)
-                            .put("cached", false));
-                        return null;
+                            .put("cached", false);
                     } catch (SQLException e) {
                         throw new RuntimeException(e);
                     }
                 }).onComplete(ar -> {
-                    if (ar.failed() && ar.cause() instanceof RuntimeException) {
+                    if (ar.succeeded()) {
+                        promise.complete(ar.result());
+                    } else if (ar.cause() instanceof RuntimeException) {
                         Throwable cause = ar.cause().getCause();
                         if (cause instanceof SQLException) {
                             promise.fail(cause);
                         } else {
                             promise.fail(ar.cause());
                         }
+                    } else {
+                        promise.fail(ar.cause());
                     }
                 });
                 
@@ -384,6 +399,18 @@ public class SessionSchemaResolverServer extends MCPServerBase {
         String tableName = arguments.getString("tableName");
         String schema = arguments.getString("schema");
         String sessionId = arguments.getString("sessionId");
+        
+        // Validate inputs
+        if (tableName == null || schema == null || sessionId == null) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, "tableName, schema, and sessionId are required");
+            return;
+        }
+        
+        // Validate schema name is a valid Oracle identifier
+        if (!isValidOracleIdentifier(schema)) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, "Invalid schema name: " + schema);
+            return;
+        }
         
         SessionIntelligence session = getOrCreateSession(sessionId);
         session.recordSuccess(tableName, schema);
@@ -454,20 +481,47 @@ public class SessionSchemaResolverServer extends MCPServerBase {
     }
     
     private boolean quickVerifyTable(String schema, String tableName) {
+        return quickVerifyTable(schema, tableName, null);
+    }
+    
+    private boolean quickVerifyTable(String schema, String tableName, SessionIntelligence session) {
+        // Check request-scoped cache first if session provided
+        String cacheKey = schema.toUpperCase() + "." + tableName.toUpperCase();
+        if (session != null && session.requestScopedVerifyCache.containsKey(cacheKey)) {
+            return session.requestScopedVerifyCache.get(cacheKey);
+        }
+        
         String sql = "SELECT 1 FROM all_tables WHERE owner = ? AND table_name = ? AND ROWNUM = 1";
         
-        return connectionManager.executeWithConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, schema.toUpperCase());
-                ps.setString(2, tableName.toUpperCase());
-                
-                try (ResultSet rs = ps.executeQuery()) {
-                    return rs.next();
+        try {
+            boolean exists = connectionManager.executeWithConnection(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setString(1, schema.toUpperCase());
+                    ps.setString(2, tableName.toUpperCase());
+                    
+                    try (ResultSet rs = ps.executeQuery()) {
+                        return rs.next();
+                    }
+                } catch (Exception e) {
+                    vertx.eventBus().publish("log", "Error verifying table " + schema + "." + tableName + ": " + e.getMessage() + ",2,SessionSchemaResolver,Discovery,Error");
+                    return false;
                 }
-            } catch (Exception e) {
-                return false;
+            }).toCompletionStage().toCompletableFuture().get();
+            
+            // Cache result if session provided
+            if (session != null) {
+                session.requestScopedVerifyCache.put(cacheKey, exists);
+                // Clean cache periodically to prevent memory growth
+                if (session.requestScopedVerifyCache.size() > 100) {
+                    session.requestScopedVerifyCache.clear();
+                }
             }
-        }).result();
+            
+            return exists;
+        } catch (Exception e) {
+            vertx.eventBus().publish("log", "Failed to verify table " + schema + "." + tableName + ": " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
+            return false;
+        }
     }
     
     private String parallelSchemaProbe(String tableName, SessionIntelligence session) {
@@ -503,23 +557,28 @@ public class SessionSchemaResolverServer extends MCPServerBase {
             placeholders
         );
         
-        return connectionManager.executeWithConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, tableName.toUpperCase());
-                for (int i = 0; i < candidates.size(); i++) {
-                    ps.setString(i + 2, candidates.get(i));
-                }
-                
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        return rs.getString("owner");
+        try {
+            return connectionManager.executeWithConnection(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setString(1, tableName.toUpperCase());
+                    for (int i = 0; i < candidates.size(); i++) {
+                        ps.setString(i + 2, candidates.get(i));
                     }
+                    
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            return rs.getString("owner");
+                        }
+                    }
+                } catch (Exception e) {
+                    vertx.eventBus().publish("log", "Parallel probe failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
                 }
-            } catch (Exception e) {
-                vertx.eventBus().publish("log", "Parallel probe failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
-            }
+                return null;
+            }).toCompletionStage().toCompletableFuture().get();
+        } catch (Exception e) {
+            vertx.eventBus().publish("log", "Parallel schema probe failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
             return null;
-        }).result();
+        }
     }
     
     private String mineQueryLogs(String tableName) {
@@ -535,24 +594,29 @@ public class SessionSchemaResolverServer extends MCPServerBase {
             FETCH FIRST 5 ROWS ONLY
         """;
         
-        return connectionManager.executeWithConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, tableName.toUpperCase());
-                
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        String schema = rs.getString("parsing_schema_name");
-                        // Verify this schema actually has the table
-                        if (quickVerifyTable(schema, tableName)) {
-                            return schema;
+        try {
+            return connectionManager.executeWithConnection(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setString(1, tableName.toUpperCase());
+                    
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            String schema = rs.getString("parsing_schema_name");
+                            // Verify this schema actually has the table
+                            if (quickVerifyTable(schema, tableName)) {
+                                return schema;
+                            }
                         }
                     }
+                } catch (Exception e) {
+                    vertx.eventBus().publish("log", "Query log mining failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
                 }
-            } catch (Exception e) {
-                vertx.eventBus().publish("log", "Query log mining failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
-            }
+                return null;
+            }).toCompletionStage().toCompletableFuture().get();
+        } catch (Exception e) {
+            vertx.eventBus().publish("log", "Query log mining failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
             return null;
-        }).result();
+        }
     }
     
     private String extractTablePrefix(String tableName) {
@@ -573,6 +637,17 @@ public class SessionSchemaResolverServer extends MCPServerBase {
             json.put(key.toString(), value);
         });
         return json;
+    }
+    
+    /**
+     * Validate Oracle identifier (schema, table, column names)
+     */
+    private boolean isValidOracleIdentifier(String identifier) {
+        if (identifier == null || identifier.isEmpty() || identifier.length() > 30) {
+            return false;
+        }
+        // Oracle identifiers must start with a letter and contain only letters, numbers, and underscores
+        return identifier.matches("^[A-Za-z][A-Za-z0-9_]*$");
     }
     
     @Override
