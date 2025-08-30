@@ -33,9 +33,19 @@ public class OracleConnectionManager {
         System.getenv("ORACLE_PASSWORD") : "Violet2.Barnstorm_A9";
     
     private static final String JDBC_URL = String.format(
-        "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVER=DEDICATED)(SERVICE_NAME=%s)))",
+        //"jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVER=DEDICATED)(SERVICE_NAME=%s)))",
+
+        //works with work:
+        ///"jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVER=DEDICATED)(SERVICE_NAME=%s)))",
+
+        //personal:
+        "jdbc:oracle:thin:@(DESCRIPTION=(retry_count=20)(retry_delay=3)(ADDRESS=(PROTOCOL=TCPS)(PORT=%s)(HOST=%s))(CONNECT_DATA=(SERVICE_NAME=%s))(security=(ssl_server_dn_match=yes)))",
+
+
         DB_HOST, DB_PORT, DB_SERVICE
     );
+
+
     
     private OracleConnectionManager() {
         // Load Oracle JDBC driver
