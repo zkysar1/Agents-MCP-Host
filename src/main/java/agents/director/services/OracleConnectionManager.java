@@ -16,6 +16,10 @@ public class OracleConnectionManager {
     private static OracleConnectionManager instance;
     private volatile Vertx vertx;
     
+    // Environment detection
+    private static final String ENVIRONMENT = System.getenv("ORACLE_ENVIRONMENT") != null ? 
+        System.getenv("ORACLE_ENVIRONMENT").toUpperCase() : "PERSONAL";
+    
     // Connection details - can be overridden by environment variables
     private static final String DB_HOST = System.getenv("ORACLE_HOST") != null ? 
         System.getenv("ORACLE_HOST") : "adb.us-ashburn-1.oraclecloud.com";
@@ -32,18 +36,8 @@ public class OracleConnectionManager {
     private static final String DB_PASSWORD = System.getenv("ORACLE_PASSWORD") != null ? 
         System.getenv("ORACLE_PASSWORD") : "Violet2.Barnstorm_A9";
     
-    private static final String JDBC_URL = String.format(
-        //"jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVER=DEDICATED)(SERVICE_NAME=%s)))",
-
-        //works with work:
-        ///"jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVER=DEDICATED)(SERVICE_NAME=%s)))",
-
-        //personal:
-        "jdbc:oracle:thin:@(DESCRIPTION=(retry_count=20)(retry_delay=3)(ADDRESS=(PROTOCOL=TCPS)(PORT=%s)(HOST=%s))(CONNECT_DATA=(SERVICE_NAME=%s))(security=(ssl_server_dn_match=yes)))",
-
-
-        DB_HOST, DB_PORT, DB_SERVICE
-    );
+    // Work environment credentials (hardcoded as requested)
+    private static final String WORK_PASSWORD = "ARmy0320-- milk";
 
 
     
@@ -53,6 +47,25 @@ public class OracleConnectionManager {
             Class.forName("oracle.jdbc.driver.OracleDriver");
         } catch (ClassNotFoundException e) {
             throw new RuntimeException("Oracle JDBC driver not found", e);
+        }
+    }
+    
+    /**
+     * Build JDBC URL based on environment
+     */
+    private String buildJdbcUrl() {
+        if ("WORK".equals(ENVIRONMENT)) {
+            // Work environment - TCP protocol
+            return String.format(
+                "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVER=DEDICATED)(SERVICE_NAME=%s)))",
+                DB_HOST, DB_PORT, DB_SERVICE
+            );
+        } else {
+            // Personal environment - TCPS protocol with SSL (fixed parameter order)
+            return String.format(
+                "jdbc:oracle:thin:@(DESCRIPTION=(retry_count=20)(retry_delay=3)(ADDRESS=(PROTOCOL=TCPS)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVICE_NAME=%s))(security=(ssl_server_dn_match=yes)))",
+                DB_HOST, DB_PORT, DB_SERVICE
+            );
         }
     }
     
@@ -71,7 +84,12 @@ public class OracleConnectionManager {
      */
     public Future<Void> initialize(Vertx vertx) {
         this.vertx = vertx;
-        System.out.println("[OracleConnectionManager] Simplified Oracle Connection Manager initialized");
+        
+        // Log environment and connection details
+        vertx.eventBus().publish("log", "[OracleConnectionManager] Initializing in " + ENVIRONMENT + " environment,1,OracleConnectionManager,Connection,Environment");
+        vertx.eventBus().publish("log", "[OracleConnectionManager] Host: " + DB_HOST + ", Port: " + DB_PORT + ", Service: " + DB_SERVICE + ",2,OracleConnectionManager,Connection,Config");
+        vertx.eventBus().publish("log", "[OracleConnectionManager] Protocol: " + ("WORK".equals(ENVIRONMENT) ? "TCP" : "TCPS/SSL") + ",2,OracleConnectionManager,Connection,Config");
+        
         return Future.succeededFuture();
     }
     
@@ -79,16 +97,28 @@ public class OracleConnectionManager {
      * Get a new database connection
      */
     private Connection getConnection() throws SQLException {
+        String jdbcUrl = buildJdbcUrl();
+        String actualUser = DB_USER;
+        String actualPassword = "WORK".equals(ENVIRONMENT) ? WORK_PASSWORD : DB_PASSWORD;
+        
         try {
-            System.out.println("[OracleConnectionManager] Attempting connection to: " + DB_HOST + ":" + DB_PORT + "/" + DB_SERVICE);
-            Connection conn = DriverManager.getConnection(JDBC_URL, DB_USER, DB_PASSWORD);
-            System.out.println("[OracleConnectionManager] Connection successful");
+            if (vertx != null) {
+                vertx.eventBus().publish("log", "[OracleConnectionManager] Attempting " + ENVIRONMENT + " connection to: " + DB_HOST + ":" + DB_PORT + "/" + DB_SERVICE + ",2,OracleConnectionManager,Connection,Attempt");
+            }
+            
+            Connection conn = DriverManager.getConnection(jdbcUrl, actualUser, actualPassword);
+            
+            if (vertx != null) {
+                vertx.eventBus().publish("log", "[OracleConnectionManager] Connection successful in " + ENVIRONMENT + " environment,1,OracleConnectionManager,Connection,Success");
+            }
             return conn;
         } catch (SQLException e) {
-            System.err.println("[OracleConnectionManager] Connection failed!");
-            System.err.println("  JDBC URL: " + JDBC_URL);
-            System.err.println("  User: " + DB_USER);
-            System.err.println("  Error: " + e.getMessage());
+            if (vertx != null) {
+                vertx.eventBus().publish("log", "[OracleConnectionManager] Connection failed in " + ENVIRONMENT + " environment!,0,OracleConnectionManager,Connection,Error");
+                vertx.eventBus().publish("log", "[OracleConnectionManager] JDBC URL: " + jdbcUrl + ",0,OracleConnectionManager,Connection,Error");
+                vertx.eventBus().publish("log", "[OracleConnectionManager] User: " + actualUser + ",0,OracleConnectionManager,Connection,Error");
+                vertx.eventBus().publish("log", "[OracleConnectionManager] Error: " + e.getMessage() + ",0,OracleConnectionManager,Connection,Error");
+            }
             throw e;
         }
     }
@@ -348,7 +378,9 @@ public class OracleConnectionManager {
      * Shutdown - nothing to do in simplified version
      */
     public Future<Void> shutdown() {
-        System.out.println("[OracleConnectionManager] Shutdown called - no cleanup needed");
+        if (vertx != null) {
+            vertx.eventBus().publish("log", "[OracleConnectionManager] Shutdown called - no cleanup needed,2,OracleConnectionManager,System,Shutdown");
+        }
         return Future.succeededFuture();
     }
     
