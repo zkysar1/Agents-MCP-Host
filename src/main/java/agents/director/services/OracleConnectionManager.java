@@ -17,26 +17,12 @@ public class OracleConnectionManager {
     private volatile Vertx vertx;
     
     // Environment detection
-    private static final String ENVIRONMENT = System.getenv("ORACLE_ENVIRONMENT") != null ? 
-        System.getenv("ORACLE_ENVIRONMENT").toUpperCase() : "PERSONAL";
-    
-    // Connection details - can be overridden by environment variables
-    private static final String DB_HOST = System.getenv("ORACLE_HOST") != null ? 
-        System.getenv("ORACLE_HOST") : "adb.us-ashburn-1.oraclecloud.com";
-    
-    private static final String DB_PORT = System.getenv("ORACLE_PORT") != null ? 
-        System.getenv("ORACLE_PORT") : "1522";
-    
-    private static final String DB_SERVICE = System.getenv("ORACLE_SERVICE") != null ? 
-        System.getenv("ORACLE_SERVICE") : "gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com";
-    
-    private static final String DB_USER = System.getenv("ORACLE_USER") != null ? 
-        System.getenv("ORACLE_USER") : "ADMIN";
-    
-    private static final String DB_PASSWORD = System.getenv("ORACLE_PASSWORD") != null ? 
-        System.getenv("ORACLE_PASSWORD") : "Violet2.Barnstorm_A9";
-    
-    // Work environment credentials (hardcoded as requested)
+    private static final String ENVIRONMENT = "PERSONAL";
+    private static final String DB_HOST = "adb.us-ashburn-1.oraclecloud.com";
+    private static final String DB_PORT = "1522";
+    private static final String DB_SERVICE = "gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com";
+    private static final String DB_USER = "ADMIN";
+    private static final String DB_PASSWORD = "Violet2.Barnstorm_A9";
     private static final String WORK_PASSWORD = "ARmy0320-- milk";
 
 
