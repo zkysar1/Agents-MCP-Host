@@ -23,7 +23,6 @@ public class OracleConnectionManager {
     private static final String DB_SERVICE = "gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com";
     private static final String DB_USER = "ADMIN";
     private static final String DB_PASSWORD = "Violet2.Barnstorm_A9";
-    private static final String WORK_PASSWORD = "ARmy0320-- milk";
 
 
     
@@ -84,15 +83,13 @@ public class OracleConnectionManager {
      */
     private Connection getConnection() throws SQLException {
         String jdbcUrl = buildJdbcUrl();
-        String actualUser = DB_USER;
-        String actualPassword = "WORK".equals(ENVIRONMENT) ? WORK_PASSWORD : DB_PASSWORD;
         
         try {
             if (vertx != null) {
                 vertx.eventBus().publish("log", "[OracleConnectionManager] Attempting " + ENVIRONMENT + " connection to: " + DB_HOST + ":" + DB_PORT + "/" + DB_SERVICE + ",2,OracleConnectionManager,Connection,Attempt");
             }
             
-            Connection conn = DriverManager.getConnection(jdbcUrl, actualUser, actualPassword);
+            Connection conn = DriverManager.getConnection(jdbcUrl, DB_USER, DB_PASSWORD);
             
             if (vertx != null) {
                 vertx.eventBus().publish("log", "[OracleConnectionManager] Connection successful in " + ENVIRONMENT + " environment,1,OracleConnectionManager,Connection,Success");
@@ -102,7 +99,7 @@ public class OracleConnectionManager {
             if (vertx != null) {
                 vertx.eventBus().publish("log", "[OracleConnectionManager] Connection failed in " + ENVIRONMENT + " environment!,0,OracleConnectionManager,Connection,Error");
                 vertx.eventBus().publish("log", "[OracleConnectionManager] JDBC URL: " + jdbcUrl + ",0,OracleConnectionManager,Connection,Error");
-                vertx.eventBus().publish("log", "[OracleConnectionManager] User: " + actualUser + ",0,OracleConnectionManager,Connection,Error");
+                vertx.eventBus().publish("log", "[OracleConnectionManager] User: " + DB_USER + ",0,OracleConnectionManager,Connection,Error");
                 vertx.eventBus().publish("log", "[OracleConnectionManager] Error: " + e.getMessage() + ",0,OracleConnectionManager,Connection,Error");
             }
             throw e;
