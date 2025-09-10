@@ -7,6 +7,8 @@ import io.vertx.core.json.JsonObject;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Manager for Oracle database execution clients.
@@ -47,11 +49,22 @@ public class OracleExecutionManager extends MCPClientManager {
             return Future.failedFuture("Session ID cannot be null or empty");
         }
         
+        // Extract table name from SQL for schema resolution
+        String tableName = extractTableFromSQL(sql);
+        
         // First resolve session-specific schema
-        return callClientTool(SESSION_CLIENT, "resolve_table_schema",
-            new JsonObject()
-                .put("sessionId", sessionId)
-                .put("sql", sql))
+        JsonObject schemaResolveArgs = new JsonObject()
+            .put("sessionId", sessionId)
+            .put("sql", sql);
+        
+        // Add tableName if we found one, otherwise pass empty string
+        if (tableName != null) {
+            schemaResolveArgs.put("tableName", tableName);
+        } else {
+            schemaResolveArgs.put("tableName", "");
+        }
+        
+        return callClientTool(SESSION_CLIENT, "resolve_table_schema", schemaResolveArgs)
             .compose(schemaInfo -> {
                 // Validate schema resolution result
                 if (schemaInfo == null || schemaInfo.isEmpty()) {
@@ -142,5 +155,35 @@ public class OracleExecutionManager extends MCPClientManager {
             .map(composite -> new JsonObject()
                 .put("semantics", composite.resultAt(0))
                 .put("sampleData", composite.resultAt(1)));
+    }
+    
+    /**
+     * Extract table name from SQL query
+     * @param sql The SQL query
+     * @return The first table name found, or null if none found
+     */
+    private String extractTableFromSQL(String sql) {
+        if (sql == null || sql.trim().isEmpty()) {
+            return null;
+        }
+        
+        // Pattern to find table names after FROM or JOIN keywords
+        // This handles both simple table names and schema.table formats
+        Pattern pattern = Pattern.compile(
+            "(?i)(?:FROM|JOIN)\\s+([\\w]+(?:\\.[\\w]+)?)",
+            Pattern.CASE_INSENSITIVE
+        );
+        
+        Matcher matcher = pattern.matcher(sql);
+        if (matcher.find()) {
+            String table = matcher.group(1);
+            // Remove schema prefix if present (e.g., ADMIN.ORDERS -> ORDERS)
+            if (table.contains(".")) {
+                return table.substring(table.lastIndexOf(".") + 1);
+            }
+            return table;
+        }
+        
+        return null;
     }
 }

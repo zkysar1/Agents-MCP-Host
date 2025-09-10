@@ -534,26 +534,17 @@ public class OracleQueryExecutionServer extends MCPServerBase {
                     .put("tableName", tableName)
                     .put("sessionId", sessionId));
             
-            // Call resolver via event bus (blocking since we're in Worker thread)
+            // Schema resolution is handled by the host/manager layer, not directly between servers
+            // Log info and continue without schema resolution at this level
             CompletableFuture<String> future = new CompletableFuture<>();
             
-            vertx.eventBus().<JsonObject>request("mcp.client.sessionschemaresolver", request, reply -> {
-                if (reply.succeeded()) {
-                    JsonObject response = reply.result().body();
-                    if (response.containsKey("result")) {
-                        JsonObject result = response.getJsonObject("result");
-                        String schema = result.getString("schema");
-                        future.complete(schema);
-                    } else {
-                        future.complete(null);
-                    }
-                } else {
-                    vertx.eventBus().publish("log", 
-                        "Schema resolution failed for " + tableName + ": " + reply.cause() + 
-                        ",2,OracleQueryExecutionServer,SchemaResolution,Error");
-                    future.complete(null);
-                }
-            });
+            vertx.eventBus().publish("log", 
+                "Schema resolution delegated to host orchestration layer for table: " + tableName + 
+                ",3,OracleQueryExecutionServer,SchemaResolution,Info");
+            
+            // Return null to indicate no schema resolution available at this level
+            // The OracleExecutionManager handles schema resolution properly
+            future.complete(null);
             
             // Wait for result (acceptable in Worker thread)
             return future.get();

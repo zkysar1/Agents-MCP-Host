@@ -76,10 +76,54 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         
         void storeStepResult(String stepName, JsonObject result) {
             stepResults.put(stepName, result);
+            
+            // Also store with normalized key for common lookups
+            String normalizedKey = normalizeStepName(stepName);
+            if (!normalizedKey.equals(stepName)) {
+                stepResults.put(normalizedKey, result);
+            }
         }
         
         JsonObject getStepResult(String stepName) {
-            return stepResults.get(stepName);
+            JsonObject result = stepResults.get(stepName);
+            if (result == null) {
+                // Try normalized version
+                result = stepResults.get(normalizeStepName(stepName));
+            }
+            return result;
+        }
+        
+        JsonObject getStepResultSafe(String stepName) {
+            return getStepResultSafe(stepName, new JsonObject());
+        }
+        
+        JsonObject getStepResultSafe(String stepName, JsonObject defaultValue) {
+            JsonObject result = getStepResult(stepName);
+            return result != null ? result : defaultValue;
+        }
+        
+        private String normalizeStepName(String stepName) {
+            // Map tool names to simplified keys
+            if (stepName.equals("strategy_generation__analyze_complexity")) {
+                return "complexity_analysis";
+            } else if (stepName.equals("strategy_generation__create_strategy")) {
+                return "strategy_creation";
+            } else if (stepName.equals("intent_analysis__extract_intent")) {
+                return "intent_extraction";
+            } else if (stepName.equals("strategy_orchestrator__evaluate_progress")) {
+                return "progress_evaluation";
+            } else if (stepName.equals("strategy_orchestrator__execute_step")) {
+                return "step_execution";
+            } else if (stepName.equals("strategy_orchestrator__adapt_strategy")) {
+                return "strategy_adaptation";
+            } else if (stepName.equals("strategy_learning__record_execution")) {
+                return "execution_recording";
+            } else if (stepName.equals("strategy_learning__analyze_patterns")) {
+                return "pattern_analysis";
+            } else if (stepName.equals("strategy_learning__suggest_improvements")) {
+                return "improvement_suggestions";
+            }
+            return stepName;
         }
         
         JsonArray getRecentHistory(int maxMessages) {
@@ -709,9 +753,17 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                         .put("total_duration", System.currentTimeMillis() - context.startTime)
                         .put("steps_completed", context.stepsCompleted);
                     
+                    // Safely get complexity score with fallback
+                    float complexityScore = 0.5f; // default
+                    JsonObject complexityAnalysis = context.getStepResult("complexity_analysis");
+                    if (complexityAnalysis != null && complexityAnalysis.containsKey("factors")) {
+                        complexityScore = complexityAnalysis
+                            .getJsonObject("factors", new JsonObject())
+                            .getFloat("complexity_score", 0.5f);
+                    }
+                    
                     JsonObject performanceMetrics = new JsonObject()
-                        .put("query_complexity", context.getStepResult("complexity_analysis")
-                            .getJsonObject("factors", new JsonObject()).getFloat("complexity_score", 0.5f));
+                        .put("query_complexity", complexityScore);
                     
                     strategyOrchestrationManager.recordExecution(strategy, executionResults, performanceMetrics)
                         .onComplete(ar -> {
@@ -1058,9 +1110,18 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             case "map_business_terms":
                 // Extract terms from analysis
                 JsonObject queryAnalysis = context.getStepResult("analyze_query");
-                if (queryAnalysis != null) {
+                if (!queryAnalysis.isEmpty()) {
                     JsonArray entities = queryAnalysis.getJsonArray("entities", new JsonArray());
-                    args.put("terms", entities);
+                    
+                    // Only add terms if we have entities to map
+                    if (!entities.isEmpty()) {
+                        args.put("terms", entities);
+                    } else {
+                        // If no entities, create a minimal terms array with the original query
+                        // This helps the business mapping tool at least try to find relevant terms
+                        String originalQuery = context.history.getJsonObject(context.history.size() - 1).getString("content");
+                        args.put("terms", new JsonArray().add(originalQuery));
+                    }
                     
                     // Add full schema to context
                     JsonObject fullSchema = context.getStepResult("get_oracle_schema");
@@ -1083,8 +1144,10 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 
             case "optimize_oracle_sql":
                 JsonObject sqlGenResult = context.getStepResult("generate_oracle_sql");
-                if (sqlGenResult != null) {
-                    args.put("sql", sqlGenResult.getString("sql"));
+                if (!sqlGenResult.isEmpty()) {
+                    // Remove trailing semicolon as Oracle's EXPLAIN PLAN doesn't accept it
+                    String sqlToOptimize = sqlGenResult.getString("sql", "").replaceAll(";\\s*$", "");
+                    args.put("sql", sqlToOptimize);
                     args.put("applyHints", true);
                 }
                 break;
@@ -1104,16 +1167,16 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 break;
                 
             case "run_oracle_query":
-                JsonObject validatedSQL = context.getStepResult("validate_oracle_sql");
+                JsonObject validatedSQL = context.getStepResultSafe("validate_oracle_sql");
                 String finalSQL = null;
                 
-                if (validatedSQL != null && validatedSQL.getBoolean("valid", false)) {
+                if (!validatedSQL.isEmpty() && validatedSQL.getBoolean("valid", false)) {
                     finalSQL = validatedSQL.getString("sql");
-                } else if (validatedSQL != null && validatedSQL.containsKey("suggestedSQL")) {
+                } else if (!validatedSQL.isEmpty() && validatedSQL.containsKey("suggestedSQL")) {
                     finalSQL = validatedSQL.getString("suggestedSQL");
                 } else {
-                    JsonObject generated = context.getStepResult("generate_oracle_sql");
-                    if (generated != null) {
+                    JsonObject generated = context.getStepResultSafe("generate_oracle_sql");
+                    if (!generated.isEmpty()) {
                         finalSQL = generated.getString("sql");
                     }
                 }
@@ -1149,7 +1212,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             case "infer_table_relationships":
                 // Would need table names from schema matches
                 JsonObject schemaMatches = context.getStepResult("match_oracle_schema");
-                if (schemaMatches != null) {
+                if (!schemaMatches.isEmpty()) {
                     JsonArray matches = schemaMatches.getJsonArray("matches", new JsonArray());
                     JsonArray tables = new JsonArray();
                     for (int i = 0; i < matches.size(); i++) {
@@ -1226,7 +1289,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         JsonObject response = new JsonObject();
         
         // Check if we have formatted results first (highest priority)
-        JsonObject formattedResults = context.getStepResult("format_results");
+        JsonObject formattedResults = context.getStepResultSafe("format_results");
         if (formattedResults != null) {
             vertx.eventBus().publish("log", "Found formatted results, using pre-formatted answer,3,OracleDBAnswererHost,Host,System");
             // Extract the formatted answer
@@ -1237,7 +1300,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 response.put("executedSQL", getExecutedSQL(context));
                 
                 // Include raw data if available
-                JsonObject queryResults = context.getStepResult("run_oracle_query");
+                JsonObject queryResults = context.getStepResultSafe("run_oracle_query");
                 if (queryResults != null && queryResults.containsKey("rows")) {
                     response.put("data", queryResults);
                 }
@@ -1248,7 +1311,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         }
         
         // Check if we have query results (second priority)
-        JsonObject initialQueryResults = context.getStepResult("run_oracle_query");
+        JsonObject initialQueryResults = context.getStepResultSafe("run_oracle_query");
         
         // Check if result is nested in a "result" field (common MCP pattern)
         final JsonObject queryResults;
@@ -1314,12 +1377,12 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             vertx.eventBus().publish("log", "Handling dynamic generated strategy results,3,OracleDBAnswererHost,Host,System");
             
             // Check what results we have from the dynamic pipeline
-            JsonObject sqlGenResult = context.getStepResult("generate_oracle_sql");
-            JsonObject sqlValResult = context.getStepResult("validate_oracle_sql");
-            JsonObject schemaResult = context.getStepResult("match_oracle_schema");
+            JsonObject sqlGenResult = context.getStepResultSafe("generate_oracle_sql");
+            JsonObject sqlValResult = context.getStepResultSafe("validate_oracle_sql");
+            JsonObject schemaResult = context.getStepResultSafe("match_oracle_schema");
             
             // Log what we found for debugging
-            if (sqlGenResult != null) {
+            if (!sqlGenResult.isEmpty()) {
                 vertx.eventBus().publish("log", "SQL generation result structure: " + 
                     sqlGenResult.fieldNames().toString() + ",3,OracleDBAnswererHost,Host,System");
                 // Check if result is nested
@@ -1410,11 +1473,11 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         // Handle specific strategy types
         else if (context.currentStrategy.contains("sql_only")) {
             // SQL generation only - return the SQL
-            JsonObject sqlResult = context.getStepResult("generate_oracle_sql");
+            JsonObject sqlResult = context.getStepResultSafe("generate_oracle_sql");
             if (sqlResult != null) {
                 response.put("answer", "Here is the generated SQL query:");
                 response.put("sql", sqlResult.getString("sql"));
-                response.put("validated", context.getStepResult("validate_oracle_sql") != null);
+                response.put("validated", !context.getStepResultSafe("validate_oracle_sql").isEmpty());
                 response.put("confidence", calculateConfidence(context));
                 promise.complete(response);
             } else {
@@ -1422,7 +1485,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             }
         } else if (context.currentStrategy.contains("schema_exploration")) {
             // Schema exploration - return schema info
-            JsonObject schemaInfo = context.getStepResult("get_oracle_schema");
+            JsonObject schemaInfo = context.getStepResultSafe("get_oracle_schema");
             if (schemaInfo != null) {
                 response.put("answer", formatSchemaAnswer(schemaInfo));
                 response.put("schema", schemaInfo);
@@ -1592,7 +1655,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         answer.append("Based on the analysis of your query, here's what I found:\n\n");
         
         // Check intent evaluation
-        JsonObject intentEval = context.getStepResult("evaluate_query_intent");
+        JsonObject intentEval = context.getStepResultSafe("evaluate_query_intent");
         if (intentEval != null) {
             // Check for nested result
             if (intentEval.containsKey("result") && intentEval.getJsonObject("result") != null) {
@@ -1605,8 +1668,8 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         }
         
         // Check query analysis
-        JsonObject queryAnalysis = context.getStepResult("analyze_query");
-        if (queryAnalysis != null) {
+        JsonObject queryAnalysis = context.getStepResultSafe("analyze_query");
+        if (!queryAnalysis.isEmpty()) {
             // Check for nested result
             if (queryAnalysis.containsKey("result") && queryAnalysis.getJsonObject("result") != null) {
                 queryAnalysis = queryAnalysis.getJsonObject("result");
@@ -1623,8 +1686,8 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         }
         
         // Check schema matches
-        JsonObject schemaMatches = context.getStepResult("match_oracle_schema");
-        if (schemaMatches != null) {
+        JsonObject schemaMatches = context.getStepResultSafe("match_oracle_schema");
+        if (!schemaMatches.isEmpty()) {
             // Check for nested result
             if (schemaMatches.containsKey("result") && schemaMatches.getJsonObject("result") != null) {
                 schemaMatches = schemaMatches.getJsonObject("result");
@@ -1641,7 +1704,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         }
         
         // Check SQL generation
-        JsonObject sqlGen = context.getStepResult("generate_oracle_sql");
+        JsonObject sqlGen = context.getStepResultSafe("generate_oracle_sql");
         if (sqlGen != null) {
             // Check for nested result
             if (sqlGen.containsKey("result") && sqlGen.getJsonObject("result") != null) {
@@ -1655,8 +1718,8 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         }
         
         // Check validation results
-        JsonObject validation = context.getStepResult("validate_oracle_sql");
-        if (validation != null) {
+        JsonObject validation = context.getStepResultSafe("validate_oracle_sql");
+        if (!validation.isEmpty()) {
             // Check for nested result
             if (validation.containsKey("result") && validation.getJsonObject("result") != null) {
                 validation = validation.getJsonObject("result");
@@ -1759,7 +1822,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         
         // Check query analysis result
         JsonObject queryAnalysis = context.getStepResult("analyze_query");
-        if (queryAnalysis != null) {
+        if (!queryAnalysis.isEmpty()) {
             // Infer complexity from query analysis
             JsonArray entities = queryAnalysis.getJsonArray("entities", new JsonArray());
             JsonArray aggregations = queryAnalysis.getJsonArray("aggregations", new JsonArray());

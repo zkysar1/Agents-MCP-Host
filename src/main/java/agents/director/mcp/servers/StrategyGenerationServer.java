@@ -277,11 +277,23 @@ public class StrategyGenerationServer extends MCPServerBase {
     }
     
     private void createStrategy(RoutingContext ctx, String requestId, JsonObject arguments) {
+        // Validate required parameters
         String query = arguments.getString("query");
-        JsonObject intent = arguments.getJsonObject("intent");
-        JsonObject complexityAnalysis = arguments.getJsonObject("complexity_analysis");
+        if (query == null || query.trim().isEmpty()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, "Missing required parameter: query");
+            return;
+        }
+        
+        // Get parameters with defaults
+        JsonObject intent = arguments.getJsonObject("intent", new JsonObject());
+        JsonObject complexityAnalysis = arguments.getJsonObject("complexity_analysis", new JsonObject());
         JsonArray availableTools = arguments.getJsonArray("available_tools");
         JsonObject constraints = arguments.getJsonObject("constraints", new JsonObject());
+        
+        // If available_tools is not provided, use default tool set
+        if (availableTools == null || availableTools.isEmpty()) {
+            availableTools = getDefaultAvailableTools();
+        }
         
         if (logLevel >= 1) vertx.eventBus().publish("log", "Creating dynamic strategy for query: " + query + ",1,StrategyGenerationServer,Strategy,Create");
         
@@ -713,6 +725,41 @@ public class StrategyGenerationServer extends MCPServerBase {
         if (logLevel >= 2) vertx.eventBus().publish("log", "Selected fallback strategy: " + selectedStrategy.getString("name") + ",2,StrategyGenerationServer,Fallback,Selected");
         
         return selectedStrategy;
+    }
+    
+    private JsonArray getDefaultAvailableTools() {
+        // Return default set of available tools for Oracle DB operations
+        return new JsonArray()
+            .add(new JsonObject()
+                .put("name", "evaluate_query_intent")
+                .put("server", "QueryIntentEvaluation"))
+            .add(new JsonObject()
+                .put("name", "analyze_query")
+                .put("server", "OracleQueryAnalysis"))
+            .add(new JsonObject()
+                .put("name", "match_oracle_schema")
+                .put("server", "OracleSchemaIntelligence"))
+            .add(new JsonObject()
+                .put("name", "infer_table_relationships")
+                .put("server", "OracleSchemaIntelligence"))
+            .add(new JsonObject()
+                .put("name", "map_business_terms")
+                .put("server", "BusinessMapping"))
+            .add(new JsonObject()
+                .put("name", "generate_oracle_sql")
+                .put("server", "OracleSQLGeneration"))
+            .add(new JsonObject()
+                .put("name", "optimize_oracle_sql")
+                .put("server", "OracleSQLGeneration"))
+            .add(new JsonObject()
+                .put("name", "validate_oracle_sql")
+                .put("server", "OracleSQLValidation"))
+            .add(new JsonObject()
+                .put("name", "run_oracle_query")
+                .put("server", "OracleQueryExecution"))
+            .add(new JsonObject()
+                .put("name", "format_results")
+                .put("server", "OracleQueryExecution"));
     }
     
     private void optimizeStrategy(RoutingContext ctx, String requestId, JsonObject arguments) {

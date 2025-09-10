@@ -137,8 +137,10 @@ public abstract class MCPServerBase extends AbstractVerticle {
             executeTool(ctx, request.getId(), toolName, arguments);
             
         } catch (Exception e) {
-            vertx.eventBus().publish("log", "Error handling tools/call" + ",0,MCPServerBase,MCP,System");
-            sendError(ctx, null, MCPResponse.ErrorCodes.INTERNAL_ERROR, "Internal server error");
+            vertx.eventBus().publish("log", "Error handling tools/call: " + e.getMessage() + 
+                " - Stack: " + e.getClass().getName() + ",0,MCPServerBase,MCP,System");
+            e.printStackTrace(); // Log full stack trace to console
+            sendError(ctx, null, MCPResponse.ErrorCodes.INTERNAL_ERROR, "Internal server error: " + e.getMessage());
         }
     }
     
