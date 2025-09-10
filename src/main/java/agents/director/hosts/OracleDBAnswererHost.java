@@ -1,16 +1,14 @@
 package agents.director.hosts;
 
-import agents.director.mcp.client.UniversalMCPClient;
 import agents.director.services.LlmAPIService;
 import agents.director.services.InterruptManager;
+import agents.director.hosts.base.managers.*;
 import io.vertx.core.*;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.eventbus.EventBus;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 
-
-import java.io.InputStream;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -32,8 +30,12 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     // Debug flag for verbose logging
     private static final boolean DEBUG_RESPONSES = System.getProperty("oracledb.debug.responses", "false").equalsIgnoreCase("true");
     
-    // MCP Clients for all servers
-    private final Map<String, UniversalMCPClient> mcpClients = new ConcurrentHashMap<>();
+    // MCP Managers for orchestrating clients
+    private OracleExecutionManager executionManager;
+    private SQLPipelineManager sqlPipelineManager;
+    private SchemaIntelligenceManager schemaIntelligenceManager;
+    private IntentAnalysisManager intentAnalysisManager;
+    private StrategyOrchestrationManager strategyOrchestrationManager;
     
     // Service references
     private LlmAPIService llmService;
@@ -97,11 +99,11 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         
         // Load orchestration configuration
         loadOrchestrationConfig()
-            .compose(v -> initializeMCPClients())
+            .compose(v -> initializeManagers())
             .compose(v -> registerEventBusConsumers())
             .onComplete(ar -> {
                 if (ar.succeeded()) {
-                    vertx.eventBus().publish("log", "OracleDBAnswererHost started successfully with " + mcpClients.size() + " MCP clients,2,OracleDBAnswererHost,Host,System");
+                    vertx.eventBus().publish("log", "OracleDBAnswererHost started successfully with 5 managers,2,OracleDBAnswererHost,Host,System");
                     startPromise.complete();
                 } else {
                     vertx.eventBus().publish("log", "Failed to start OracleDBAnswererHost" + ",0,OracleDBAnswererHost,Host,System");
@@ -122,114 +124,32 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         return promise.future();
     }
     
-    private Future<Void> initializeMCPClients() {
+    private Future<Void> initializeManagers() {
         Promise<Void> promise = Promise.<Void>promise();
-        List<Future> clientFutures = new ArrayList<>();
-        
-        // Create clients for all MCP servers
         String baseUrl = "http://localhost:8080";
         
-        // Query Intent Evaluation Client
-        UniversalMCPClient intentClient = new UniversalMCPClient(
-            "QueryIntentEvaluation", 
-            baseUrl + "/mcp/servers/query-intent"
-        );
-        clientFutures.add(deployClient(intentClient, "QueryIntentEvaluation"));
+        // Initialize all managers
+        executionManager = new OracleExecutionManager(vertx, baseUrl);
+        sqlPipelineManager = new SQLPipelineManager(vertx, baseUrl);
+        schemaIntelligenceManager = new SchemaIntelligenceManager(vertx, baseUrl);
+        intentAnalysisManager = new IntentAnalysisManager(vertx, baseUrl);
+        strategyOrchestrationManager = new StrategyOrchestrationManager(vertx, baseUrl);
         
-        // Oracle Query Analysis Client
-        UniversalMCPClient analysisClient = new UniversalMCPClient(
-            "OracleQueryAnalysis",
-            baseUrl + "/mcp/servers/oracle-query-analysis"
+        // Initialize all managers in parallel
+        List<Future> initFutures = Arrays.asList(
+            executionManager.initialize(),
+            sqlPipelineManager.initialize(),
+            schemaIntelligenceManager.initialize(),
+            intentAnalysisManager.initialize(),
+            strategyOrchestrationManager.initialize()
         );
-        clientFutures.add(deployClient(analysisClient, "OracleQueryAnalysis"));
         
-        // Oracle Schema Intelligence Client
-        UniversalMCPClient schemaClient = new UniversalMCPClient(
-            "OracleSchemaIntelligence",
-            baseUrl + "/mcp/servers/oracle-schema-intel"
-        );
-        clientFutures.add(deployClient(schemaClient, "OracleSchemaIntelligence"));
-        
-        // Business Mapping Client
-        UniversalMCPClient businessClient = new UniversalMCPClient(
-            "BusinessMapping",
-            baseUrl + "/mcp/servers/business-map"
-        );
-        clientFutures.add(deployClient(businessClient, "BusinessMapping"));
-        
-        // Oracle SQL Generation Client
-        UniversalMCPClient sqlGenClient = new UniversalMCPClient(
-            "OracleSQLGeneration",
-            baseUrl + "/mcp/servers/oracle-sql-gen"
-        );
-        clientFutures.add(deployClient(sqlGenClient, "OracleSQLGeneration"));
-        
-        // Oracle SQL Validation Client
-        UniversalMCPClient sqlValClient = new UniversalMCPClient(
-            "OracleSQLValidation",
-            baseUrl + "/mcp/servers/oracle-sql-val"
-        );
-        clientFutures.add(deployClient(sqlValClient, "OracleSQLValidation"));
-        
-        // Oracle Query Execution Client
-        UniversalMCPClient execClient = new UniversalMCPClient(
-            "OracleQueryExecution",
-            baseUrl + "/mcp/servers/oracle-db"
-        );
-        clientFutures.add(deployClient(execClient, "OracleQueryExecution"));
-        
-        // Dynamic Strategy Generation Clients
-        // Strategy Generation Client
-        UniversalMCPClient strategyGenClient = new UniversalMCPClient(
-            "StrategyGeneration",
-            baseUrl + "/mcp/servers/strategy-gen"
-        );
-        clientFutures.add(deployClient(strategyGenClient, "StrategyGeneration"));
-        
-        // Intent Analysis Client
-        UniversalMCPClient intentAnalysisClient = new UniversalMCPClient(
-            "IntentAnalysis",
-            baseUrl + "/mcp/servers/intent-analysis"
-        );
-        clientFutures.add(deployClient(intentAnalysisClient, "IntentAnalysis"));
-        
-        // Strategy Orchestrator Client
-        UniversalMCPClient orchestratorClient = new UniversalMCPClient(
-            "StrategyOrchestrator",
-            baseUrl + "/mcp/servers/strategy-orchestrator"
-        );
-        clientFutures.add(deployClient(orchestratorClient, "StrategyOrchestrator"));
-        
-        // Strategy Learning Client
-        UniversalMCPClient learningClient = new UniversalMCPClient(
-            "StrategyLearning",
-            baseUrl + "/mcp/servers/strategy-learning"
-        );
-        clientFutures.add(deployClient(learningClient, "StrategyLearning"));
-        
-        // Wait for all clients to be ready
-        CompositeFuture.all(clientFutures).onComplete(ar -> {
+        CompositeFuture.all(initFutures).onComplete(ar -> {
             if (ar.succeeded()) {
-                vertx.eventBus().publish("log", "All MCP clients initialized successfully,2,OracleDBAnswererHost,Host,System");
+                vertx.eventBus().publish("log", "All managers initialized successfully,2,OracleDBAnswererHost,Host,System");
                 promise.complete();
             } else {
-                promise.fail(ar.cause());
-            }
-        });
-        
-        return promise.future();
-    }
-    
-    private Future<String> deployClient(UniversalMCPClient client, String serverKey) {
-        Promise<String> promise = Promise.<String>promise();
-        
-        vertx.deployVerticle(client, ar -> {
-            if (ar.succeeded()) {
-                mcpClients.put(serverKey, client);
-                vertx.eventBus().publish("log", "Deployed client for " + serverKey + "" + ",3,OracleDBAnswererHost,Host,System");
-                promise.complete(ar.result());
-            } else {
-                vertx.eventBus().publish("log", "Failed to deploy client for " + serverKey + "" + ",0,OracleDBAnswererHost,Host,System");
+                vertx.eventBus().publish("log", "Failed to initialize managers: " + ar.cause().getMessage() + ",0,OracleDBAnswererHost,Host,System");
                 promise.fail(ar.cause());
             }
         });
@@ -247,7 +167,7 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         eventBus.<JsonObject>consumer("host.oracledbanswerer.status", message -> {
             message.reply(new JsonObject()
                 .put("status", "ready")
-                .put("clients", mcpClients.size())
+                .put("managers", 5)
                 .put("activeConversations", conversations.size())
                 .put("supportedStrategies", getSupportedStrategies()));
         });
@@ -508,12 +428,9 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     private Future<JsonObject> generateDynamicStrategy(ConversationContext context, String query) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
-        // Step 1: Analyze intent
-        UniversalMCPClient intentClient = mcpClients.get("IntentAnalysis");
-        UniversalMCPClient strategyGenClient = mcpClients.get("StrategyGeneration");
-        
-        if (intentClient == null || strategyGenClient == null) {
-            promise.fail("Required strategy generation clients not available");
+        // Use strategy orchestration manager for dynamic strategy generation
+        if (strategyOrchestrationManager == null || !strategyOrchestrationManager.isReady()) {
+            promise.fail("Strategy orchestration manager not available");
             return promise.future();
         }
         
@@ -547,50 +464,12 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             }
         });
         
-        // Analyze intent first
-        JsonObject intentArgs = new JsonObject()
-            .put("query", query)
-            .put("conversation_history", context.getRecentHistory(5))
-            .put("user_profile", new JsonObject()
-                .put("expertise_level", "intermediate")); // Could be dynamic
-        
-        toolsPromise.future()
-            .compose(availableTools -> 
-                intentClient.callTool("intent_analysis__extract_intent", intentArgs)
-                    .map(intentResult -> {
-                        context.storeStepResult("intent_analysis", intentResult);
-                        return new JsonObject()
-                            .put("intent", intentResult)
-                            .put("availableTools", availableTools);
-                    })
-            )
-            .compose(data -> {
-                // Analyze complexity
-                JsonObject complexityArgs = new JsonObject()
-                    .put("query", query)
-                    .put("context", new JsonObject()
-                        .put("previous_queries", context.getRecentHistory(3)));
-                
-                return strategyGenClient.callTool("strategy_generation__analyze_complexity", complexityArgs)
-                    .map(complexity -> {
-                        context.storeStepResult("complexity_analysis", complexity);
-                        return data
-                            .put("complexity", complexity);
-                    });
-            })
-            .compose(analysis -> {
-                // Generate strategy with available tools
-                JsonObject strategyArgs = new JsonObject()
-                    .put("query", query)
-                    .put("intent", analysis.getJsonObject("intent"))
-                    .put("complexity_analysis", analysis.getJsonObject("complexity"))
-                    .put("available_tools", analysis.getJsonArray("availableTools"))
-                    .put("constraints", new JsonObject()
-                        .put("max_steps", 12)
-                        .put("timeout_seconds", 60));
-                
-                return strategyGenClient.callTool("strategy_generation__create_strategy", strategyArgs);
-            })
+        // Use the strategy orchestration manager to generate a dynamic strategy
+        strategyOrchestrationManager.generateDynamicStrategy(
+            query,
+            context.getRecentHistory(5),
+            "intermediate" // expertise level, could be dynamic
+        )
             .onComplete(ar -> {
                 if (ar.succeeded()) {
                     JsonObject toolResponse = ar.result();
@@ -778,9 +657,6 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                                                      boolean streaming) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
-        UniversalMCPClient orchestratorClient = mcpClients.get("StrategyOrchestrator");
-        UniversalMCPClient learningClient = mcpClients.get("StrategyLearning");
-        
         JsonArray steps = strategy.getJsonArray("steps", new JsonArray());
         String strategyName = strategy.getString("name", "dynamic_strategy");
         
@@ -823,22 +699,21 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                             .put("duration", System.currentTimeMillis() - context.startTime)));
                 }
                 
-                // Record execution for learning
-                if (learningClient != null && learningClient.isReady()) {
+                // Record execution for learning using strategy orchestration manager
+                if (strategyOrchestrationManager != null && strategyOrchestrationManager.isReady()) {
                     vertx.eventBus().publish("log", "Recording execution for strategy: " + strategyName + 
                         " with " + context.stepsCompleted + " completed steps,3,OracleDBAnswererHost,Host,System");
                     
-                    JsonObject recordArgs = new JsonObject()
-                        .put("strategy", strategy)
-                        .put("execution_results", new JsonObject()
-                            .put("success", true)
-                            .put("total_duration", System.currentTimeMillis() - context.startTime)
-                            .put("steps_completed", context.stepsCompleted))
-                        .put("performance_metrics", new JsonObject()
-                            .put("query_complexity", context.getStepResult("complexity_analysis")
-                                .getJsonObject("factors", new JsonObject()).getFloat("complexity_score", 0.5f)));
+                    JsonObject executionResults = new JsonObject()
+                        .put("success", true)
+                        .put("total_duration", System.currentTimeMillis() - context.startTime)
+                        .put("steps_completed", context.stepsCompleted);
                     
-                    learningClient.callTool("strategy_learning__record_execution", recordArgs)
+                    JsonObject performanceMetrics = new JsonObject()
+                        .put("query_complexity", context.getStepResult("complexity_analysis")
+                            .getJsonObject("factors", new JsonObject()).getFloat("complexity_score", 0.5f));
+                    
+                    strategyOrchestrationManager.recordExecution(strategy, executionResults, performanceMetrics)
                         .onComplete(ar -> {
                             if (ar.failed()) {
                                 vertx.eventBus().publish("log", "Failed to record execution: " + ar.cause() + ",1,OracleDBAnswererHost,Host,System");
@@ -867,7 +742,6 @@ public class OracleDBAnswererHost extends AbstractVerticle {
             return Future.succeededFuture(accumulated);
         }
         
-        UniversalMCPClient orchestratorClient = mcpClients.get("StrategyOrchestrator");
         JsonObject currentStep = steps.getJsonObject(currentIndex);
         String toolName = currentStep.getString("tool", "unknown");
         
@@ -891,37 +765,20 @@ public class OracleDBAnswererHost extends AbstractVerticle {
                 vertx.eventBus().publish("log", "Step " + (currentIndex + 1) + " completed: " + toolName + 
                     " - Total completed: " + context.stepsCompleted + ",3,OracleDBAnswererHost,Host,System");
                 
-                // Evaluate progress if orchestrator available
-                if (orchestratorClient != null && orchestratorClient.isReady() && 
+                // Evaluate progress using strategy orchestration manager
+                if (strategyOrchestrationManager != null && strategyOrchestrationManager.isReady() && 
                     currentIndex % 3 == 2) { // Check every 3 steps
                     
-                    JsonObject evalArgs = new JsonObject()
-                        .put("strategy", strategy)
-                        .put("completed_steps", getCompletedSteps(steps, currentIndex + 1))
-                        .put("current_results", accumulated)
-                        .put("time_elapsed", System.currentTimeMillis() - context.startTime);
-                    
-                    return orchestratorClient.callTool("strategy_orchestrator__evaluate_progress", evalArgs)
-                        .compose(evaluation -> {
-                            if (!evaluation.getBoolean("on_track", true)) {
-                                // Adapt strategy if needed
-                                JsonObject adaptArgs = new JsonObject()
-                                    .put("current_strategy", strategy)
-                                    .put("evaluation", evaluation);
-                                
-                                return orchestratorClient.callTool("strategy_orchestrator__adapt_strategy", adaptArgs)
-                                    .map(adapted -> {
-                                        JsonArray newSteps = adapted.getJsonObject("adapted_strategy")
-                                            .getJsonArray("steps", steps);
-                                        return newSteps;
-                                    });
-                            }
-                            return Future.succeededFuture(steps);
-                        })
-                        .compose(possiblyAdaptedSteps -> {
-                            return executeStepsWithAdaptation(context, strategy, possiblyAdaptedSteps, 
-                                currentIndex + 1, accumulated);
-                        });
+                    return strategyOrchestrationManager.evaluateAndAdaptStrategy(
+                        strategy,
+                        getCompletedSteps(steps, currentIndex + 1),
+                        accumulated,
+                        System.currentTimeMillis() - context.startTime
+                    ).compose(adaptationResult -> {
+                        JsonArray possiblyAdaptedSteps = adaptationResult.getJsonArray("steps", steps);
+                        return executeStepsWithAdaptation(context, strategy, possiblyAdaptedSteps, 
+                            currentIndex + 1, accumulated);
+                    });
                 } else {
                     // Continue without evaluation
                     return executeStepsWithAdaptation(context, strategy, steps, 
@@ -1083,37 +940,86 @@ public class OracleDBAnswererHost extends AbstractVerticle {
         String tool = step.getString("tool");
         String server = step.getString("server");
         
-        UniversalMCPClient client = mcpClients.get(server);
-        if (client == null || !client.isReady()) {
-            vertx.eventBus().publish("log", "ERROR: Client not ready for server '" + server + "' when trying to execute tool '" + tool + "',0,OracleDBAnswererHost,Host,System");
-            promise.fail("Client not ready for server: " + server);
-            return promise.future();
-        }
-        
         // Build arguments based on the tool and previous results
         JsonObject arguments = buildToolArguments(context, tool, previousResults);
         
-        vertx.eventBus().publish("log", "Calling MCP tool '" + tool + "' on server '" + server + "' with args: " + 
+        vertx.eventBus().publish("log", "Calling MCP tool '" + tool + "' via managers with args: " + 
             arguments.encodePrettily() + ",3,OracleDBAnswererHost,Host,System");
         
         // Track performance
         long startTime = System.currentTimeMillis();
         
-        client.callTool(tool, arguments)
-            .onComplete(ar -> {
-                long duration = System.currentTimeMillis() - startTime;
-                performanceMetrics.put(tool, duration);
-                
-                if (ar.succeeded()) {
-                    vertx.eventBus().publish("log", "MCP tool '" + tool + "' completed successfully in " + duration + "ms,3,OracleDBAnswererHost,Host,System");
-                    promise.complete(ar.result());
-                } else {
-                    vertx.eventBus().publish("log", "ERROR: MCP tool '" + tool + "' failed: " + ar.cause().getMessage() + ",0,OracleDBAnswererHost,Host,System");
-                    promise.fail("Step " + tool + " failed: " + ar.cause().getMessage());
-                }
-            });
+        // Route tool calls through appropriate managers
+        Future<JsonObject> toolFuture = routeToolCallToManager(tool, server, arguments, context);
+        
+        toolFuture.onComplete(ar -> {
+            long duration = System.currentTimeMillis() - startTime;
+            performanceMetrics.put(tool, duration);
+            
+            if (ar.succeeded()) {
+                vertx.eventBus().publish("log", "MCP tool '" + tool + "' completed successfully in " + duration + "ms,3,OracleDBAnswererHost,Host,System");
+                promise.complete(ar.result());
+            } else {
+                vertx.eventBus().publish("log", "ERROR: MCP tool '" + tool + "' failed: " + ar.cause().getMessage() + ",0,OracleDBAnswererHost,Host,System");
+                promise.fail("Step " + tool + " failed: " + ar.cause().getMessage());
+            }
+        });
         
         return promise.future();
+    }
+    
+    /**
+     * Route tool calls to the appropriate manager
+     */
+    private Future<JsonObject> routeToolCallToManager(String tool, String server, JsonObject arguments, ConversationContext context) {
+        // Route based on server/tool type
+        switch (server) {
+            case "OracleQueryExecution":
+            case "SessionSchemaResolver":
+                if (context.sessionId != null) {
+                    String sql = arguments.getString("sql");
+                    if (sql != null) {
+                        return executionManager.executeWithSessionContext(sql, context.sessionId);
+                    }
+                }
+                return executionManager.callClientTool("execution", tool, arguments);
+                
+            case "OracleQueryAnalysis":
+            case "OracleSQLGeneration":
+            case "OracleSQLValidation":
+                // Map server names to client names properly
+                String sqlClientName;
+                if (server.equals("OracleQueryAnalysis")) {
+                    sqlClientName = "analysis";
+                } else if (server.equals("OracleSQLGeneration")) {
+                    sqlClientName = "generation";
+                } else {
+                    sqlClientName = "validation";
+                }
+                return sqlPipelineManager.callClientTool(sqlClientName, tool, arguments);
+                
+            case "OracleSchemaIntelligence":
+            case "BusinessMapping":
+                return schemaIntelligenceManager.callClientTool(
+                    server.equals("BusinessMapping") ? "business" : "schema",
+                    tool, arguments);
+                
+            case "QueryIntentEvaluation":
+            case "IntentAnalysis":
+                return intentAnalysisManager.callClientTool(
+                    server.equals("QueryIntentEvaluation") ? "evaluation" : "analysis",
+                    tool, arguments);
+                
+            case "StrategyGeneration":
+            case "StrategyOrchestrator":
+            case "StrategyLearning":
+                String clientName = server.replace("Strategy", "").toLowerCase();
+                return strategyOrchestrationManager.callClientTool(clientName, tool, arguments);
+                
+            default:
+                vertx.eventBus().publish("log", "WARNING: Unknown server '" + server + "' for tool '" + tool + "',1,OracleDBAnswererHost,Host,System");
+                return Future.failedFuture("Unknown server: " + server);
+        }
     }
     
     /**
@@ -1899,12 +1805,23 @@ public class OracleDBAnswererHost extends AbstractVerticle {
     
     @Override
     public void stop(Promise<Void> stopPromise) {
-        // Clean up resources
-        conversations.clear();
-        performanceMetrics.clear();
+        // Shutdown all managers
+        List<Future> shutdownFutures = new ArrayList<>();
         
-        vertx.eventBus().publish("log", "OracleDBAnswererHost stopped,2,OracleDBAnswererHost,Host,System");
-        stopPromise.complete();
+        if (executionManager != null) shutdownFutures.add(executionManager.shutdown());
+        if (sqlPipelineManager != null) shutdownFutures.add(sqlPipelineManager.shutdown());
+        if (schemaIntelligenceManager != null) shutdownFutures.add(schemaIntelligenceManager.shutdown());
+        if (intentAnalysisManager != null) shutdownFutures.add(intentAnalysisManager.shutdown());
+        if (strategyOrchestrationManager != null) shutdownFutures.add(strategyOrchestrationManager.shutdown());
+        
+        CompositeFuture.all(shutdownFutures).onComplete(ar -> {
+            // Clean up resources
+            conversations.clear();
+            performanceMetrics.clear();
+            
+            vertx.eventBus().publish("log", "OracleDBAnswererHost stopped,2,OracleDBAnswererHost,Host,System");
+            stopPromise.complete();
+        });
     }
     
     /**

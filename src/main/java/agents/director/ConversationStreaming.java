@@ -207,7 +207,6 @@ public class ConversationStreaming extends AbstractVerticle {
         // Interrupt control endpoints
         router.post("/conversations/:sessionId/interrupt").handler(this::handleInterrupt);
         router.post("/conversations/:sessionId/feedback").handler(this::handleFeedback);
-        router.get("/conversations/:sessionId/status").handler(this::handleSessionStatus);
         
         // Health and status endpoints
         router.get("/health").handler(this::handleHealth);
@@ -939,32 +938,6 @@ public class ConversationStreaming extends AbstractVerticle {
     /**
      * Get session status
      */
-    private void handleSessionStatus(RoutingContext context) {
-        String sessionId = context.pathParam("sessionId");
-        
-        StreamingSession session = activeSessions.get(sessionId);
-        if (session == null) {
-            sendError(context, 404, "Session not found");
-            return;
-        }
-        
-        JsonObject status = new JsonObject()
-            .put("sessionId", sessionId)
-            .put("conversationId", session.conversationId)
-            .put("startTime", session.startTime)
-            .put("duration", System.currentTimeMillis() - session.startTime)
-            .put("completed", session.completed);
-        
-        if (session instanceof EnhancedStreamingSession) {
-            EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
-            status.put("host", enhancedSession.host)
-                  .put("eventConsumers", enhancedSession.consumers.size())
-                  .put("connectionActive", !enhancedSession.responseEnded);
-        }
-        
-        sendJsonResponse(context, 200, status);
-    }
-    
     /**
      * Handle health check endpoint
      */

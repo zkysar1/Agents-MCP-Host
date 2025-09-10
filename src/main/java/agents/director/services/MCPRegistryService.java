@@ -449,11 +449,33 @@ public class MCPRegistryService extends AbstractVerticle {
     private void handleToolsList(Message<JsonObject> message) {
         JsonObject response = new JsonObject();
         JsonArray toolsArray = new JsonArray();
+        Map<String, JsonObject> uniqueTools = new HashMap<>();
         
-        // Get unique tools with their client associations and statistics
-        toolToClients.forEach((toolName, clientIds) -> {
+        // Collect unique tools with full details
+        clients.values().forEach(clientInfo -> {
+            if (clientInfo.tools != null) {
+                for (Object toolObj : clientInfo.tools) {
+                    JsonObject tool = (JsonObject) toolObj;
+                    String toolName = tool.getString("name");
+                    if (toolName != null && !uniqueTools.containsKey(toolName)) {
+                        // Store the first occurrence of the tool with full details
+                        uniqueTools.put(toolName, tool.copy());
+                    }
+                }
+            }
+        });
+        
+        // Build response with full tool details
+        uniqueTools.forEach((toolName, toolDetails) -> {
+            Set<String> clientIds = toolToClients.get(toolName);
+            if (clientIds == null) {
+                clientIds = new HashSet<>();
+            }
+            
             JsonObject toolInfo = new JsonObject()
                 .put("name", toolName)
+                .put("description", toolDetails.getString("description", ""))
+                .put("inputSchema", toolDetails.getJsonObject("inputSchema", new JsonObject()))
                 .put("availableIn", clientIds.size())
                 .put("clients", new JsonArray(new ArrayList<>(clientIds)));
             

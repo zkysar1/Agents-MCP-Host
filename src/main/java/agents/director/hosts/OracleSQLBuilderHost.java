@@ -1,16 +1,14 @@
 package agents.director.hosts;
 
-import agents.director.mcp.client.UniversalMCPClient;
 import agents.director.services.LlmAPIService;
 import agents.director.services.InterruptManager;
+import agents.director.hosts.base.managers.*;
 import io.vertx.core.*;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.eventbus.EventBus;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 
-
-import java.io.InputStream;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -31,8 +29,11 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
     
     
     
-    // MCP Clients needed for SQL generation
-    private final Map<String, UniversalMCPClient> mcpClients = new ConcurrentHashMap<>();
+    // MCP Managers for orchestrating SQL generation
+    private SQLPipelineManager sqlPipelineManager;
+    private SchemaIntelligenceManager schemaIntelligenceManager;
+    private IntentAnalysisManager intentAnalysisManager;
+    private StrategyOrchestrationManager strategyOrchestrationManager;
     
     // Service references
     private EventBus eventBus;
@@ -81,13 +82,13 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
         eventBus = vertx.eventBus();
         llmService = LlmAPIService.getInstance();
         
-        // Load configuration and initialize clients
+        // Load configuration and initialize managers
         loadOrchestrationConfig()
-            .compose(v -> initializeMCPClients())
+            .compose(v -> initializeManagers())
             .compose(v -> registerEventBusConsumers())
             .onComplete(ar -> {
                 if (ar.succeeded()) {
-                    vertx.eventBus().publish("log", "OracleSQLBuilderHost started successfully with " + mcpClients.size() + " MCP clients,2,OracleSQLBuilderHost,Host,System");
+                    vertx.eventBus().publish("log", "OracleSQLBuilderHost started successfully with 4 managers,2,OracleSQLBuilderHost,Host,System");
                     startPromise.complete();
                 } else {
                     vertx.eventBus().publish("log", "Failed to start OracleSQLBuilderHost" + ",0,OracleSQLBuilderHost,Host,System");
@@ -106,94 +107,30 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
         return promise.future();
     }
     
-    private Future<Void> initializeMCPClients() {
+    private Future<Void> initializeManagers() {
         Promise<Void> promise = Promise.<Void>promise();
-        List<Future> clientFutures = new ArrayList<>();
-        
         String baseUrl = "http://localhost:8080";
         
-        // We need these clients for SQL generation
+        // Initialize managers needed for SQL generation (no execution manager)
+        sqlPipelineManager = new SQLPipelineManager(vertx, baseUrl);
+        schemaIntelligenceManager = new SchemaIntelligenceManager(vertx, baseUrl);
+        intentAnalysisManager = new IntentAnalysisManager(vertx, baseUrl);
+        strategyOrchestrationManager = new StrategyOrchestrationManager(vertx, baseUrl);
         
-        // Query Analysis Client
-        UniversalMCPClient analysisClient = new UniversalMCPClient(
-            "OracleQueryAnalysis",
-            baseUrl + "/mcp/servers/oracle-query-analysis"
+        // Initialize all managers in parallel
+        List<Future> initFutures = Arrays.asList(
+            sqlPipelineManager.initialize(),
+            schemaIntelligenceManager.initialize(),
+            intentAnalysisManager.initialize(),
+            strategyOrchestrationManager.initialize()
         );
-        clientFutures.add(deployClient(analysisClient, "OracleQueryAnalysis"));
         
-        // Schema Intelligence Client
-        UniversalMCPClient schemaClient = new UniversalMCPClient(
-            "OracleSchemaIntelligence",
-            baseUrl + "/mcp/servers/oracle-schema-intel"
-        );
-        clientFutures.add(deployClient(schemaClient, "OracleSchemaIntelligence"));
-        
-        // Business Mapping Client
-        UniversalMCPClient businessClient = new UniversalMCPClient(
-            "BusinessMapping",
-            baseUrl + "/mcp/servers/business-map"
-        );
-        clientFutures.add(deployClient(businessClient, "BusinessMapping"));
-        
-        // SQL Generation Client
-        UniversalMCPClient sqlGenClient = new UniversalMCPClient(
-            "OracleSQLGeneration",
-            baseUrl + "/mcp/servers/oracle-sql-gen"
-        );
-        clientFutures.add(deployClient(sqlGenClient, "OracleSQLGeneration"));
-        
-        // SQL Validation Client
-        UniversalMCPClient sqlValClient = new UniversalMCPClient(
-            "OracleSQLValidation",
-            baseUrl + "/mcp/servers/oracle-sql-val"
-        );
-        clientFutures.add(deployClient(sqlValClient, "OracleSQLValidation"));
-        
-        // Dynamic Strategy Generation Clients
-        // Strategy Generation Client
-        UniversalMCPClient strategyGenClient = new UniversalMCPClient(
-            "StrategyGeneration",
-            baseUrl + "/mcp/servers/strategy-gen"
-        );
-        clientFutures.add(deployClient(strategyGenClient, "StrategyGeneration"));
-        
-        // Intent Analysis Client
-        UniversalMCPClient intentAnalysisClient = new UniversalMCPClient(
-            "IntentAnalysis",
-            baseUrl + "/mcp/servers/intent-analysis"
-        );
-        clientFutures.add(deployClient(intentAnalysisClient, "IntentAnalysis"));
-        
-        // Strategy Learning Client (for recording SQL-only executions)
-        UniversalMCPClient learningClient = new UniversalMCPClient(
-            "StrategyLearning",
-            baseUrl + "/mcp/servers/strategy-learning"
-        );
-        clientFutures.add(deployClient(learningClient, "StrategyLearning"));
-        
-        // Wait for all clients
-        CompositeFuture.all(clientFutures).onComplete(ar -> {
+        CompositeFuture.all(initFutures).onComplete(ar -> {
             if (ar.succeeded()) {
-                vertx.eventBus().publish("log", "All SQL builder clients initialized,2,OracleSQLBuilderHost,Host,System");
+                vertx.eventBus().publish("log", "All SQL builder managers initialized,2,OracleSQLBuilderHost,Host,System");
                 promise.complete();
             } else {
-                promise.fail(ar.cause());
-            }
-        });
-        
-        return promise.future();
-    }
-    
-    private Future<String> deployClient(UniversalMCPClient client, String serverKey) {
-        Promise<String> promise = Promise.<String>promise();
-        
-        vertx.deployVerticle(client, ar -> {
-            if (ar.succeeded()) {
-                mcpClients.put(serverKey, client);
-                vertx.eventBus().publish("log", "Deployed client for " + serverKey + "" + ",3,OracleSQLBuilderHost,Host,System");
-                promise.complete(ar.result());
-            } else {
-                vertx.eventBus().publish("log", "Failed to deploy client for " + serverKey + "" + ",0,OracleSQLBuilderHost,Host,System");
+                vertx.eventBus().publish("log", "Failed to initialize managers: " + ar.cause().getMessage() + ",0,OracleSQLBuilderHost,Host,System");
                 promise.fail(ar.cause());
             }
         });
@@ -211,7 +148,7 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
         eventBus.<JsonObject>consumer("host.oraclesqlbuilder.status", message -> {
             message.reply(new JsonObject()
                 .put("status", "ready")
-                .put("clients", mcpClients.size())
+                .put("managers", 4)
                 .put("activeBuildContexts", buildContexts.size()));
         });
         
@@ -386,85 +323,24 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
     private Future<JsonObject> generateSQLBuilderStrategy(String query) {
         Promise<JsonObject> promise = Promise.<JsonObject>promise();
         
-        UniversalMCPClient intentClient = mcpClients.get("IntentAnalysis");
-        UniversalMCPClient strategyGenClient = mcpClients.get("StrategyGeneration");
-        
-        if (intentClient == null || strategyGenClient == null) {
+        if (strategyOrchestrationManager == null || !strategyOrchestrationManager.isReady()) {
             // Use fallback strategy
             promise.complete(getFallbackSQLStrategy());
             return promise.future();
         }
         
-        // Analyze intent for SQL generation
-        JsonObject intentArgs = new JsonObject()
-            .put("query", query)
-            .put("conversation_history", new JsonArray());
-        
-        // First, fetch available tools from MCP Registry
-        Promise<JsonArray> toolsPromise = Promise.promise();
-        eventBus.request("mcp.tools.list", new JsonObject(), ar -> {
-            if (ar.succeeded()) {
-                JsonObject toolsResponse = (JsonObject) ar.result().body();
-                JsonArray tools = toolsResponse.getJsonArray("tools", new JsonArray());
-                
-                // Transform tools into the format needed by strategy generation
-                JsonArray availableTools = new JsonArray();
-                for (int i = 0; i < tools.size(); i++) {
-                    JsonObject tool = tools.getJsonObject(i);
-                    String toolName = tool.getString("name");
-                    
-                    // Get the server name from the first client detail
-                    JsonArray clientDetails = tool.getJsonArray("clientDetails", new JsonArray());
-                    if (clientDetails.size() > 0) {
-                        String serverName = clientDetails.getJsonObject(0).getString("serverName", "unknown");
-                        availableTools.add(new JsonObject()
-                            .put("name", toolName)
-                            .put("server", serverName));
-                    }
-                }
-                toolsPromise.complete(availableTools);
-            } else {
-                vertx.eventBus().publish("log", "Failed to fetch available tools: " + ar.cause() + ",1,OracleSQLBuilderHost,Host,System");
-                // Continue with empty tools list
-                toolsPromise.complete(new JsonArray());
-            }
-        });
-        
-        toolsPromise.future()
-            .compose(availableTools -> 
-                intentClient.callTool("intent_analysis__extract_intent", intentArgs)
-                    .map(intentResult -> {
-                        // Force intent to SQL generation mode
-                        intentResult.put("primary_intent", "get_sql_only");
-                        return new JsonObject()
-                            .put("intent", intentResult)
-                            .put("availableTools", availableTools);
-                    })
-            )
-            .compose(data -> {
-                // Analyze complexity
-                JsonObject complexityArgs = new JsonObject()
-                    .put("query", query)
-                    .put("context", new JsonObject());
-                
-                return strategyGenClient.callTool("strategy_generation__analyze_complexity", complexityArgs)
-                    .map(complexity -> data.put("complexity", complexity));
-            })
-            .compose(analysis -> {
-                // Generate SQL-specific strategy with available tools
-                JsonObject strategyArgs = new JsonObject()
-                    .put("query", query)
-                    .put("intent", analysis.getJsonObject("intent"))
-                    .put("complexity_analysis", analysis.getJsonObject("complexity"))
-                    .put("available_tools", analysis.getJsonArray("availableTools"))
-                    .put("constraints", new JsonObject()
-                        .put("max_steps", 8)  // Fewer steps for SQL-only
-                        .put("required_validations", new JsonArray()
-                            .add("syntax")
-                            .add("schema")));
-                
-                return strategyGenClient.callTool("strategy_generation__create_strategy", strategyArgs);
-            })
+        // Use strategy orchestration manager to generate SQL-specific strategy
+        strategyOrchestrationManager.generateDynamicStrategy(
+            query,
+            new JsonArray(), // No conversation history for SQL-only
+            "intermediate",  // expertise level
+            new JsonObject()
+                .put("mode", "sql_only")
+                .put("max_steps", 8)
+                .put("required_validations", new JsonArray()
+                    .add("syntax")
+                    .add("schema"))
+        )
             .onComplete(ar -> {
                 if (ar.succeeded()) {
                     promise.complete(ar.result());
@@ -489,19 +365,19 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
             .put("steps", new JsonArray()
                 .add(new JsonObject()
                     .put("tool", "analyze_query")
-                    .put("server", "oracle-query-analysis")
+                    .put("server", "OracleQueryAnalysis")
                     .put("description", "Analyze the natural language query"))
                 .add(new JsonObject()
                     .put("tool", "match_oracle_schema")
-                    .put("server", "oracle-schema-intel")
+                    .put("server", "OracleSchemaIntelligence")
                     .put("description", "Find relevant schema elements"))
                 .add(new JsonObject()
                     .put("tool", "generate_oracle_sql")
-                    .put("server", "oracle-sql-gen")
+                    .put("server", "OracleSQLGeneration")
                     .put("description", "Generate the SQL query"))
                 .add(new JsonObject()
                     .put("tool", "validate_oracle_sql")
-                    .put("server", "oracle-sql-val")
+                    .put("server", "OracleSQLValidation")
                     .put("description", "Validate the generated SQL")));
     }
     
@@ -509,20 +385,20 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
      * Record execution for learning
      */
     private void recordSQLGenerationExecution(SQLBuildContext context, boolean success) {
-        UniversalMCPClient learningClient = mcpClients.get("StrategyLearning");
-        if (learningClient != null && learningClient.isReady()) {
-            JsonObject recordArgs = new JsonObject()
-                .put("strategy", new JsonObject()
-                    .put("name", "SQL Generation Pipeline")
-                    .put("type", "sql_only"))
-                .put("execution_results", new JsonObject()
-                    .put("success", success)
-                    .put("total_duration", System.currentTimeMillis() - context.startTime)
-                    .put("steps_completed", context.stepResults.size()))
-                .put("performance_metrics", new JsonObject()
-                    .put("query_complexity", 0.5f)); // Could be enhanced
+        if (strategyOrchestrationManager != null && strategyOrchestrationManager.isReady()) {
+            JsonObject strategy = new JsonObject()
+                .put("name", "SQL Generation Pipeline")
+                .put("type", "sql_only");
             
-            learningClient.callTool("strategy_learning__record_execution", recordArgs)
+            JsonObject executionResults = new JsonObject()
+                .put("success", success)
+                .put("total_duration", System.currentTimeMillis() - context.startTime)
+                .put("steps_completed", context.stepResults.size());
+            
+            JsonObject performanceMetrics = new JsonObject()
+                .put("query_complexity", 0.5f); // Could be enhanced
+            
+            strategyOrchestrationManager.recordExecution(strategy, executionResults, performanceMetrics)
                 .onComplete(ar -> {
                     if (ar.failed()) {
                         vertx.eventBus().publish("log", "Failed to record SQL generation: " + ar.cause() + ",1,OracleSQLBuilderHost,Host,System");
@@ -624,18 +500,15 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
         String tool = step.getString("tool");
         String server = step.getString("server");
         
-        UniversalMCPClient client = mcpClients.get(server);
-        if (client == null || !client.isReady()) {
-            promise.fail("Client not ready for: " + server);
-            return promise.future();
-        }
-        
         // Build arguments based on tool and context
         JsonObject arguments = buildToolArguments(context, tool, options);
         
         long startTime = System.currentTimeMillis();
         
-        client.callTool(tool, arguments)
+        // Route tool calls through appropriate managers
+        Future<JsonObject> toolFuture = routeToolCallToManager(tool, server, arguments, context);
+        
+        toolFuture
             .onComplete(ar -> {
                 long duration = System.currentTimeMillis() - startTime;
                 performanceMetrics.put(tool, duration);
@@ -952,11 +825,58 @@ public class OracleSQLBuilderHost extends AbstractVerticle {
     
     @Override
     public void stop(Promise<Void> stopPromise) {
-        buildContexts.clear();
-        performanceMetrics.clear();
+        // Shutdown all managers
+        List<Future> shutdownFutures = new ArrayList<>();
         
-        vertx.eventBus().publish("log", "OracleSQLBuilderHost stopped,2,OracleSQLBuilderHost,Host,System");
-        stopPromise.complete();
+        if (sqlPipelineManager != null) shutdownFutures.add(sqlPipelineManager.shutdown());
+        if (schemaIntelligenceManager != null) shutdownFutures.add(schemaIntelligenceManager.shutdown());
+        if (intentAnalysisManager != null) shutdownFutures.add(intentAnalysisManager.shutdown());
+        if (strategyOrchestrationManager != null) shutdownFutures.add(strategyOrchestrationManager.shutdown());
+        
+        CompositeFuture.all(shutdownFutures).onComplete(ar -> {
+            // Clean up resources
+            buildContexts.clear();
+            performanceMetrics.clear();
+            
+            vertx.eventBus().publish("log", "OracleSQLBuilderHost stopped,2,OracleSQLBuilderHost,Host,System");
+            stopPromise.complete();
+        });
+    }
+    
+    /**
+     * Route tool calls to the appropriate manager
+     */
+    private Future<JsonObject> routeToolCallToManager(String tool, String server, JsonObject arguments, SQLBuildContext context) {
+        // Route based on server/tool type - expect proper server names from strategy
+        switch (server) {
+            case "OracleQueryAnalysis":
+                return sqlPipelineManager.callClientTool("analysis", tool, arguments);
+                
+            case "OracleSQLGeneration":
+                return sqlPipelineManager.callClientTool("generation", tool, arguments);
+                
+            case "OracleSQLValidation":
+                return sqlPipelineManager.callClientTool("validation", tool, arguments);
+                
+            case "OracleSchemaIntelligence":
+                return schemaIntelligenceManager.callClientTool("schema", tool, arguments);
+                
+            case "BusinessMapping":
+                return schemaIntelligenceManager.callClientTool("business", tool, arguments);
+                
+            case "IntentAnalysis":
+                return intentAnalysisManager.callClientTool("analysis", tool, arguments);
+                
+            case "StrategyGeneration":
+                return strategyOrchestrationManager.callClientTool("generation", tool, arguments);
+                
+            case "StrategyLearning":
+                return strategyOrchestrationManager.callClientTool("learning", tool, arguments);
+                
+            default:
+                vertx.eventBus().publish("log", "WARNING: Unknown server '" + server + "' for tool '" + tool + "',1,OracleSQLBuilderHost,Host,System");
+                return Future.failedFuture("Unknown server: " + server);
+        }
     }
     
     /**

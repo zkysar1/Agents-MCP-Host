@@ -1,18 +1,12 @@
-package agents.director.mcp.client;
+package agents.director.mcp.base;
 
-import agents.director.mcp.base.MCPRequest;
-import agents.director.mcp.base.MCPResponse;
-import agents.director.mcp.base.MCPTool;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
-import io.vertx.core.eventbus.Message;
 import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
 import io.vertx.ext.web.client.HttpRequest;
-import io.vertx.ext.web.codec.BodyCodec;
 import io.vertx.core.buffer.Buffer;
-
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -21,68 +15,58 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static agents.director.Driver.logLevel;
 
 /**
- * Universal MCP client that uses VertxStreamableHttpTransport for communication.
- * Dynamically discovers tools via tools/list and provides async tool calling.
- * Supports streaming responses via Server-Sent Events (SSE).
+ * Base class for all MCP client implementations.
+ * Provides core MCP protocol functionality including tool discovery and invocation.
+ * Each client maintains a 1:1 relationship with a single MCP server.
  */
-public class UniversalMCPClient extends AbstractVerticle {
-    
-    
+public abstract class MCPClientBase extends AbstractVerticle {
     
     // Configuration
-    private final String serverUrl;
-    private final String serverName;
-    private final int port;
-    private final String basePath;
+    protected final String serverName;
+    protected final String serverUrl;
+    protected final int port;
+    protected final String basePath;
     
     // HTTP client
-    private WebClient webClient;
+    protected WebClient webClient;
     
     // Tool registry
-    private final Map<String, MCPTool> tools = new ConcurrentHashMap<>();
-    private final AtomicBoolean toolsLoaded = new AtomicBoolean(false);
+    protected final Map<String, MCPTool> tools = new ConcurrentHashMap<>();
+    protected final AtomicBoolean toolsLoaded = new AtomicBoolean(false);
     
     // Request tracking
-    private final AtomicInteger requestCounter = new AtomicInteger(0);
+    protected final AtomicInteger requestCounter = new AtomicInteger(0);
     
     // Retry configuration
-    private static final int MAX_RETRIES = 3;
-    private static final long INITIAL_RETRY_DELAY = 1000; // 1 second
-    
-    // Event bus address for this client
-    private String eventBusAddress;
+    protected static final int MAX_RETRIES = 3;
+    protected static final long INITIAL_RETRY_DELAY = 1000; // 1 second
     
     // Registry integration
-    private final String clientId = UUID.randomUUID().toString();
-    private Long heartbeatTimerId;
+    protected final String clientId = UUID.randomUUID().toString();
+    protected Long heartbeatTimerId;
     
     /**
-     * Create a new MCP client for a server
+     * Constructor for MCP client base
      * @param serverName Friendly name for the server
-     * @param serverUrl Full URL including port and path (e.g., http://localhost:8080/mcp/servers/oracle-db)
+     * @param serverUrl Full URL including port and path
      */
-    public UniversalMCPClient(String serverName, String serverUrl) {
+    protected MCPClientBase(String serverName, String serverUrl) {
         this.serverName = serverName;
         this.serverUrl = serverUrl;
         
-        // Parse URL more robustly
+        // Parse URL to extract components
         if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
             try {
-                // Remove protocol
                 String afterProtocol = serverUrl.substring(serverUrl.indexOf("://") + 3);
                 
-                // Find the path start
                 int pathStart = afterProtocol.indexOf('/');
                 String hostAndPort = pathStart > 0 ? afterProtocol.substring(0, pathStart) : afterProtocol;
                 this.basePath = pathStart > 0 ? afterProtocol.substring(pathStart) : "/";
                 
-                // Parse host and port
                 if (hostAndPort.contains(":")) {
                     String[] hostPortParts = hostAndPort.split(":");
-                    // host is hostPortParts[0], which we don't need
                     this.port = Integer.parseInt(hostPortParts[1]);
                 } else {
-                    // Default ports
                     this.port = serverUrl.startsWith("https://") ? 443 : 80;
                 }
             } catch (Exception e) {
@@ -91,13 +75,11 @@ public class UniversalMCPClient extends AbstractVerticle {
         } else {
             throw new IllegalArgumentException("Invalid server URL: " + serverUrl);
         }
-        
-        this.eventBusAddress = "mcp.client." + serverName.toLowerCase().replace(" ", "_");
     }
     
     @Override
     public void start(Promise<Void> startPromise) {
-        // Create web client with appropriate options
+        // Create web client
         WebClientOptions options = new WebClientOptions()
             .setDefaultHost("localhost")
             .setDefaultPort(port)
@@ -108,43 +90,31 @@ public class UniversalMCPClient extends AbstractVerticle {
         
         webClient = WebClient.create(vertx, options);
         
-        // Register event bus consumer
-        vertx.eventBus().<JsonObject>consumer(eventBusAddress, this::handleEventBusMessage);
-        
         // Register with MCPRegistryService
-        JsonObject registration = new JsonObject()
-            .put("clientId", clientId)
-            .put("serverName", serverName)
-            .put("serverUrl", serverUrl)
-            .put("eventBusAddress", eventBusAddress)
-            .put("metadata", new JsonObject()
-                .put("basePath", basePath)
-                .put("port", port));
+        registerWithRegistry();
         
-        vertx.eventBus().<JsonObject>request("mcp.registry.register", registration, regReply -> {
-            if (regReply.succeeded()) {
-                vertx.eventBus().publish("log", "Registered " + serverName + " with MCPRegistry (ID: " + clientId + ")" + ",3,UniversalMCPClient,MCP,System");
-            } else {
-                vertx.eventBus().publish("log", "Failed to register " + serverName + " with MCPRegistry: " + regReply.cause() + ",1,UniversalMCPClient,MCP,System");
-            }
-        });
-        
-        // Start periodic heartbeat
-        heartbeatTimerId = vertx.setPeriodic(30000, id -> {
-            vertx.eventBus().send("mcp.registry.heartbeat", new JsonObject()
-                .put("clientId", clientId));
-        });
+        // Start heartbeat
+        startHeartbeat();
         
         // Discover tools on startup
         discoverTools().onComplete(ar -> {
             if (ar.succeeded()) {
-                vertx.eventBus().publish("log", "" + serverName + " client started with " + tools.size() + " tools discovered" + ",2,UniversalMCPClient,MCP,System");
+                vertx.eventBus().publish("log", serverName + " client started with " + tools.size() + " tools discovered,2," + getClass().getSimpleName() + ",MCP,System");
+                onClientReady();
                 startPromise.complete();
             } else {
-                vertx.eventBus().publish("log", "" + serverName + " client failed to discover tools" + ",0,UniversalMCPClient,MCP,System");
+                vertx.eventBus().publish("log", serverName + " client failed to discover tools,0," + getClass().getSimpleName() + ",MCP,System");
                 startPromise.fail(ar.cause());
             }
         });
+    }
+    
+    /**
+     * Called when client is ready with tools loaded.
+     * Subclasses can override for additional initialization.
+     */
+    protected void onClientReady() {
+        // Default: no additional action
     }
     
     /**
@@ -159,7 +129,9 @@ public class UniversalMCPClient extends AbstractVerticle {
             new JsonObject()
         );
         
-        vertx.eventBus().publish("log", "Discovering tools from " + serverName + " at " + basePath + "/tools/list" + "" + ",3,UniversalMCPClient,MCP,System");
+        if (logLevel >= 3) {
+            vertx.eventBus().publish("log", "Discovering tools from " + serverName + " at " + basePath + "/tools/list,3," + getClass().getSimpleName() + ",MCP,System");
+        }
         
         makeRequest("/tools/list", request.toJson())
             .onComplete(ar -> {
@@ -178,9 +150,11 @@ public class UniversalMCPClient extends AbstractVerticle {
                             JsonObject toolJson = toolsArray.getJsonObject(i);
                             MCPTool tool = MCPTool.fromJson(toolJson);
                             tools.put(tool.getName(), tool);
-                            vertx.eventBus().publish("log", "Discovered tool: " + tool.getName() + " - {}" + ",3,UniversalMCPClient,MCP,System");
                             
-                            // Build tool info for registry
+                            if (logLevel >= 3) {
+                                vertx.eventBus().publish("log", "Discovered tool: " + tool.getName() + ",3," + getClass().getSimpleName() + ",MCP,System");
+                            }
+                            
                             discoveredTools.add(new JsonObject()
                                 .put("name", tool.getName())
                                 .put("description", tool.getDescription() != null ? tool.getDescription() : "")
@@ -225,7 +199,9 @@ public class UniversalMCPClient extends AbstractVerticle {
                 .put("arguments", arguments)
         );
         
-        vertx.eventBus().publish("log", "Calling tool " + toolName + " on " + serverName + " with args: " + arguments.encode() + "" + ",3,UniversalMCPClient,MCP,System");
+        if (logLevel >= 3) {
+            vertx.eventBus().publish("log", "Calling tool " + toolName + " on " + serverName + ",3," + getClass().getSimpleName() + ",MCP,System");
+        }
         
         long startTime = System.currentTimeMillis();
         
@@ -254,6 +230,14 @@ public class UniversalMCPClient extends AbstractVerticle {
     }
     
     /**
+     * Check if this client is ready to handle requests
+     * @return true if the client is ready with loaded tools
+     */
+    public boolean isReady() {
+        return toolsLoaded.get() && !tools.isEmpty();
+    }
+    
+    /**
      * Call a tool with streaming response support
      */
     public Future<Void> callToolStreaming(String toolName, JsonObject arguments, 
@@ -275,12 +259,13 @@ public class UniversalMCPClient extends AbstractVerticle {
             new JsonObject()
                 .put("name", toolName)
                 .put("arguments", arguments)
-                .put("stream", true) // Indicate we want streaming
+                .put("stream", true)
         );
         
-        vertx.eventBus().publish("log", "Calling tool " + toolName + " (streaming) on " + serverName + " with args: " + arguments.encode() + ",3,UniversalMCPClient,MCP,System");
+        if (logLevel >= 3) {
+            vertx.eventBus().publish("log", "Calling tool " + toolName + " (streaming) on " + serverName + ",3," + getClass().getSimpleName() + ",MCP,System");
+        }
         
-        // Make SSE request
         makeStreamingRequest("/tools/call", request.toJson(), dataHandler, endHandler)
             .onComplete(promise);
         
@@ -297,9 +282,7 @@ public class UniversalMCPClient extends AbstractVerticle {
     /**
      * Check if a tool is available
      */
-    public boolean hasT 
-
-(String toolName) {
+    public boolean hasTool(String toolName) {
         return tools.containsKey(toolName);
     }
     
@@ -335,14 +318,16 @@ public class UniversalMCPClient extends AbstractVerticle {
             } else {
                 if (attempt < MAX_RETRIES) {
                     long delay = INITIAL_RETRY_DELAY * (long) Math.pow(2, attempt);
-                    vertx.eventBus().publish("log", serverName + " request failed (attempt " + (attempt + 1) + "), retrying in " + delay + "ms: " + ar.cause().getMessage() + ",1,UniversalMCPClient,MCP,System");
+                    if (logLevel >= 1) {
+                        vertx.eventBus().publish("log", serverName + " request failed (attempt " + (attempt + 1) + "), retrying in " + delay + "ms,1," + getClass().getSimpleName() + ",MCP,System");
+                    }
                     
                     vertx.setTimer(delay, id -> {
                         makeRequestWithRetry(path, requestBody, attempt + 1)
                             .onComplete(promise);
                     });
                 } else {
-                    vertx.eventBus().publish("log", "" + serverName + " request failed after " + MAX_RETRIES + " attempts" + ",0,UniversalMCPClient,MCP,System");
+                    vertx.eventBus().publish("log", serverName + " request failed after " + MAX_RETRIES + " attempts,0," + getClass().getSimpleName() + ",MCP,System");
                     promise.fail(ar.cause());
                 }
             }
@@ -352,8 +337,8 @@ public class UniversalMCPClient extends AbstractVerticle {
     }
     
     private Future<Void> makeStreamingRequest(String path, JsonObject requestBody,
-                                            Handler<JsonObject> dataHandler,
-                                            Handler<Void> endHandler) {
+                                             Handler<JsonObject> dataHandler,
+                                             Handler<Void> endHandler) {
         Promise<Void> promise = Promise.promise();
         
         HttpRequest<Buffer> request = webClient
@@ -361,11 +346,24 @@ public class UniversalMCPClient extends AbstractVerticle {
             .putHeader("Content-Type", "application/json")
             .putHeader("Accept", "text/event-stream");
         
-        request.as(BodyCodec.string()).sendJsonObject(requestBody, ar -> {
+        request.sendJsonObject(requestBody, ar -> {
             if (ar.succeeded()) {
-                // Parse Server-Sent Events
-                String body = ar.result().body();
-                parseSSEResponse(body, dataHandler);
+                // Parse SSE response
+                String body = ar.result().bodyAsString();
+                String[] events = body.split("\n\n");
+                
+                for (String event : events) {
+                    if (event.startsWith("data: ")) {
+                        String data = event.substring(6);
+                        try {
+                            JsonObject jsonData = new JsonObject(data);
+                            dataHandler.handle(jsonData);
+                        } catch (Exception e) {
+                            // Skip malformed data
+                        }
+                    }
+                }
+                
                 endHandler.handle(null);
                 promise.complete();
             } else {
@@ -376,117 +374,54 @@ public class UniversalMCPClient extends AbstractVerticle {
         return promise.future();
     }
     
-    private void parseSSEResponse(String sseData, Handler<JsonObject> dataHandler) {
-        // Parse Server-Sent Events format
-        String[] lines = sseData.split("\n");
-        StringBuilder eventData = new StringBuilder();
-        
-        for (String line : lines) {
-            if (line.startsWith("data: ")) {
-                eventData.append(line.substring(6));
-            } else if (line.isEmpty() && eventData.length() > 0) {
-                // End of event
-                try {
-                    JsonObject data = new JsonObject(eventData.toString());
-                    dataHandler.handle(data);
-                } catch (Exception e) {
-                    vertx.eventBus().publish("log", "Failed to parse SSE data: " + eventData.toString() + "" + ",0,UniversalMCPClient,MCP,System");
-                }
-                eventData.setLength(0);
-            }
-        }
-    }
-    
-    private void handleEventBusMessage(Message<JsonObject> message) {
-        JsonObject request = message.body();
-        String action = request.getString("action");
-        
-        switch (action) {
-            case "call":
-                String toolName = request.getString("tool");
-                JsonObject arguments = request.getJsonObject("arguments", new JsonObject());
-                
-                callTool(toolName, arguments)
-                    .onComplete(ar -> {
-                        if (ar.succeeded()) {
-                            message.reply(new JsonObject()
-                                .put("status", "success")
-                                .put("result", ar.result()));
-                        } else {
-                            message.fail(500, ar.cause().getMessage());
-                        }
-                    });
-                break;
-                
-            case "list":
-                message.reply(new JsonObject()
-                    .put("status", "success")
-                    .put("tools", new JsonArray(new ArrayList<>(tools.keySet()))));
-                break;
-                
-            case "refresh":
-                discoverTools().onComplete(ar -> {
-                    if (ar.succeeded()) {
-                        message.reply(new JsonObject()
-                            .put("status", "success")
-                            .put("toolCount", tools.size()));
-                    } else {
-                        message.fail(500, ar.cause().getMessage());
-                    }
-                });
-                break;
-                
-            default:
-                message.fail(400, "Unknown action: " + action);
-        }
-    }
-    
     private String generateRequestId() {
         return serverName + "-" + System.currentTimeMillis() + "-" + requestCounter.incrementAndGet();
     }
     
+    private void registerWithRegistry() {
+        JsonObject registration = new JsonObject()
+            .put("clientId", clientId)
+            .put("serverName", serverName)
+            .put("serverUrl", serverUrl)
+            .put("clientType", getClass().getSimpleName())
+            .put("metadata", new JsonObject()
+                .put("basePath", basePath)
+                .put("port", port));
+        
+        vertx.eventBus().<JsonObject>request("mcp.registry.register", registration, regReply -> {
+            if (regReply.succeeded()) {
+                if (logLevel >= 3) {
+                    vertx.eventBus().publish("log", "Registered " + serverName + " with MCPRegistry,3," + getClass().getSimpleName() + ",MCP,System");
+                }
+            } else {
+                if (logLevel >= 1) {
+                    vertx.eventBus().publish("log", "Failed to register with MCPRegistry,1," + getClass().getSimpleName() + ",MCP,System");
+                }
+            }
+        });
+    }
+    
+    private void startHeartbeat() {
+        heartbeatTimerId = vertx.setPeriodic(30000, id -> {
+            vertx.eventBus().send("mcp.registry.heartbeat", new JsonObject()
+                .put("clientId", clientId));
+        });
+    }
+    
     @Override
     public void stop(Promise<Void> stopPromise) {
-        // Cancel heartbeat timer
         if (heartbeatTimerId != null) {
             vertx.cancelTimer(heartbeatTimerId);
         }
         
-        // Deregister from MCPRegistryService
-        vertx.eventBus().send("mcp.registry.deregister", new JsonObject()
+        // Unregister from registry
+        vertx.eventBus().send("mcp.registry.unregister", new JsonObject()
             .put("clientId", clientId));
         
         if (webClient != null) {
-            try {
-                webClient.close();
-                vertx.eventBus().publish("log", "" + serverName + " client stopped" + ",2,UniversalMCPClient,MCP,System");
-                stopPromise.complete();
-            } catch (Exception e) {
-                stopPromise.fail(e);
-            }
-        } else {
-            stopPromise.complete();
+            webClient.close();
         }
-    }
-    
-    /**
-     * Get the event bus address for this client
-     */
-    public String getEventBusAddress() {
-        return eventBusAddress;
-    }
-    
-    /**
-     * Get the server name
-     */
-    public String getServerName() {
-        return serverName;
-    }
-    
-    /**
-     * Check if tools are loaded
-     */
-    public boolean isReady() {
-        return toolsLoaded.get();
+        
+        stopPromise.complete();
     }
 }
