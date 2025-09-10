@@ -21,6 +21,7 @@ public class Driver {
 
   private static final String DATA_PATH = "./data";
   public static final String zakAgentPath = DATA_PATH + "/agent";
+  public static final String BASE_URL = "http://localhost:8080";
   
   // Track component readiness via events
   private boolean mcpRouterReady = false;
@@ -251,35 +252,16 @@ public class Driver {
     setLlmAPIService();
     System.out.println("[Driver] LLM API Service setup complete");
     
-    // Deploy the 3 host applications
+    // Deploy the UniversalHost (replaces the 3 legacy hosts)
     List<Future> hostFutures = new ArrayList<>();
 
-
-    // Deploy OracleDBAnswererHost
-    System.out.println("[Driver] Deploying OracleDBAnswererHost...");
+    // Deploy UniversalHost
+    System.out.println("[Driver] Deploying UniversalHost...");
     hostFutures.add(
             vertx.deployVerticle(
-                    "agents.director.hosts.OracleDBAnswererHost",
+                    "agents.director.hosts.UniversalHost",
                     new DeploymentOptions()
             )
-    );
-
-    // Deploy OracleSQLBuilderHost
-    System.out.println("[Driver] Deploying OracleSQLBuilderHost...");
-    hostFutures.add(
-            vertx.deployVerticle(
-                    "agents.director.hosts.OracleSQLBuilderHost",
-                    new DeploymentOptions()
-            )
-    );
-
-    // Deploy ToolFreeDirectLLMHost
-    System.out.println("[Driver] Deploying ToolFreeDirectLLMHost...");
-    hostFutures.add(
-      vertx.deployVerticle(
-        "agents.director.hosts.ToolFreeDirectLLMHost",
-        new DeploymentOptions()
-      )
     );
     
     // Wait for all hosts to deploy

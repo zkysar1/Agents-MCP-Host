@@ -23,10 +23,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * Master Streaming Conversation API with host-based routing.
+ * Master Streaming Conversation API using UniversalHost.
  * This is the SOLE API entry point for all HTTP requests in the MCP architecture.
  * Provides health, status, MCP management, and conversation endpoints.
- * Automatically routes requests to the appropriate host based on content.
+ * All requests are routed to UniversalHost with backstory and guidance parameters.
  */
 public class ConversationStreaming extends AbstractVerticle {
     
@@ -48,7 +48,7 @@ public class ConversationStreaming extends AbstractVerticle {
     
     // Configuration
     private static final long DEFAULT_TIMEOUT = 120000; // 2 minutes
-    private static final String DEFAULT_HOST = "oracledbanswerer";
+    private static final String ONLY_HOST = "universal"; // Only UniversalHost exists now
     private static final long HEARTBEAT_INTERVAL = 8000; // 8 seconds
     private static final int MAX_ACTIVE_SESSIONS = 100; // Limit active sessions
     private static final int MAX_CRITICAL_ERRORS = 50; // Limit stored errors
@@ -263,17 +263,33 @@ public class ConversationStreaming extends AbstractVerticle {
             return;
         }
         
-        // Extract parameters
-        String host = request.getString("host", DEFAULT_HOST);
+        // Extract parameters - simplified to just use backstory and guidance
+        String backstory = request.getString("backstory");
+        String guidance = request.getString("guidance");
         String conversationId = request.getString("conversationId", UUID.randomUUID().toString());
         JsonObject options = request.getJsonObject("options", new JsonObject());
+        
+        // Always use UniversalHost - no more legacy host routing
+        String host = "universal";
+        
+        // Pass backstory and guidance directly to UniversalHost
+        if (backstory != null && !backstory.trim().isEmpty()) {
+            options.put("backstory", backstory);
+        }
+        if (guidance != null && !guidance.trim().isEmpty()) {
+            options.put("guidance", guidance);
+        }
         
         // Get the latest user message
         JsonObject lastMessage = messages.size() > 0 ? messages.getJsonObject(messages.size() - 1) : null;
         String query = lastMessage != null ? lastMessage.getString("content", "") : "";
         
         // Log request
-        vertx.eventBus().publish("log", "Processing conversation request - Host: " + host + ", ConvId: " + conversationId + ", Query: " + query + ",2,ConversationStreaming,API,System");
+        String logMessage = "Processing conversation request - ConvId: " + conversationId + ", Query: " + query;
+        if (backstory != null || guidance != null) {
+            logMessage += " [Custom: backstory=" + (backstory != null ? "yes" : "no") + ", guidance=" + (guidance != null ? "yes" : "no") + "]";
+        }
+        vertx.eventBus().publish("log", logMessage + ",2,ConversationStreaming,API,System");
         
         // Track request
         String requestId = UUID.randomUUID().toString();
@@ -487,28 +503,27 @@ public class ConversationStreaming extends AbstractVerticle {
         JsonObject status = new JsonObject();
         JsonArray hosts = new JsonArray();
         
-        // Check each host
-        for (String hostName : Arrays.asList("oracledbanswerer", "oraclesqlbuilder", "toolfreedirectllm")) {
-            JsonObject hostInfo = new JsonObject()
-                .put("name", hostName)
-                .put("available", isHostAvailable(hostName));
-            
-            // Get additional status from host
-            String statusAddress = "host." + hostName + ".status";
-            eventBus.<JsonObject>request(statusAddress, new JsonObject(), ar -> {
-                if (ar.succeeded()) {
-                    hostInfo.mergeIn(ar.result().body());
-                }
-            });
-            
+        // Only UniversalHost exists now
+        String hostName = "universal";
+        JsonObject hostInfo = new JsonObject()
+            .put("name", hostName)
+            .put("available", isHostAvailable(hostName));
+        
+        // Get additional status from host
+        String statusAddress = "host." + hostName + ".status";
+        eventBus.<JsonObject>request(statusAddress, new JsonObject(), ar -> {
+            if (ar.succeeded()) {
+                hostInfo.mergeIn(ar.result().body());
+            }
             hosts.add(hostInfo);
-        }
-        
-        status.put("hosts", hosts);
-        status.put("activeSessions", activeSessions.size());
-        status.put("defaultHost", DEFAULT_HOST);
-        
-        sendJsonResponse(context, 200, status);
+            
+            status.put("hosts", hosts);
+            status.put("activeSessions", activeSessions.size());
+            status.put("onlyHost", "universal");
+            status.put("message", "System now uses only UniversalHost with backstory and guidance parameters");
+            
+            sendJsonResponse(context, 200, status);
+        });
     }
     
     /**
@@ -557,18 +572,17 @@ public class ConversationStreaming extends AbstractVerticle {
     }
     
     private void updateHostAvailability() {
-        for (String hostName : Arrays.asList("oracledbanswerer", "oraclesqlbuilder", "toolfreedirectllm")) {
-            String statusAddress = "host." + hostName + ".status";
+        String hostName = "universal";
+        String statusAddress = "host." + hostName + ".status";
+        
+        eventBus.<JsonObject>request(statusAddress, new JsonObject(), ar -> {
+            boolean available = ar.succeeded();
+            hostAvailability.put(hostName, available);
             
-            eventBus.<JsonObject>request(statusAddress, new JsonObject(), ar -> {
-                boolean available = ar.succeeded();
-                hostAvailability.put(hostName, available);
-                
-                if (!available) {
-                    vertx.eventBus().publish("log", "Host " + hostName + " is not available" + ",1,ConversationStreaming,API,System");
-                }
-            });
-        }
+            if (!available) {
+                vertx.eventBus().publish("log", "UniversalHost is not available" + ",1,ConversationStreaming,API,System");
+            }
+        });
     }
     
     private boolean isHostAvailable(String host) {
@@ -577,32 +591,11 @@ public class ConversationStreaming extends AbstractVerticle {
     
     /**
      * Select fallback host based on availability
+     * Since we now only use UniversalHost, no fallback is possible
      */
     private String selectFallbackHost(String originalHost) {
-        // Fallback order based on original host
-        List<String> fallbackOrder;
-        
-        switch (originalHost.toLowerCase()) {
-            case "oracledbanswerer":
-                fallbackOrder = Arrays.asList("oraclesqlbuilder", "toolfreedirectllm");
-                break;
-            case "oraclesqlbuilder":
-                fallbackOrder = Arrays.asList("oracledbanswerer", "toolfreedirectllm");
-                break;
-            case "toolfreedirectllm":
-                fallbackOrder = Arrays.asList("oracledbanswerer", "oraclesqlbuilder");
-                break;
-            default:
-                fallbackOrder = Arrays.asList("oracledbanswerer", "oraclesqlbuilder", "toolfreedirectllm");
-        }
-        
-        for (String fallback : fallbackOrder) {
-            if (isHostAvailable(fallback)) {
-                return fallback;
-            }
-        }
-        
-        return null; // No available hosts
+        // UniversalHost is our only host - no fallback available
+        return null;
     }
     
     /**
