@@ -63,6 +63,16 @@ public class DataStatsMilestone extends MilestoneManager {
         
         log("Starting data statistics analysis for tables: " + context.getRelevantTables(), 3);
         
+        // Publish progress event at start
+        if (context.isStreaming() && context.getSessionId() != null) {
+            publishProgressEvent(context.getConversationId(),
+                "Step 3: Data Analysis",
+                "Analyzing table structures and statistics...",
+                new JsonObject()
+                    .put("phase", "data_analysis")
+                    .put("tables", new JsonArray(context.getRelevantTables())));
+        }
+        
         // If no tables were found, skip this milestone
         if (context.getRelevantTables().isEmpty()) {
             log("No tables to analyze, skipping data stats milestone", 2);
@@ -122,9 +132,17 @@ public class DataStatsMilestone extends MilestoneManager {
                     }
                 }
                 
-                // Update context with column and stats information
+                // Don't overwrite column information from SchemaMilestone
+                // Only set columns if they weren't already discovered
                 for (Map.Entry<String, List<String>> entry : tableColumns.entrySet()) {
-                    context.setTableColumns(entry.getKey(), entry.getValue());
+                    if (!context.getTableColumns().containsKey(entry.getKey())) {
+                        // Convert List<String> to JsonArray of simple column objects
+                        JsonArray columns = new JsonArray();
+                        for (String colName : entry.getValue()) {
+                            columns.add(new JsonObject().put("columnName", colName));
+                        }
+                        context.setTableColumns(entry.getKey(), columns);
+                    }
                 }
                 
                 for (Map.Entry<String, JsonObject> entry : columnStats.entrySet()) {
@@ -148,10 +166,8 @@ public class DataStatsMilestone extends MilestoneManager {
             .onFailure(err -> {
                 log("Data statistics analysis failed: " + err.getMessage(), 1);
                 
-                // Fallback: Use basic column information
-                for (String table : context.getRelevantTables()) {
-                    context.setTableColumns(table, Arrays.asList("ID", "NAME", "VALUE", "DATE"));
-                }
+                // Don't create fake columns - fail open
+                // Column information should come from SchemaMilestone
                 
                 context.setDataProfile(new JsonObject()
                     .put("fallback", true)
@@ -172,9 +188,16 @@ public class DataStatsMilestone extends MilestoneManager {
             JsonObject tableInfo = new JsonObject()
                 .put("table", table);
             
-            List<String> columns = context.getTableColumns().get(table);
+            JsonArray columns = context.getTableColumns().get(table);
             if (columns != null && !columns.isEmpty()) {
-                tableInfo.put("columns", new JsonArray(columns));
+                // Extract column names for display
+                JsonArray columnNames = new JsonArray();
+                for (int i = 0; i < columns.size(); i++) {
+                    JsonObject col = columns.getJsonObject(i);
+                    String colName = col.getString("columnName");
+                    columnNames.add(colName);  // Add even if null - let downstream handle it
+                }
+                tableInfo.put("columns", columnNames);
                 tableInfo.put("column_count", columns.size());
             }
             
@@ -182,7 +205,7 @@ public class DataStatsMilestone extends MilestoneManager {
         }
         
         int totalColumns = context.getTableColumns().values().stream()
-            .mapToInt(List::size)
+            .mapToInt(JsonArray::size)
             .sum();
         
         String message = "Analyzed " + context.getRelevantTables().size() + 

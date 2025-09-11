@@ -64,6 +64,16 @@ public class SchemaMilestone extends MilestoneManager {
         
         log("Starting schema exploration for intent: " + context.getIntent(), 3);
         
+        // Publish progress event at start
+        if (context.isStreaming() && context.getSessionId() != null) {
+            publishProgressEvent(context.getConversationId(),
+                "Step 2: Schema Exploration",
+                "Finding relevant tables in database...",
+                new JsonObject()
+                    .put("phase", "schema_exploration")
+                    .put("intent", context.getIntent()));
+        }
+        
         // Initialize session schema resolver if sessionId is available
         Future<JsonObject> initFuture;
         if (context.getSessionId() != null) {
@@ -109,6 +119,13 @@ public class SchemaMilestone extends MilestoneManager {
                     relevantTables.add(tableName);
                     if (!description.isEmpty()) {
                         tableDescriptions.put(tableName, description);
+                    }
+                    
+                    // Extract and store complete column information
+                    JsonArray columns = table.getJsonArray("columns");
+                    if (columns != null) {
+                        // Store the complete column objects with all metadata (even if empty)
+                        context.setTableColumns(tableName, columns);
                     }
                     }
                 }
@@ -256,6 +273,33 @@ public class SchemaMilestone extends MilestoneManager {
                         .put("analysis", analysis)
                         .put("maxSuggestions", 5)
                         .put("confidenceThreshold", 0.5));
+            })
+            .map(matchResult -> {
+                // Transform matches array to tables array for compatibility
+                JsonArray matches = matchResult.getJsonArray("matches", new JsonArray());
+                JsonArray tables = new JsonArray();
+                
+                for (int i = 0; i < matches.size(); i++) {
+                    JsonObject match = matches.getJsonObject(i);
+                    JsonObject table = match.getJsonObject("table");
+                    if (table != null) {
+                        // Create a copy to avoid mutating the original
+                        table = table.copy();
+                        // Always set 'name' from 'tableName' for downstream compatibility
+                        // (OracleSchemaIntelligenceServer returns 'tableName' but downstream expects 'name')
+                        String tableName = table.getString("tableName");
+                        table.put("name", tableName);
+                        // Add relevant columns from the match
+                        table.put("relevantColumns", match.getJsonArray("relevantColumns", new JsonArray()));
+                        table.put("confidence", match.getDouble("confidence", 0.5));
+                        table.put("matchReason", match.getString("matchReason", ""));
+                        tables.add(table);
+                    }
+                }
+                
+                // Return transformed result with tables array
+                matchResult.put("tables", tables);
+                return matchResult;
             });
         
         // Infer relationships if tables found

@@ -50,6 +50,16 @@ public class NaturalResponseMilestone extends MilestoneManager {
         
         log("Starting natural language response generation", 3);
         
+        // Publish progress event at start
+        if (context.isStreaming() && context.getSessionId() != null) {
+            publishProgressEvent(context.getConversationId(),
+                "Step 6: Response Generation",
+                "Creating natural language response...",
+                new JsonObject()
+                    .put("phase", "response_generation")
+                    .put("row_count", context.getRowCount()));
+        }
+        
         // Check if we have results to work with
         if (context.getRowCount() == 0 && context.getQueryResults() == null) {
             // No data to generate response from

@@ -63,8 +63,8 @@ public class SQLGenerationMilestone extends MilestoneManager {
         // Publish progress event at start
         if (context.isStreaming() && context.getSessionId() != null) {
             publishProgressEvent(context.getConversationId(),
-                "SQL Generation",
-                "Creating optimized SQL query...",
+                "Step 4: SQL Generation",
+                "Creating SQL query...",
                 new JsonObject()
                     .put("phase", "sql_generation")
                     .put("intent", context.getIntent()));
@@ -184,10 +184,10 @@ public class SQLGenerationMilestone extends MilestoneManager {
                 info.put("description", description);
             }
             
-            // Add columns if available
-            List<String> columns = context.getTableColumns().get(table);
-            if (columns != null && !columns.isEmpty()) {
-                info.put("columns", new JsonArray(columns));
+            // Add columns if available (already a JsonArray of column objects)
+            JsonArray columns = context.getTableColumns().get(table);
+            if (columns != null) {
+                info.put("columns", columns);  // Include even if empty
             }
             
             tableInfo.put(table, info);
@@ -241,13 +241,22 @@ public class SQLGenerationMilestone extends MilestoneManager {
                 
             case "list":
             case "show":
-                List<String> columns = context.getTableColumns().get(primaryTable);
+                JsonArray columns = context.getTableColumns().get(primaryTable);
                 if (columns != null && !columns.isEmpty()) {
-                    String columnList = String.join(", ", columns.subList(0, Math.min(5, columns.size())));
-                    return String.format("SELECT %s\nFROM %s\nWHERE ROWNUM <= 100", columnList, primaryTable);
-                } else {
-                    return String.format("SELECT *\nFROM %s\nWHERE ROWNUM <= 100", primaryTable);
+                    // Extract up to 5 column names for the query
+                    List<String> columnNames = new ArrayList<>();
+                    int limit = Math.min(5, columns.size());
+                    for (int i = 0; i < limit; i++) {
+                        JsonObject col = columns.getJsonObject(i);
+                        String colName = col.getString("columnName");
+                        columnNames.add(colName);  // Add even if null
+                    }
+                    if (!columnNames.isEmpty()) {
+                        String columnList = String.join(", ", columnNames);
+                        return String.format("SELECT %s\nFROM %s\nWHERE ROWNUM <= 100", columnList, primaryTable);
+                    }
                 }
+                return String.format("SELECT *\nFROM %s\nWHERE ROWNUM <= 100", primaryTable);
                 
             default:
                 return String.format("SELECT *\nFROM %s\nWHERE ROWNUM <= 10", primaryTable);
@@ -473,20 +482,36 @@ public class SQLGenerationMilestone extends MilestoneManager {
             JsonObject table = new JsonObject()
                 .put("tableName", tableName);
             
-            // Add columns if available
+            // Add columns if available (now full column objects with metadata)
             JsonObject info = tableInfo != null ? tableInfo.getJsonObject(tableName) : null;
             if (info != null && info.containsKey("columns")) {
-                table.put("columns", info.getJsonArray("columns"));
-                match.put("relevantColumns", info.getJsonArray("columns"));
+                JsonArray columns = info.getJsonArray("columns");
+                table.put("columns", columns);  // Full column objects
+                match.put("relevantColumns", columns);
             } else {
-                // Default columns
-                JsonArray defaultColumns = new JsonArray()
-                    .add("ID")
-                    .add("NAME")
-                    .add("VALUE")
-                    .add("DATE_CREATED");
-                table.put("columns", defaultColumns);
-                match.put("relevantColumns", defaultColumns);
+                // Fallback: try to get from schema details if available
+                JsonObject schemaDetails = context.getJsonObject("schema_details");
+                if (schemaDetails != null) {
+                    JsonArray schemaTables = schemaDetails.getJsonArray("tables");
+                    if (schemaTables != null) {
+                        for (int j = 0; j < schemaTables.size(); j++) {
+                            JsonObject schemaTable = schemaTables.getJsonObject(j);
+                            if (tableName.equals(schemaTable.getString("name"))) {
+                                JsonArray columns = schemaTable.getJsonArray("columns");
+                                if (columns != null) {
+                                    table.put("columns", columns);
+                                    match.put("relevantColumns", columns);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                // If still no columns, provide empty arrays
+                if (!table.containsKey("columns")) {
+                    table.put("columns", new JsonArray());
+                    match.put("relevantColumns", new JsonArray());
+                }
             }
             
             match.put("table", table);

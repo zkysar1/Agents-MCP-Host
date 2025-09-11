@@ -433,10 +433,11 @@ public class IntentAnalysisServer extends MCPServerBase {
         String userExpertise = arguments.getString("user_expertise", "intermediate");
         Float queryComplexity = arguments.getFloat("query_complexity", 0.5f);
         
-        // Validate intent parameter
+        // Intent is required - let it fail if missing
         if (intent == null) {
-            vertx.eventBus().publish("log", "Intent parameter is missing in suggestInteractionStyle,1,IntentAnalysisServer,Style,Warning");
-            intent = new JsonObject().put("primary_intent", "answer_question");
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, 
+                "Intent parameter is required for suggesting interaction style");
+            return;
         }
         
         if (logLevel >= 3) vertx.eventBus().publish("log", "Suggesting interaction style for expertise: " + userExpertise + ",3,IntentAnalysisServer,Style,Suggest");

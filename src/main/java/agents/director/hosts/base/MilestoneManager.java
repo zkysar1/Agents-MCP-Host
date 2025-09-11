@@ -91,8 +91,11 @@ public abstract class MilestoneManager {
             // Convert milestone.* events to progress events with phase info
             address = "streaming." + conversationId + ".progress";
             data.put("phase", eventType.replace("milestone.", ""))
-                .put("step", milestoneName)
-                .put("message", "Milestone " + milestoneNumber + " completed");
+                .put("step", milestoneName);
+            // Don't override message if already set
+            if (!data.containsKey("message")) {
+                data.put("message", "Milestone " + milestoneNumber + " completed");
+            }
         } else {
             // Keep standard event types as-is (tool.start, tool.complete, etc.)
             address = "streaming." + conversationId + "." + eventType;

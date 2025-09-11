@@ -120,13 +120,18 @@ public class UniversalHost extends AbstractVerticle {
                         .put("description", MilestoneDecider.getMilestoneDescription(targetMilestone)));
                     
                     // Also publish as progress event so frontend sees it
+                    String description = MilestoneDecider.getMilestoneDescription(targetMilestone);
+                    String strategyMessage = String.format("Will execute %d step%s to %s", 
+                        targetMilestone, targetMilestone == 1 ? "" : "s", 
+                        description.toLowerCase());
+                    
                     publishStreamingEvent(conversationId, "progress", new JsonObject()
                         .put("step", "Processing Strategy")
-                        .put("message", "Selected milestone " + targetMilestone + ": " + 
-                            MilestoneDecider.getMilestoneDescription(targetMilestone))
+                        .put("message", strategyMessage)
                         .put("details", new JsonObject()
                             .put("phase", "milestone_decision")
-                            .put("target_milestone", targetMilestone)));
+                            .put("target_milestone", targetMilestone)
+                            .put("description", description)));
                 }
                 
                 // Step 2: Execute milestones sequentially
@@ -186,16 +191,7 @@ public class UniversalHost extends AbstractVerticle {
         
         log("Executing milestone " + currentMilestone + ": " + milestone.getMilestoneName(), 3);
         
-        // Publish milestone start event
-        if (context.isStreaming() && context.getSessionId() != null) {
-            publishStreamingEvent(context.getConversationId(), "progress", new JsonObject()
-                .put("step", "Milestone " + currentMilestone)
-                .put("message", "Starting: " + milestone.getMilestoneName())
-                .put("details", new JsonObject()
-                    .put("phase", "milestone_start")
-                    .put("milestone", currentMilestone)
-                    .put("milestone_name", milestone.getMilestoneName())));
-        }
+        // Don't publish generic milestone start - let each milestone publish its own descriptive message
         
         // Execute the milestone
         return milestone.execute(context)
@@ -231,7 +227,7 @@ public class UniversalHost extends AbstractVerticle {
                 
             case 3:
                 int totalColumns = context.getTableColumns().values().stream()
-                    .mapToInt(List::size).sum();
+                    .mapToInt(JsonArray::size).sum();
                 response.put("answer", "Analyzed " + totalColumns + " columns across tables");
                 response.put("type", "data_stats");
                 break;

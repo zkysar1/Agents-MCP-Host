@@ -32,7 +32,7 @@ public class MilestoneContext {
     private JsonObject schemaDetails;
     
     // Milestone 3: Data Statistics
-    private Map<String, List<String>> tableColumns;
+    private Map<String, JsonArray> tableColumns;  // JsonArray of full column objects
     private Map<String, JsonObject> columnStats;
     private JsonObject dataProfile;
     
@@ -148,8 +148,8 @@ public class MilestoneContext {
     public JsonObject getSchemaDetails() { return schemaDetails; }
     public void setSchemaDetails(JsonObject details) { this.schemaDetails = details; }
     
-    public Map<String, List<String>> getTableColumns() { return tableColumns; }
-    public void setTableColumns(String table, List<String> columns) { 
+    public Map<String, JsonArray> getTableColumns() { return tableColumns; }
+    public void setTableColumns(String table, JsonArray columns) { 
         this.tableColumns.put(table, columns); 
     }
     

@@ -67,8 +67,8 @@ public class ExecutionMilestone extends MilestoneManager {
         // Publish progress event at start
         if (context.isStreaming() && context.getSessionId() != null) {
             publishProgressEvent(context.getConversationId(),
-                "Executing Query",
-                "Running SQL query against database...",
+                "Step 5: Query Execution",
+                "Running query against database...",
                 new JsonObject()
                     .put("phase", "sql_execution")
                     .put("query", sql));

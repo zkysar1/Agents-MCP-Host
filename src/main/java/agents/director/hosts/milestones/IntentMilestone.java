@@ -63,8 +63,8 @@ public class IntentMilestone extends MilestoneManager {
         // Publish progress event at start
         if (context.isStreaming() && context.getSessionId() != null) {
             publishProgressEvent(context.getConversationId(), 
-                "Analyzing Intent",
-                "Understanding what you're asking for...",
+                "Step 1: Intent Analysis",
+                "Analyzing your question...",
                 new JsonObject()
                     .put("phase", "intent_analysis")
                     .put("query", context.getQuery()));
@@ -85,11 +85,12 @@ public class IntentMilestone extends MilestoneManager {
                 JsonObject outputFormat = result.getJsonObject("outputFormat");
                 
                 // Get the primary intent from the result within extractedIntent
+                // Note: IntentAnalysisServer returns {result: {primary_intent: "...", ...}}
                 JsonObject intentResult = extractedIntent != null ? 
                     extractedIntent.getJsonObject("result", new JsonObject()) : new JsonObject();
                 String primaryIntent = intentResult.getString("primary_intent", "");
-                String intentType = intentEvaluation != null ? 
-                    intentEvaluation.getString("intent_type", "query") : "query";
+                // Let it fail if intentEvaluation is null - indicates pipeline issue
+                String intentType = intentEvaluation.getString("intent_type", "query");
                 
                 // Build a clear intent statement for the user
                 String intentStatement = buildIntentStatement(primaryIntent, intentType, 
@@ -110,8 +111,9 @@ public class IntentMilestone extends MilestoneManager {
                 
                 // Publish streaming event if applicable
                 if (context.isStreaming() && context.getSessionId() != null) {
-                    publishStreamingEvent(context.getConversationId(), "milestone.intent_complete",
-                        getShareableResult(context));
+                    JsonObject shareableResult = getShareableResult(context);
+                    shareableResult.put("message", "✅ Intent understood: " + intentStatement);
+                    publishStreamingEvent(context.getConversationId(), "milestone.intent_complete", shareableResult);
                 }
                 
                 log("Intent extraction complete: " + intentStatement, 2);
