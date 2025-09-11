@@ -121,22 +121,55 @@ public class ExecutionMilestone extends MilestoneManager {
                 log("SQL execution complete: " + rowCount + " rows in " + executionTime + "ms", 2);
                 promise.complete(context);
             })
-            .onFailure(err -> {
-                log("SQL execution failed: " + err.getMessage(), 0);
+            .recover(err -> {
+                // Log the failure explicitly at WARNING level
+                log("SQL execution failed, continuing with empty results: " + err.getMessage(), 1);
                 
-                // Store error information
+                // Mark context as degraded
+                context.setMilestoneDegraded(5, "Query execution failed: " + err.getMessage());
+                
+                // Publish degradation event
+                publishDegradationEvent(context, "sql_execution", err.getMessage());
+                
+                // Store error information explicitly
                 context.setQueryResults(new JsonArray());
                 context.setRowCount(0);
                 context.setExecutionTime(System.currentTimeMillis() - startTime);
                 context.setExecutionMetadata(new JsonObject()
                     .put("success", false)
-                    .put("error", err.getMessage())
-                    .put("sql", sql));
+                    .put("degraded", true)
+                    .put("degradation_reason", err.getMessage())
+                    .put("sql", sql)
+                    .put("message", "Query could not be executed"));
                 
+                // Mark milestone as complete (but degraded)
                 context.completeMilestone(5);
                 
-                // Still complete the milestone but with error status
-                promise.complete(context);
+                // Publish streaming event about execution failure
+                if (context.isStreaming() && context.getSessionId() != null) {
+                    JsonObject degradedResult = getShareableResult(context);
+                    degradedResult.put("degraded", true)
+                        .put("message", "⚠️ Query execution failed: " + err.getMessage());
+                    publishStreamingEvent(context.getConversationId(), "milestone.execution_complete", degradedResult);
+                    
+                    // Also publish specific execution failure warning
+                    publishStreamingEvent(context.getConversationId(), "degradation_warning", new JsonObject()
+                        .put("milestone", 5)
+                        .put("operation", "sql_execution")
+                        .put("sql", sql)
+                        .put("error", err.getMessage())
+                        .put("message", "Could not execute query against database")
+                        .put("severity", "ERROR")); // ERROR not WARNING - execution failure is serious
+                }
+                
+                // Return degraded execution result
+                return Future.succeededFuture(new JsonObject()
+                    .put("rows", new JsonArray())
+                    .put("columns", new JsonArray())
+                    .put("row_count", 0)
+                    .put("metadata", new JsonObject()
+                        .put("error", err.getMessage())
+                        .put("degraded", true)));
             });
         
         return promise.future();

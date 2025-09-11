@@ -139,6 +139,28 @@ public abstract class MilestoneManager {
     }
     
     /**
+     * Publish degradation event when falling back to degraded mode
+     */
+    protected void publishDegradationEvent(MilestoneContext context, String operation, String reason) {
+        if (context.isStreaming() && context.getSessionId() != null) {
+            JsonObject degradationData = new JsonObject()
+                .put("milestone", milestoneNumber)
+                .put("milestone_name", milestoneName)
+                .put("operation", operation)
+                .put("reason", reason)
+                .put("degradation_level", context.getDegradationLevel())
+                .put("confidence", context.getOverallConfidence())
+                .put("severity", "WARNING")
+                .put("message", "Using degraded mode for " + operation);
+            
+            publishStreamingEvent(context.getConversationId(), "degradation_warning", degradationData);
+            
+            // Also log at warning level
+            log("DEGRADED MODE: " + operation + " - " + reason, 1);
+        }
+    }
+    
+    /**
      * Log milestone activity
      */
     protected void log(String message, int level) {

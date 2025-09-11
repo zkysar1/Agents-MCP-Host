@@ -108,16 +108,34 @@ public class UniversalHost extends AbstractVerticle {
         
         // Step 1: Decide target milestone
         milestoneDecider.decideTargetMilestone(backstory, guidance, query)
-            .compose(targetMilestone -> {
+            .compose(targetMilestoneRaw -> {
+                // Check if milestone decision was degraded (high bit set)
+                boolean degraded = (targetMilestoneRaw & 0x80000000) != 0;
+                int targetMilestone = targetMilestoneRaw & 0x7FFFFFFF; // Clear high bit to get actual milestone
+                
                 context.setTargetMilestone(targetMilestone);
-                log("Target milestone determined: " + targetMilestone, 2);
+                
+                // If milestone decision was degraded, mark context
+                if (degraded) {
+                    context.setMilestoneDegraded(0, "Milestone decision fell back to rule-based approach");
+                    log("Target milestone determined via FALLBACK: " + targetMilestone, 1);
+                } else {
+                    log("Target milestone determined: " + targetMilestone, 2);
+                }
                 
                 // Publish milestone decision if streaming
                 if (streaming && sessionId != null) {
-                    // Publish as both milestone_decision and progress event
-                    publishStreamingEvent(conversationId, "milestone_decision", new JsonObject()
+                    JsonObject decisionData = new JsonObject()
                         .put("target_milestone", targetMilestone)
-                        .put("description", MilestoneDecider.getMilestoneDescription(targetMilestone)));
+                        .put("description", MilestoneDecider.getMilestoneDescription(targetMilestone));
+                    
+                    if (degraded) {
+                        decisionData.put("degraded", true)
+                            .put("degradation_reason", "LLM unavailable, using rule-based decision");
+                    }
+                    
+                    // Publish as both milestone_decision and progress event
+                    publishStreamingEvent(conversationId, "milestone_decision", decisionData);
                     
                     // Also publish as progress event so frontend sees it
                     String description = MilestoneDecider.getMilestoneDescription(targetMilestone);
@@ -125,13 +143,27 @@ public class UniversalHost extends AbstractVerticle {
                         targetMilestone, targetMilestone == 1 ? "" : "s", 
                         description.toLowerCase());
                     
+                    if (degraded) {
+                        strategyMessage += " (using fallback strategy)";
+                    }
+                    
                     publishStreamingEvent(conversationId, "progress", new JsonObject()
                         .put("step", "Processing Strategy")
                         .put("message", strategyMessage)
                         .put("details", new JsonObject()
                             .put("phase", "milestone_decision")
                             .put("target_milestone", targetMilestone)
-                            .put("description", description)));
+                            .put("description", description)
+                            .put("degraded", degraded)));
+                    
+                    // Publish degradation warning if applicable
+                    if (degraded) {
+                        publishStreamingEvent(conversationId, "degradation_warning", new JsonObject()
+                            .put("operation", "milestone_decision")
+                            .put("reason", "LLM service unavailable")
+                            .put("fallback", "rule-based decision")
+                            .put("severity", "WARNING"));
+                    }
                 }
                 
                 // Step 2: Execute milestones sequentially

@@ -216,7 +216,7 @@ public class SessionSchemaResolverServer extends MCPServerBase {
             return;
         }
         
-        // Execute as blocking operation
+        // Execute as blocking operation - but now with async operations inside
         executeBlocking(Promise.<JsonObject>promise(), promise -> {
             try {
                 SessionIntelligence session = getOrCreateSession(sessionId);
@@ -232,54 +232,100 @@ public class SessionSchemaResolverServer extends MCPServerBase {
                     return;
                 }
                 
-                // 2. Try pattern-based guess (FAST)
+                // 2. Try pattern-based guess (FAST) - now async
                 String patternGuess = guessSchemaFromPattern(tableName);
-                if (patternGuess != null && quickVerifyTable(patternGuess, tableName, session)) {
-                    session.recordSuccess(tableName, patternGuess);
-                    promise.complete(new JsonObject()
-                        .put("schema", patternGuess)
-                        .put("confidence", 0.9)
-                        .put("method", "pattern"));
-                    return;
+                Future<JsonObject> resolutionFuture = Future.succeededFuture();
+                
+                if (patternGuess != null) {
+                    resolutionFuture = quickVerifyTableAsync(patternGuess, tableName, session)
+                        .map(exists -> {
+                            if (exists) {
+                                session.recordSuccess(tableName, patternGuess);
+                                return new JsonObject()
+                                    .put("schema", patternGuess)
+                                    .put("confidence", 0.9)
+                                    .put("method", "pattern")
+                                    .put("found", true);
+                            }
+                            return new JsonObject().put("found", false);
+                        });
+                } else {
+                    resolutionFuture = Future.succeededFuture(new JsonObject().put("found", false));
                 }
                 
-                // 3. Use session affinity (FAST)
-                if (session.dominantSchema != null && quickVerifyTable(session.dominantSchema, tableName, session)) {
-                    session.recordSuccess(tableName, session.dominantSchema);
-                    promise.complete(new JsonObject()
-                        .put("schema", session.dominantSchema)
-                        .put("confidence", 0.85)
-                        .put("method", "session_affinity"));
-                    return;
-                }
-                
-                // 4. Parallel probe likely schemas (AGGRESSIVE)
-                String found = parallelSchemaProbe(tableName, session);
-                if (found != null) {
-                    session.recordSuccess(tableName, found);
-                    promise.complete(new JsonObject()
-                        .put("schema", found)
-                        .put("confidence", 0.7)
-                        .put("method", "parallel_probe"));
-                    return;
-                }
-                
-                // 5. Query v$sql for this specific table (LAST RESORT)
-                String discovered = mineQueryLogs(tableName);
-                if (discovered != null) {
-                    session.recordSuccess(tableName, discovered);
-                    promise.complete(new JsonObject()
-                        .put("schema", discovered)
-                        .put("confidence", 0.6)
-                        .put("method", "query_log_mining"));
-                    return;
-                }
-                
-                // Not found - return null (let Oracle handle it)
-                promise.complete(new JsonObject()
-                    .put("schema", null)
-                    .put("confidence", 0.0)
-                    .put("method", "not_found"));
+                // Chain the remaining operations
+                resolutionFuture
+                    .compose(result -> {
+                        if (result.getBoolean("found", false)) {
+                            return Future.succeededFuture(result);
+                        }
+                        
+                        // 3. Use session affinity (FAST) - now async
+                        if (session.dominantSchema != null) {
+                            return quickVerifyTableAsync(session.dominantSchema, tableName, session)
+                                .map(exists -> {
+                                    if (exists) {
+                                        session.recordSuccess(tableName, session.dominantSchema);
+                                        return new JsonObject()
+                                            .put("schema", session.dominantSchema)
+                                            .put("confidence", 0.85)
+                                            .put("method", "session_affinity")
+                                            .put("found", true);
+                                    }
+                                    return new JsonObject().put("found", false);
+                                });
+                        }
+                        return Future.succeededFuture(new JsonObject().put("found", false));
+                    })
+                    .compose(result -> {
+                        if (result.getBoolean("found", false)) {
+                            return Future.succeededFuture(result);
+                        }
+                        
+                        // 4. Parallel probe likely schemas (AGGRESSIVE) - now async
+                        return parallelSchemaProbeAsync(tableName, session)
+                            .map(found -> {
+                                if (found != null) {
+                                    session.recordSuccess(tableName, found);
+                                    return new JsonObject()
+                                        .put("schema", found)
+                                        .put("confidence", 0.7)
+                                        .put("method", "parallel_probe")
+                                        .put("found", true);
+                                }
+                                return new JsonObject().put("found", false);
+                            });
+                    })
+                    .compose(result -> {
+                        if (result.getBoolean("found", false)) {
+                            return Future.succeededFuture(result);
+                        }
+                        
+                        // 5. Query v$sql for this specific table (LAST RESORT) - now async
+                        return mineQueryLogsAsync(tableName)
+                            .map(discovered -> {
+                                if (discovered != null) {
+                                    session.recordSuccess(tableName, discovered);
+                                    return new JsonObject()
+                                        .put("schema", discovered)
+                                        .put("confidence", 0.6)
+                                        .put("method", "query_log_mining")
+                                        .put("found", true);
+                                }
+                                // Not found - return null (let Oracle handle it)
+                                return new JsonObject()
+                                    .put("schema", null)
+                                    .put("confidence", 0.0)
+                                    .put("method", "not_found")
+                                    .put("found", false);
+                            });
+                    })
+                    .onSuccess(result -> {
+                        // Remove the internal "found" flag before completing
+                        result.remove("found");
+                        promise.complete(result);
+                    })
+                    .onFailure(promise::fail);
                     
             } catch (Exception e) {
                 promise.fail(e);
@@ -480,51 +526,48 @@ public class SessionSchemaResolverServer extends MCPServerBase {
         return null;
     }
     
-    private boolean quickVerifyTable(String schema, String tableName) {
-        return quickVerifyTable(schema, tableName, null);
+    private Future<Boolean> quickVerifyTableAsync(String schema, String tableName) {
+        return quickVerifyTableAsync(schema, tableName, null);
     }
     
-    private boolean quickVerifyTable(String schema, String tableName, SessionIntelligence session) {
+    private Future<Boolean> quickVerifyTableAsync(String schema, String tableName, SessionIntelligence session) {
         // Check request-scoped cache first if session provided
         String cacheKey = schema.toUpperCase() + "." + tableName.toUpperCase();
         if (session != null && session.requestScopedVerifyCache.containsKey(cacheKey)) {
-            return session.requestScopedVerifyCache.get(cacheKey);
+            return Future.succeededFuture(session.requestScopedVerifyCache.get(cacheKey));
         }
         
         String sql = "SELECT 1 FROM all_tables WHERE owner = ? AND table_name = ? AND ROWNUM = 1";
         
-        try {
-            boolean exists = connectionManager.executeWithConnection(conn -> {
-                try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                    ps.setString(1, schema.toUpperCase());
-                    ps.setString(2, tableName.toUpperCase());
-                    
-                    try (ResultSet rs = ps.executeQuery()) {
-                        return rs.next();
-                    }
-                } catch (Exception e) {
-                    vertx.eventBus().publish("log", "Error verifying table " + schema + "." + tableName + ": " + e.getMessage() + ",2,SessionSchemaResolver,Discovery,Error");
-                    return false;
+        return connectionManager.executeWithConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema.toUpperCase());
+                ps.setString(2, tableName.toUpperCase());
+                
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
                 }
-            }).toCompletionStage().toCompletableFuture().get();
-            
+            } catch (Exception e) {
+                vertx.eventBus().publish("log", "Error verifying table " + schema + "." + tableName + ": " + e.getMessage() + ",2,SessionSchemaResolver,Discovery,Error");
+                return false;
+            }
+        }).map(exists -> {
             // Cache result if session provided
-            if (session != null) {
+            if (session != null && exists != null) {
                 session.requestScopedVerifyCache.put(cacheKey, exists);
                 // Clean cache periodically to prevent memory growth
                 if (session.requestScopedVerifyCache.size() > 100) {
                     session.requestScopedVerifyCache.clear();
                 }
             }
-            
             return exists;
-        } catch (Exception e) {
-            vertx.eventBus().publish("log", "Failed to verify table " + schema + "." + tableName + ": " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
-            return false;
-        }
+        }).recover(err -> {
+            vertx.eventBus().publish("log", "Failed to verify table " + schema + "." + tableName + ": " + err.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
+            return Future.succeededFuture(false);
+        });
     }
     
-    private String parallelSchemaProbe(String tableName, SessionIntelligence session) {
+    private Future<String> parallelSchemaProbeAsync(String tableName, SessionIntelligence session) {
         // Get top schemas to probe
         List<String> candidates = new ArrayList<>();
         
@@ -544,7 +587,7 @@ public class SessionSchemaResolverServer extends MCPServerBase {
         }
         
         if (candidates.isEmpty()) {
-            return null;
+            return Future.succeededFuture(null);
         }
         
         // Build single query to check all candidates
@@ -557,31 +600,29 @@ public class SessionSchemaResolverServer extends MCPServerBase {
             placeholders
         );
         
-        try {
-            return connectionManager.executeWithConnection(conn -> {
-                try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                    ps.setString(1, tableName.toUpperCase());
-                    for (int i = 0; i < candidates.size(); i++) {
-                        ps.setString(i + 2, candidates.get(i));
-                    }
-                    
-                    try (ResultSet rs = ps.executeQuery()) {
-                        if (rs.next()) {
-                            return rs.getString("owner");
-                        }
-                    }
-                } catch (Exception e) {
-                    vertx.eventBus().publish("log", "Parallel probe failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
+        return connectionManager.executeWithConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, tableName.toUpperCase());
+                for (int i = 0; i < candidates.size(); i++) {
+                    ps.setString(i + 2, candidates.get(i));
                 }
-                return null;
-            }).toCompletionStage().toCompletableFuture().get();
-        } catch (Exception e) {
-            vertx.eventBus().publish("log", "Parallel schema probe failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
+                
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        return rs.getString("owner");
+                    }
+                }
+            } catch (Exception e) {
+                vertx.eventBus().publish("log", "Parallel probe failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
+            }
             return null;
-        }
+        }).recover(err -> {
+            vertx.eventBus().publish("log", "Parallel schema probe failed: " + err.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
+            return Future.succeededFuture(null);
+        });
     }
     
-    private String mineQueryLogs(String tableName) {
+    private Future<String> mineQueryLogsAsync(String tableName) {
         String sql = """
             SELECT parsing_schema_name, COUNT(*) as usage_count
             FROM v$sql
@@ -594,29 +635,49 @@ public class SessionSchemaResolverServer extends MCPServerBase {
             FETCH FIRST 5 ROWS ONLY
         """;
         
-        try {
-            return connectionManager.executeWithConnection(conn -> {
-                try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                    ps.setString(1, tableName.toUpperCase());
-                    
-                    try (ResultSet rs = ps.executeQuery()) {
-                        while (rs.next()) {
-                            String schema = rs.getString("parsing_schema_name");
-                            // Verify this schema actually has the table
-                            if (quickVerifyTable(schema, tableName)) {
-                                return schema;
-                            }
-                        }
+        return connectionManager.executeWithConnection(conn -> {
+            List<String> schemas = new ArrayList<>();
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, tableName.toUpperCase());
+                
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        schemas.add(rs.getString("parsing_schema_name"));
                     }
-                } catch (Exception e) {
-                    vertx.eventBus().publish("log", "Query log mining failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
                 }
-                return null;
-            }).toCompletionStage().toCompletableFuture().get();
-        } catch (Exception e) {
-            vertx.eventBus().publish("log", "Query log mining failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
-            return null;
+            } catch (Exception e) {
+                vertx.eventBus().publish("log", "Query log mining failed: " + e.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
+            }
+            return schemas;
+        }).compose(schemas -> {
+            // Now verify each schema asynchronously
+            if (schemas.isEmpty()) {
+                return Future.succeededFuture(null);
+            }
+            
+            // Check schemas one by one until we find a match
+            return verifySchemaSequentially(schemas, tableName, 0);
+        }).recover(err -> {
+            vertx.eventBus().publish("log", "Query log mining failed: " + err.getMessage() + ",1,SessionSchemaResolver,Discovery,Error");
+            return Future.succeededFuture(null);
+        });
+    }
+    
+    private Future<String> verifySchemaSequentially(List<String> schemas, String tableName, int index) {
+        if (index >= schemas.size()) {
+            return Future.succeededFuture(null);
         }
+        
+        String schema = schemas.get(index);
+        return quickVerifyTableAsync(schema, tableName)
+            .compose(exists -> {
+                if (exists) {
+                    return Future.succeededFuture(schema);
+                } else {
+                    // Try next schema
+                    return verifySchemaSequentially(schemas, tableName, index + 1);
+                }
+            });
     }
     
     private String extractTablePrefix(String tableName) {

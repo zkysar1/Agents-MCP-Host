@@ -190,9 +190,12 @@ public class MilestoneDecider {
             .whenComplete((result, error) -> {
                 Runnable handler = () -> {
                     if (error != null) {
-                        // Fallback to rules on error
+                        // Log the failure explicitly
+                        System.err.println("WARNING: LLM milestone decision failed, using rule-based fallback: " + error.getMessage());
+                        // Fallback to rules on error, but mark as degraded
                         int milestone = determineByRules(query, backstory, guidance);
-                        promise.complete(milestone);
+                        // Return with degradation flag
+                        promise.complete(milestone | 0x80000000); // Set high bit to indicate degradation
                         return;
                     }
                     
@@ -210,9 +213,12 @@ public class MilestoneDecider {
                         
                         promise.complete(milestone);
                     } catch (Exception e) {
+                        // Log the parse error explicitly
+                        System.err.println("WARNING: Failed to parse LLM milestone response, using rule-based fallback: " + e.getMessage());
                         // Fallback to rules on parse error
                         int milestone = determineByRules(query, backstory, guidance);
-                        promise.complete(milestone);
+                        // Return with degradation flag
+                        promise.complete(milestone | 0x80000000); // Set high bit to indicate degradation
                     }
                 };
                 

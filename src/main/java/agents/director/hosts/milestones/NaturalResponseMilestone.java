@@ -89,17 +89,46 @@ public class NaturalResponseMilestone extends MilestoneManager {
                     log("Natural language response generated successfully", 2);
                     promise.complete(context);
                 })
-                .onFailure(err -> {
-                    log("LLM response generation failed, using template: " + err.getMessage(), 1);
+                .recover(err -> {
+                    // Log the failure explicitly at WARNING level
+                    log("LLM response generation failed, using template response: " + err.getMessage(), 1);
+                    
+                    // Mark context as degraded
+                    context.setMilestoneDegraded(6, "LLM response generation failed: " + err.getMessage());
+                    
+                    // Publish degradation event
+                    publishDegradationEvent(context, "llm_response_generation", err.getMessage());
                     
                     // Fallback to template-based response
                     String templateResponse = generateTemplateResponse(context);
+                    
+                    // Add degradation indicator to response
+                    if (context.isInDegradedMode()) {
+                        templateResponse = "⚠️ Note: This response was generated with limited capabilities due to service degradation.\n\n" + templateResponse;
+                    }
+                    
                     context.setNaturalResponse(templateResponse);
                     context.setResponseMetadata(new JsonObject()
                         .put("method", "template")
-                        .put("fallback", true));
+                        .put("degraded", true)
+                        .put("degradation_reason", err.getMessage())
+                        .put("confidence", 0.4)); // Low confidence for template
+                    
                     context.completeMilestone(6);
+                    
+                    // Publish streaming event about degradation
+                    if (context.isStreaming() && context.getSessionId() != null) {
+                        JsonObject degradedResult = getShareableResult(context);
+                        degradedResult.put("degraded", true)
+                            .put("message", "⚠️ Response generated using template (LLM unavailable)");
+                        publishStreamingEvent(context.getConversationId(), "milestone.response_complete", degradedResult);
+                    }
+                    
+                    // Complete the promise with degraded context
                     promise.complete(context);
+                    
+                    // Return degraded response result
+                    return Future.succeededFuture(templateResponse);
                 });
         } else {
             // Use template-based response

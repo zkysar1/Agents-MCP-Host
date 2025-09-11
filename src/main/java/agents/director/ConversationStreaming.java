@@ -1,6 +1,7 @@
 package agents.director;
 
 import io.vertx.core.AbstractVerticle;
+import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.eventbus.EventBus;
 import io.vertx.core.eventbus.Message;
@@ -357,26 +358,24 @@ public class ConversationStreaming extends AbstractVerticle {
             .put("sessionId", sessionId)
             .put("timestamp", System.currentTimeMillis()));
         
-        // Set up event consumers BEFORE sending to host
-        boolean setupSuccessful = false;
-        try {
-            setupEventConsumers(enhancedSession, options);
-            setupSuccessful = true;
-        } catch (Exception e) {
-            // Log error
-            vertx.eventBus().publish("log", "Failed to setup event consumers: " + e.getMessage() + ",0,ConversationStreaming,Session,Setup");
-        } finally {
-            // Clean up on error - ensure session is removed from activeSessions
-            if (!setupSuccessful) {
-                activeSessions.remove(sessionId);
-                sendStreamingError(context, 500, "Failed to initialize streaming session");
-                return;
-            }
-        }
-        
-        // Set up cleanup handlers
+        // FIX: Set up event consumers BEFORE sending to host using Future composition
         final String finalSessionId = sessionId;
         final EnhancedStreamingSession finalEnhancedSession = enhancedSession;
+        
+        // Create a Future for consumer setup
+        Future<Void> consumerSetupFuture = Future.future(setupPromise -> {
+            try {
+                setupEventConsumers(enhancedSession, options);
+                setupPromise.complete();
+                if (logLevel >= 3) {
+                    vertx.eventBus().publish("log", "Event consumers ready for session: " + finalSessionId + ",3,ConversationStreaming,Session,Setup");
+                }
+            } catch (Exception e) {
+                setupPromise.fail(e);
+            }
+        });
+        
+        // Set up cleanup handlers BEFORE sending message
         context.response().closeHandler(v -> {
             finalEnhancedSession.responseEnded = true;
             cleanupSession(finalSessionId);
@@ -405,18 +404,20 @@ public class ConversationStreaming extends AbstractVerticle {
             .put("requestId", requestId)
             .put("sessionId", finalSessionId);
         
-        // Send to host via event bus
-        String hostAddress = "host." + finalHost.toLowerCase() + ".process";
-        
-        // Use custom timeout for event bus request (2 minutes instead of default 30 seconds)
-        DeliveryOptions deliveryOptions = new DeliveryOptions().setSendTimeout(DEFAULT_TIMEOUT);
-        
-        eventBus.<JsonObject>request(hostAddress, hostMessage, deliveryOptions, ar -> {
-            long duration = System.currentTimeMillis() - requestMetrics.getOrDefault(requestId, System.currentTimeMillis());
-            requestMetrics.remove(requestId);
-            
-            if (ar.succeeded()) {
-                Message<JsonObject> result = ar.result();
+        // Use Future composition to ensure consumers are ready BEFORE sending to host
+        consumerSetupFuture
+            .compose(v -> {
+                // Consumers are ready, now send to host
+                String hostAddress = "host." + finalHost.toLowerCase() + ".process";
+                DeliveryOptions deliveryOptions = new DeliveryOptions().setSendTimeout(DEFAULT_TIMEOUT);
+                
+                Promise<Message<JsonObject>> hostPromise = Promise.promise();
+                eventBus.<JsonObject>request(hostAddress, hostMessage, deliveryOptions, hostPromise);
+                return hostPromise.future();
+            })
+            .onSuccess(result -> {
+                long duration = System.currentTimeMillis() - requestMetrics.getOrDefault(requestId, System.currentTimeMillis());
+                requestMetrics.remove(requestId);
                 if (result == null || result.body() == null) {
                     // Handle null response with context
                     String errorMessage = String.format("Host '%s' returned null response after %dms", 
@@ -454,27 +455,28 @@ public class ConversationStreaming extends AbstractVerticle {
                 if (logLevel >= 3) {
                     vertx.eventBus().publish("log", "Streaming started for session " + finalSessionId + " with host " + finalHost + ",3,ConversationStreaming,Streaming,Started");
                 }
-            } else {
-                // Enhanced error handling with context
-                Throwable cause = ar.cause();
-                String errorType = "Unknown error";
-                String errorMessage = null;
+            })
+            .onFailure(err -> {
+                long duration = System.currentTimeMillis() - requestMetrics.getOrDefault(requestId, System.currentTimeMillis());
+                requestMetrics.remove(requestId);
                 
-                if (cause != null) {
-                    errorMessage = cause.getMessage();
-                    // Classify error types
-                    if (errorMessage != null) {
-                        if (errorMessage.contains("NO_HANDLERS") || errorMessage.contains("No handlers")) {
-                            errorType = "Host not available";
-                            errorMessage = String.format("Host '%s' is not available. The service may not be deployed or is not responding.", finalHost);
-                        } else if (errorMessage.contains("timed out") || errorMessage.contains("timeout")) {
-                            errorType = "Request timeout";
-                            errorMessage = String.format("Host '%s' did not respond within the timeout period", finalHost);
-                        } else if (errorMessage.contains("LLM") || errorMessage.contains("OpenAI")) {
-                            errorType = "LLM service error";
-                        }
-                    } else {
-                        errorMessage = "Host processing failed without error details";
+                // Enhanced error handling with context
+                String errorType = "Unknown error";
+                String errorMessage = err.getMessage();
+                
+                // Classify error types
+                if (errorMessage != null) {
+                    if (errorMessage.contains("NO_HANDLERS") || errorMessage.contains("No handlers")) {
+                        errorType = "Host not available";
+                        errorMessage = String.format("Host '%s' is not available. The service may not be deployed or is not responding.", finalHost);
+                    } else if (errorMessage.contains("timed out") || errorMessage.contains("timeout")) {
+                        errorType = "Request timeout";
+                        errorMessage = String.format("Host '%s' did not respond within the timeout period", finalHost);
+                    } else if (errorMessage.contains("LLM") || errorMessage.contains("OpenAI")) {
+                        errorType = "LLM service error";
+                    } else if (errorMessage.contains("Consumer setup failed")) {
+                        errorType = "Streaming setup error";
+                        errorMessage = "Failed to initialize streaming consumers";
                     }
                 } else {
                     errorMessage = String.format("Host '%s' processing failed with null error", finalHost);
@@ -498,8 +500,7 @@ public class ConversationStreaming extends AbstractVerticle {
                 sendSSEEvent(context, "error", errorDetails);
                 context.response().end();
                 cleanupSession(finalSessionId);
-            }
-        });
+            });
     }
     
     /**

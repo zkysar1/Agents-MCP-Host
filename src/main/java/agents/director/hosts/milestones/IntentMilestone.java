@@ -119,20 +119,47 @@ public class IntentMilestone extends MilestoneManager {
                 log("Intent extraction complete: " + intentStatement, 2);
                 promise.complete(context);
             })
-            .onFailure(err -> {
-                log("Intent extraction failed: " + err.getMessage(), 0);
+            .recover(err -> {
+                // Log the failure explicitly at WARNING level
+                log("Intent extraction failed, using degraded mode: " + err.getMessage(), 1);
                 
-                // Fallback: Use simple intent extraction
+                // Mark context as degraded
+                context.setMilestoneDegraded(1, "Intent analysis failed: " + err.getMessage());
+                
+                // Publish degradation event
+                publishDegradationEvent(context, "intent_extraction", err.getMessage());
+                
+                // Use simple intent extraction as fallback
                 String fallbackIntent = extractSimpleIntent(context.getQuery());
                 context.setIntent(fallbackIntent);
                 context.setIntentType("unknown");
                 context.setIntentDetails(new JsonObject()
                     .put("primary_intent", fallbackIntent)
-                    .put("fallback", true)
-                    .put("error", err.getMessage()));
+                    .put("degraded", true)
+                    .put("degradation_reason", err.getMessage())
+                    .put("confidence", 0.3)); // Low confidence for fallback
                 
+                // Mark milestone as complete (but degraded)
                 context.completeMilestone(1);
-                promise.complete(context);
+                
+                // Publish streaming event about degradation
+                if (context.isStreaming() && context.getSessionId() != null) {
+                    JsonObject degradedResult = getShareableResult(context);
+                    degradedResult.put("degraded", true)
+                        .put("message", "⚠️ Intent analysis degraded: " + fallbackIntent);
+                    publishStreamingEvent(context.getConversationId(), "milestone.intent_complete", degradedResult);
+                }
+                
+                log("Using degraded intent extraction: " + fallbackIntent, 2);
+                
+                // Return empty result to continue pipeline
+                return Future.succeededFuture(new JsonObject()
+                    .put("extractedIntent", new JsonObject()
+                        .put("result", new JsonObject()
+                            .put("primary_intent", fallbackIntent)))
+                    .put("intentEvaluation", new JsonObject()
+                        .put("intent_type", "unknown"))
+                    .put("degraded", true));
             });
         
         return promise.future();

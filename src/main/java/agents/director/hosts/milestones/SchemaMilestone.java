@@ -105,6 +105,7 @@ public class SchemaMilestone extends MilestoneManager {
                 JsonArray tables = schemaResult.getJsonArray("tables");
                 JsonArray views = schemaResult.getJsonArray("views");
                 JsonObject relationships = schemaResult.getJsonObject("relationships");
+                JsonObject businessTerms = schemaResult.getJsonObject("businessTerms");
                 
                 // Process tables
                 List<String> relevantTables = new ArrayList<>();
@@ -152,6 +153,7 @@ public class SchemaMilestone extends MilestoneManager {
                     .put("tables", tables)
                     .put("views", views)
                     .put("relationships", relationships)
+                    .put("businessTerms", businessTerms)
                     .put("confidence", schemaResult.getDouble("confidence", 0.8)));
                 
                 // Mark milestone as complete
@@ -166,19 +168,56 @@ public class SchemaMilestone extends MilestoneManager {
                 log("Schema exploration complete: found " + relevantTables.size() + " relevant tables", 2);
                 promise.complete(context);
             })
-            .onFailure(err -> {
-                log("Schema exploration failed: " + err.getMessage(), 0);
+            .recover(err -> {
+                // Log the failure explicitly at WARNING level
+                log("Schema exploration failed, using degraded mode: " + err.getMessage(), 1);
+                
+                // Mark context as degraded
+                context.setMilestoneDegraded(2, "Schema discovery failed: " + err.getMessage());
+                
+                // Publish degradation event
+                publishDegradationEvent(context, "schema_discovery", err.getMessage());
                 
                 // Fallback: Try to extract table names from the query itself
                 List<String> fallbackTables = extractTableNamesFromQuery(context.getQuery());
+                
+                // Log what we're doing as fallback
+                log("Using query parsing fallback, found potential tables: " + fallbackTables, 1);
+                
                 context.setRelevantTables(fallbackTables);
                 context.setSchemaDetails(new JsonObject()
-                    .put("fallback", true)
-                    .put("error", err.getMessage())
-                    .put("tables", new JsonArray(fallbackTables)));
+                    .put("degraded", true)
+                    .put("degradation_reason", err.getMessage())
+                    .put("fallback_method", "query_parsing")
+                    .put("tables", new JsonArray(fallbackTables))
+                    .put("confidence", 0.2)); // Very low confidence for query parsing
                 
+                // Mark milestone as complete (but degraded)
                 context.completeMilestone(2);
-                promise.complete(context);
+                
+                // Publish streaming event about degradation
+                if (context.isStreaming() && context.getSessionId() != null) {
+                    JsonObject degradedResult = getShareableResult(context);
+                    degradedResult.put("degraded", true)
+                        .put("message", "⚠️ Schema discovery degraded: Using query parsing to guess tables");
+                    publishStreamingEvent(context.getConversationId(), "milestone.schema_complete", degradedResult);
+                    
+                    // Also publish a specific warning about the fallback
+                    publishStreamingEvent(context.getConversationId(), "degradation_warning", new JsonObject()
+                        .put("milestone", 2)
+                        .put("operation", "schema_discovery")
+                        .put("fallback_tables", new JsonArray(fallbackTables))
+                        .put("message", "Could not connect to database schema. Guessing table names from query.")
+                        .put("severity", "WARNING"));
+                }
+                
+                // Return degraded result to continue pipeline
+                return Future.succeededFuture(new JsonObject()
+                    .put("tables", new JsonArray(fallbackTables))
+                    .put("views", new JsonArray())
+                    .put("relationships", new JsonObject())
+                    .put("degraded", true)
+                    .put("confidence", 0.2));
             });
         
         return promise.future();
@@ -358,16 +397,21 @@ public class SchemaMilestone extends MilestoneManager {
                     }
                 }
                 
-                return CompositeFuture.all(resolutionFutures)
+                return CompositeFuture.join(resolutionFutures)
                     .map(v -> resolvedSchemas);
             });
         
-        return CompositeFuture.all(businessTermsFuture, schemaMatchFuture, relationshipsFuture, schemaResolutionFuture)
+        return CompositeFuture.join(businessTermsFuture, schemaMatchFuture, relationshipsFuture, schemaResolutionFuture)
             .map(composite -> {
-                JsonObject businessTerms = composite.resultAt(0);
-                JsonObject schemaMatch = composite.resultAt(1);
-                JsonObject relationships = composite.resultAt(2);
-                JsonObject resolvedSchemas = composite.resultAt(3);
+                // Handle partial failures - check each result individually
+                JsonObject businessTerms = composite.succeeded(0) ? 
+                    composite.resultAt(0) : new JsonObject().put("error", "Business term mapping failed");
+                JsonObject schemaMatch = composite.succeeded(1) ? 
+                    composite.resultAt(1) : new JsonObject().put("error", "Schema matching failed");
+                JsonObject relationships = composite.succeeded(2) ? 
+                    composite.resultAt(2) : new JsonObject().put("error", "Relationship inference failed");
+                JsonObject resolvedSchemas = composite.succeeded(3) ? 
+                    composite.resultAt(3) : new JsonObject();
                 
                 // Enhance tables with resolved schema prefixes
                 JsonArray tables = schemaMatch.getJsonArray("tables");

@@ -3,6 +3,7 @@ package agents.director.hosts.base;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Simple context object that flows through the milestone pipeline.
@@ -58,6 +59,13 @@ public class MilestoneContext {
     private Map<Integer, Long> milestoneTimes = new HashMap<>();
     private Map<String, Object> customData = new HashMap<>();
     
+    // Degradation Tracking
+    private boolean degradedMode = false;
+    private List<String> degradationReasons = new ArrayList<>();
+    private Map<Integer, Boolean> milestoneDegradation = new HashMap<>();
+    private Map<Integer, String> milestoneDegradationReasons = new HashMap<>();
+    private double overallConfidence = 1.0; // Starts at 100%, decreases with degradation
+    
     /**
      * Constructor with required fields
      */
@@ -101,10 +109,68 @@ public class MilestoneContext {
     }
     
     /**
+     * Set milestone as degraded with reason
+     */
+    public void setMilestoneDegraded(int milestone, String reason) {
+        this.degradedMode = true;
+        this.milestoneDegradation.put(milestone, true);
+        this.milestoneDegradationReasons.put(milestone, reason);
+        this.degradationReasons.add("Milestone " + milestone + ": " + reason);
+        // Reduce confidence by 10% for each degradation
+        this.overallConfidence = Math.max(0.1, this.overallConfidence - 0.1);
+    }
+    
+    /**
+     * Check if a specific milestone was degraded
+     */
+    public boolean isMilestoneDegraded(int milestone) {
+        return milestoneDegradation.getOrDefault(milestone, false);
+    }
+    
+    /**
+     * Get degradation reason for a milestone
+     */
+    public String getMilestoneDegradationReason(int milestone) {
+        return milestoneDegradationReasons.get(milestone);
+    }
+    
+    /**
+     * Check if any operations have been degraded
+     */
+    public boolean isInDegradedMode() {
+        return degradedMode;
+    }
+    
+    /**
+     * Get all degradation reasons
+     */
+    public List<String> getDegradationReasons() {
+        return new ArrayList<>(degradationReasons);
+    }
+    
+    /**
+     * Get overall confidence level (0.0 to 1.0)
+     */
+    public double getOverallConfidence() {
+        return overallConfidence;
+    }
+    
+    /**
+     * Get degradation level as a descriptive string
+     */
+    public String getDegradationLevel() {
+        if (!degradedMode) return "NONE";
+        if (overallConfidence >= 0.8) return "MINOR";
+        if (overallConfidence >= 0.5) return "MODERATE";
+        if (overallConfidence >= 0.3) return "SIGNIFICANT";
+        return "SEVERE";
+    }
+    
+    /**
      * Convert context to JsonObject for logging/debugging
      */
     public JsonObject toJson() {
-        return new JsonObject()
+        JsonObject json = new JsonObject()
             .put("conversationId", conversationId)
             .put("query", query)
             .put("backstory", backstory)
@@ -117,6 +183,22 @@ public class MilestoneContext {
             .put("rowCount", rowCount)
             .put("naturalResponse", naturalResponse)
             .put("totalTime", getTotalTime());
+        
+        // Add degradation information if present
+        if (degradedMode) {
+            json.put("degradedMode", true)
+                .put("degradationLevel", getDegradationLevel())
+                .put("overallConfidence", overallConfidence)
+                .put("degradationReasons", new JsonArray(degradationReasons))
+                .put("degradedMilestones", new JsonArray(
+                    milestoneDegradation.entrySet().stream()
+                        .filter(Map.Entry::getValue)
+                        .map(Map.Entry::getKey)
+                        .collect(java.util.stream.Collectors.toList())
+                ));
+        }
+        
+        return json;
     }
     
     // Getters and Setters

@@ -95,40 +95,73 @@ public class DataStatsMilestone extends MilestoneManager {
             analysisFutures.add(mappingFuture);
         }
         
-        CompositeFuture.all(analysisFutures)
-            .onSuccess(results -> {
-                // Aggregate results
+        // Use CompositeFuture.join() to handle partial failures
+        CompositeFuture.join(analysisFutures)
+            .map(results -> {
+                // Aggregate results, checking for partial failures
                 Map<String, List<String>> tableColumns = new HashMap<>();
                 Map<String, JsonObject> columnStats = new HashMap<>();
                 JsonObject dataProfile = new JsonObject();
+                boolean anyFailed = false;
                 
                 int resultIndex = 0;
                 for (String table : context.getRelevantTables()) {
                     // Structure result
-                    JsonObject structure = (JsonObject) results.resultAt(resultIndex++);
-                    if (structure != null) {
-                        JsonArray columns = structure.getJsonArray("columns");
-                        List<String> columnNames = new ArrayList<>();
-                        
-                        if (columns != null) {
-                            for (int i = 0; i < columns.size(); i++) {
-                            JsonObject col = columns.getJsonObject(i);
-                            String colName = col.getString("name");
-                            columnNames.add(colName);
+                    if (results.succeeded(resultIndex)) {
+                        JsonObject structure = (JsonObject) results.resultAt(resultIndex);
+                        if (structure != null && !structure.getBoolean("degraded", false)) {
+                            JsonArray columns = structure.getJsonArray("columns");
+                            List<String> columnNames = new ArrayList<>();
                             
-                            // Store column statistics
-                            String statKey = table + "." + colName;
-                            columnStats.put(statKey, col);
+                            if (columns != null) {
+                                for (int i = 0; i < columns.size(); i++) {
+                                    JsonObject col = columns.getJsonObject(i);
+                                    String colName = col.getString("name");
+                                    columnNames.add(colName);
+                                    
+                                    // Store column statistics
+                                    String statKey = table + "." + colName;
+                                    columnStats.put(statKey, col);
+                                }
                             }
+                            
+                            tableColumns.put(table, columnNames);
+                        } else if (structure != null && structure.getBoolean("degraded", false)) {
+                            anyFailed = true;
+                            log("Table structure analysis degraded for: " + table, 1);
                         }
-                        
-                        tableColumns.put(table, columnNames);
+                    } else {
+                        anyFailed = true;
+                        log("Table structure analysis failed for: " + table + " - " + results.cause(resultIndex), 1);
                     }
+                    resultIndex++;
                     
                     // Mapping result
-                    JsonObject mapping = (JsonObject) results.resultAt(resultIndex++);
-                    if (mapping != null) {
-                        dataProfile.put(table + "_mapping", mapping);
+                    if (results.succeeded(resultIndex)) {
+                        JsonObject mapping = (JsonObject) results.resultAt(resultIndex);
+                        if (mapping != null && !mapping.getBoolean("degraded", false)) {
+                            dataProfile.put(table + "_mapping", mapping);
+                        } else if (mapping != null && mapping.getBoolean("degraded", false)) {
+                            anyFailed = true;
+                            log("Business mapping degraded for: " + table, 1);
+                        }
+                    } else {
+                        anyFailed = true;
+                        log("Business mapping failed for: " + table + " - " + results.cause(resultIndex), 1);
+                    }
+                    resultIndex++;
+                }
+                
+                // If any operations failed, mark as degraded
+                if (anyFailed) {
+                    context.setMilestoneDegraded(3, "Some data analysis operations failed or were degraded");
+                    publishDegradationEvent(context, "data_analysis", "Partial failure in table analysis");
+                    
+                    if (context.isStreaming() && context.getSessionId() != null) {
+                        publishStreamingEvent(context.getConversationId(), "degradation_warning", new JsonObject()
+                            .put("milestone", 3)
+                            .put("message", "⚠️ Data analysis partially degraded - some tables could not be fully analyzed")
+                            .put("severity", "WARNING"));
                     }
                 }
                 
@@ -156,25 +189,48 @@ public class DataStatsMilestone extends MilestoneManager {
                 
                 // Publish streaming event if applicable
                 if (context.isStreaming() && context.getSessionId() != null) {
-                    publishStreamingEvent(context.getConversationId(), "milestone.data_stats_complete",
-                        getShareableResult(context));
+                    JsonObject result = getShareableResult(context);
+                    if (anyFailed) {
+                        result.put("degraded", true);
+                    }
+                    publishStreamingEvent(context.getConversationId(), "milestone.data_stats_complete", result);
                 }
                 
-                log("Data statistics analysis complete", 2);
-                promise.complete(context);
+                log("Data statistics analysis complete" + (anyFailed ? " (with degradation)" : ""), 2);
+                return context;
             })
-            .onFailure(err -> {
-                log("Data statistics analysis failed: " + err.getMessage(), 1);
+            .recover(err -> {
+                // Complete failure - log explicitly
+                log("Data statistics analysis completely failed, continuing with degraded mode: " + err.getMessage(), 1);
+                
+                // Mark context as severely degraded
+                context.setMilestoneDegraded(3, "Complete data analysis failure: " + err.getMessage());
+                publishDegradationEvent(context, "data_analysis", err.getMessage());
                 
                 // Don't create fake columns - fail open
                 // Column information should come from SchemaMilestone
-                
                 context.setDataProfile(new JsonObject()
-                    .put("fallback", true)
-                    .put("error", err.getMessage()));
+                    .put("degraded", true)
+                    .put("degradation_reason", err.getMessage())
+                    .put("message", "Could not analyze table structures"));
                 
                 context.completeMilestone(3);
-                promise.complete(context);
+                
+                if (context.isStreaming() && context.getSessionId() != null) {
+                    JsonObject result = getShareableResult(context);
+                    result.put("degraded", true)
+                        .put("message", "⚠️ Data analysis failed - proceeding without column statistics");
+                    publishStreamingEvent(context.getConversationId(), "milestone.data_stats_complete", result);
+                }
+                
+                return Future.succeededFuture(context);
+            })
+            .onComplete(ar -> {
+                if (ar.succeeded()) {
+                    promise.complete(ar.result());
+                } else {
+                    promise.fail(ar.cause());
+                }
             });
         
         return promise.future();
@@ -258,14 +314,13 @@ public class DataStatsMilestone extends MilestoneManager {
                 if (ar.succeeded()) {
                     promise.complete(ar.result().body());
                 } else {
-                    // Return basic structure on failure
+                    // DON'T return fake columns - mark as degraded instead
+                    log("Table structure analysis failed for " + table + ": " + ar.cause().getMessage(), 1);
                     promise.complete(new JsonObject()
                         .put("table", table)
-                        .put("columns", new JsonArray()
-                            .add(new JsonObject().put("name", "ID").put("type", "NUMBER"))
-                            .add(new JsonObject().put("name", "NAME").put("type", "VARCHAR2"))
-                            .add(new JsonObject().put("name", "VALUE").put("type", "NUMBER"))
-                            .add(new JsonObject().put("name", "DATE_CREATED").put("type", "DATE"))));
+                        .put("degraded", true)
+                        .put("degradation_reason", "Could not analyze table structure: " + ar.cause().getMessage())
+                        .put("columns", new JsonArray())); // Empty array, not fake data
                 }
             });
         
@@ -291,10 +346,13 @@ public class DataStatsMilestone extends MilestoneManager {
                 if (ar.succeeded()) {
                     promise.complete(ar.result().body());
                 } else {
-                    // Return empty mapping on failure
+                    // Mark as degraded instead of silently returning empty
+                    log("Business term mapping failed for " + table + ": " + ar.cause().getMessage(), 1);
                     promise.complete(new JsonObject()
                         .put("table", table)
-                        .put("mappings", new JsonObject()));
+                        .put("degraded", true)
+                        .put("degradation_reason", "Could not map business terms: " + ar.cause().getMessage())
+                        .put("mappings", new JsonObject())); // Empty mapping with degradation flag
                 }
             });
         
