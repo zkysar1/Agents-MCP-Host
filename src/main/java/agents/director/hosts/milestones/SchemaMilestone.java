@@ -2,8 +2,9 @@ package agents.director.hosts.milestones;
 
 import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
-import agents.director.mcp.client.OracleSchemaIntelligenceClient;
-import agents.director.mcp.client.BusinessMappingClient;
+import agents.director.mcp.clients.OracleSchemaIntelligenceClient;
+import agents.director.mcp.clients.BusinessMappingClient;
+import agents.director.mcp.clients.SessionSchemaResolverClient;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
@@ -21,6 +22,7 @@ public class SchemaMilestone extends MilestoneManager {
     
     private static final String SCHEMA_CLIENT = "schema";
     private static final String BUSINESS_CLIENT = "business";
+    private static final String SESSION_RESOLVER_CLIENT = "sessionresolver";
     private final Map<String, String> deploymentIds = new HashMap<>();
     
     public SchemaMilestone(Vertx vertx, String baseUrl) {
@@ -37,9 +39,11 @@ public class SchemaMilestone extends MilestoneManager {
         
         OracleSchemaIntelligenceClient schemaClient = new OracleSchemaIntelligenceClient(baseUrl);
         BusinessMappingClient businessClient = new BusinessMappingClient(baseUrl);
+        SessionSchemaResolverClient resolverClient = new SessionSchemaResolverClient(baseUrl);
         
         deploymentFutures.add(deployClient(SCHEMA_CLIENT, schemaClient));
         deploymentFutures.add(deployClient(BUSINESS_CLIENT, businessClient));
+        deploymentFutures.add(deployClient(SESSION_RESOLVER_CLIENT, resolverClient));
         
         CompositeFuture.all(deploymentFutures)
             .onSuccess(v -> {
@@ -60,6 +64,22 @@ public class SchemaMilestone extends MilestoneManager {
         
         log("Starting schema exploration for intent: " + context.getIntent(), 3);
         
+        // Initialize session schema resolver if sessionId is available
+        Future<JsonObject> initFuture;
+        if (context.getSessionId() != null) {
+            initFuture = callTool(SESSION_RESOLVER_CLIENT, "discover_available_schemas",
+                new JsonObject().put("sessionId", context.getSessionId()))
+                .onSuccess(result -> {
+                    log("Session schema resolver initialized with " + 
+                        result.getJsonArray("schemas", new JsonArray()).size() + " schemas", 3);
+                })
+                .onFailure(err -> {
+                    log("Failed to initialize session schema resolver: " + err.getMessage(), 2);
+                });
+        } else {
+            initFuture = Future.succeededFuture(new JsonObject());
+        }
+        
         // Build search context from intent
         JsonObject searchContext = new JsonObject()
             .put("query", context.getQuery())
@@ -68,8 +88,8 @@ public class SchemaMilestone extends MilestoneManager {
             .put("intent_details", context.getIntentDetails() != null ? 
                  context.getIntentDetails() : new JsonObject());
         
-        // Discover relevant schema elements using clients directly
-        discoverRelevantSchema(context.getQuery(), searchContext)
+        // After initialization, discover relevant schema elements using clients directly
+        initFuture.compose(v -> discoverRelevantSchema(context.getQuery(), searchContext, context.getSessionId()))
             .onSuccess(schemaResult -> {
                 // Extract tables and their descriptions
                 JsonArray tables = schemaResult.getJsonArray("tables");
@@ -211,7 +231,7 @@ public class SchemaMilestone extends MilestoneManager {
     /**
      * Discover relevant schema elements (replaces manager method)
      */
-    private Future<JsonObject> discoverRelevantSchema(String query, JsonObject searchContext) {
+    private Future<JsonObject> discoverRelevantSchema(String query, JsonObject searchContext, String sessionId) {
         // Extract terms from query for business mapping
         JsonArray terms = extractTermsFromQuery(query);
         
@@ -239,23 +259,88 @@ public class SchemaMilestone extends MilestoneManager {
                 return Future.succeededFuture(new JsonObject());
             });
         
-        return CompositeFuture.all(businessTermsFuture, schemaMatchFuture, relationshipsFuture)
+        // Resolve schema prefixes for discovered tables if sessionId is available
+        Future<JsonObject> schemaResolutionFuture = schemaMatchFuture
+            .compose(match -> {
+                if (sessionId == null) {
+                    return Future.succeededFuture(new JsonObject());
+                }
+                
+                JsonArray tables = match.getJsonArray("tables");
+                if (tables == null || tables.isEmpty()) {
+                    return Future.succeededFuture(new JsonObject());
+                }
+                
+                // Resolve schema for each table and collect results
+                List<Future> resolutionFutures = new ArrayList<>();
+                JsonObject resolvedSchemas = new JsonObject();
+                
+                for (int i = 0; i < tables.size(); i++) {
+                    JsonObject table = tables.getJsonObject(i);
+                    String tableName = table.getString("name");
+                    if (tableName != null) {
+                        Future<JsonObject> resolveFuture = callTool(SESSION_RESOLVER_CLIENT, "resolve_table_schema",
+                            new JsonObject()
+                                .put("tableName", tableName)
+                                .put("sessionId", sessionId)
+                                .put("queryContext", new JsonObject()
+                                    .put("queryType", searchContext.getString("intent_type"))))
+                            .onSuccess(result -> {
+                                String schema = result.getString("schema");
+                                if (schema != null) {
+                                    resolvedSchemas.put(tableName, schema);
+                                    // Learn from successful resolution
+                                    callTool(SESSION_RESOLVER_CLIENT, "learn_from_success",
+                                        new JsonObject()
+                                            .put("tableName", tableName)
+                                            .put("schema", schema)
+                                            .put("sessionId", sessionId))
+                                        .onFailure(err -> {
+                                            log("Failed to record learning for " + tableName + ": " + err.getMessage(), 3);
+                                        });
+                                }
+                            });
+                        resolutionFutures.add(resolveFuture);
+                    }
+                }
+                
+                return CompositeFuture.all(resolutionFutures)
+                    .map(v -> resolvedSchemas);
+            });
+        
+        return CompositeFuture.all(businessTermsFuture, schemaMatchFuture, relationshipsFuture, schemaResolutionFuture)
             .map(composite -> {
                 JsonObject businessTerms = composite.resultAt(0);
                 JsonObject schemaMatch = composite.resultAt(1);
                 JsonObject relationships = composite.resultAt(2);
+                JsonObject resolvedSchemas = composite.resultAt(3);
+                
+                // Enhance tables with resolved schema prefixes
+                JsonArray tables = schemaMatch.getJsonArray("tables");
+                if (tables != null && !resolvedSchemas.isEmpty()) {
+                    for (int i = 0; i < tables.size(); i++) {
+                        JsonObject table = tables.getJsonObject(i);
+                        String tableName = table.getString("name");
+                        String resolvedSchema = resolvedSchemas.getString(tableName);
+                        if (resolvedSchema != null) {
+                            table.put("schema", resolvedSchema);
+                            table.put("qualifiedName", resolvedSchema + "." + tableName);
+                        }
+                    }
+                }
                 
                 return new JsonObject()
-                    .put("tables", schemaMatch.getJsonArray("tables"))
+                    .put("tables", tables)
                     .put("views", schemaMatch.getJsonArray("views"))
                     .put("relationships", relationships)
                     .put("businessTerms", businessTerms)
+                    .put("resolvedSchemas", resolvedSchemas)
                     .put("confidence", schemaMatch.getDouble("confidence", 0.8));
             });
     }
     
     /**
-     * Deploy a client and track it
+     * Deploy a clients and track it
      */
     private Future<String> deployClient(String clientName, AbstractVerticle client) {
         Promise<String> promise = Promise.promise();
@@ -264,7 +349,7 @@ public class SchemaMilestone extends MilestoneManager {
             if (ar.succeeded()) {
                 String deploymentId = ar.result();
                 deploymentIds.put(clientName, deploymentId);
-                log("Deployed " + clientName + " client", 3);
+                log("Deployed " + clientName + " clients", 3);
                 promise.complete(deploymentId);
             } else {
                 promise.fail(ar.cause());
@@ -275,12 +360,12 @@ public class SchemaMilestone extends MilestoneManager {
     }
     
     /**
-     * Call a tool on a deployed client
+     * Call a tool on a deployed clients
      */
     private Future<JsonObject> callTool(String clientName, String toolName, JsonObject params) {
         Promise<JsonObject> promise = Promise.promise();
         
-        // Map client names to normalized server names
+        // Map clients names to normalized server names
         String serverName;
         switch (clientName) {
             case SCHEMA_CLIENT:
@@ -289,11 +374,14 @@ public class SchemaMilestone extends MilestoneManager {
             case BUSINESS_CLIENT:
                 serverName = "businessmapping";
                 break;
+            case SESSION_RESOLVER_CLIENT:
+                serverName = "sessionschemaresolver";
+                break;
             default:
                 serverName = clientName.toLowerCase();
         }
         
-        String address = "mcp.client." + serverName + "." + toolName;
+        String address = "mcp.clients." + serverName + "." + toolName;
         vertx.eventBus().<JsonObject>request(address, params, ar -> {
             if (ar.succeeded()) {
                 promise.complete(ar.result().body());
@@ -362,7 +450,7 @@ public class SchemaMilestone extends MilestoneManager {
             Promise<Void> promise = Promise.promise();
             vertx.undeploy(entry.getValue(), ar -> {
                 if (ar.succeeded()) {
-                    log("Undeployed " + entry.getKey() + " client", 3);
+                    log("Undeployed " + entry.getKey() + " clients", 3);
                     promise.complete();
                 } else {
                     promise.fail(ar.cause());

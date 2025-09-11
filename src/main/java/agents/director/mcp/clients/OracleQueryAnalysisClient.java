@@ -1,4 +1,4 @@
-package agents.director.mcp.client;
+package agents.director.mcp.clients;
 
 import agents.director.mcp.base.MCPClientBase;
 
@@ -10,14 +10,14 @@ import agents.director.mcp.base.MCPClientBase;
  * - analyze_query: Analyze a natural language query for SQL generation
  * - extract_query_tokens: Extract key tokens and patterns from queries
  * 
- * This client maintains a 1:1 relationship with the Oracle Query Analysis Server.
+ * This clients maintains a 1:1 relationship with the Oracle Query Analysis Server.
  */
 public class OracleQueryAnalysisClient extends MCPClientBase {
     
     private static final String SERVER_PATH = "/mcp/servers/oracle-query-analysis";
     
     /**
-     * Create a new Oracle Query Analysis client
+     * Create a new Oracle Query Analysis clients
      * @param baseUrl The base URL (e.g., http://localhost:8080)
      */
     public OracleQueryAnalysisClient(String baseUrl) {

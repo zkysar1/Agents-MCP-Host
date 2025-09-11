@@ -1,7 +1,6 @@
-package agents.director.mcp.client;
+package agents.director.mcp.clients;
 
 import agents.director.mcp.base.MCPClientBase;
-import io.vertx.core.Vertx;
 
 /**
  * MCP Client for Oracle Query Execution Server.
@@ -12,14 +11,14 @@ import io.vertx.core.Vertx;
  * - get_oracle_schema: Retrieve database schema information
  * - format_results: Convert query results to natural language
  * 
- * This client maintains a 1:1 relationship with the Oracle Query Execution Server.
+ * This clients maintains a 1:1 relationship with the Oracle Query Execution Server.
  */
 public class OracleQueryExecutionClient extends MCPClientBase {
     
     private static final String SERVER_PATH = "/mcp/servers/oracle-db";
     
     /**
-     * Create a new Oracle Query Execution client
+     * Create a new Oracle Query Execution clients
      * @param baseUrl The base URL (e.g., http://localhost:8080)
      */
     public OracleQueryExecutionClient(String baseUrl) {

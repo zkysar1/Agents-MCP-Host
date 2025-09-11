@@ -181,39 +181,12 @@ public class Driver {
       )
     );
 
-    // Deploy StrategyGenerationServer (Worker - uses LLM)
-    System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyGenerationServer");
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.StrategyGenerationServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
-      )
-    );
-
     // Deploy IntentAnalysisServer (Worker - uses LLM)
     System.out.println("[Driver] Deploying server " + (++serverCount) + ": IntentAnalysisServer");
     deploymentFutures.add(
       vertx.deployVerticle(
         "agents.director.mcp.servers.IntentAnalysisServer",
         new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
-      )
-    );
-
-    // Deploy StrategyOrchestratorServer (Regular - manages execution)
-    System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyOrchestratorServer");
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.StrategyOrchestratorServer",
-        new DeploymentOptions().setWorker(false)
-      )
-    );
-
-    // Deploy StrategyLearningServer (Regular - tracks metrics)
-    System.out.println("[Driver] Deploying server " + (++serverCount) + ": StrategyLearningServer");
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.StrategyLearningServer",
-        new DeploymentOptions().setWorker(false)
       )
     );
 

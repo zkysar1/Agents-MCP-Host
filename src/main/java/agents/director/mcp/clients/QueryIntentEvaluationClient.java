@@ -1,7 +1,6 @@
-package agents.director.mcp.client;
+package agents.director.mcp.clients;
 
 import agents.director.mcp.base.MCPClientBase;
-import io.vertx.core.Vertx;
 
 /**
  * MCP Client for Query Intent Evaluation Server.
@@ -12,14 +11,14 @@ import io.vertx.core.Vertx;
  * - select_tool_strategy: Select appropriate tools based on intent
  * - learn_from_success: Learn from successful query executions
  * 
- * This client maintains a 1:1 relationship with the Query Intent Evaluation Server.
+ * This clients maintains a 1:1 relationship with the Query Intent Evaluation Server.
  */
 public class QueryIntentEvaluationClient extends MCPClientBase {
     
     private static final String SERVER_PATH = "/mcp/servers/query-intent";
     
     /**
-     * Create a new Query Intent Evaluation client
+     * Create a new Query Intent Evaluation clients
      * @param baseUrl The base URL (e.g., http://localhost:8080)
      */
     public QueryIntentEvaluationClient(String baseUrl) {

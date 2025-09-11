@@ -2,7 +2,7 @@ package agents.director.hosts.milestones;
 
 import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
-import agents.director.mcp.client.OracleQueryExecutionClient;
+import agents.director.mcp.clients.OracleQueryExecutionClient;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
@@ -12,7 +12,7 @@ import java.util.*;
  * Milestone 5: SQL Execution
  * 
  * Executes the SQL statement and retrieves results from the database.
- * Uses OracleQueryExecutionServer by deploying MCP client directly.
+ * Uses OracleQueryExecutionServer by deploying MCP clients directly.
  * 
  * Output shared with user: Table of results in markdown format
  */
@@ -30,7 +30,7 @@ public class ExecutionMilestone extends MilestoneManager {
     public Future<Void> initialize() {
         Promise<Void> promise = Promise.promise();
         
-        // Deploy the MCP client directly
+        // Deploy the MCP clients directly
         OracleQueryExecutionClient executionClient = new OracleQueryExecutionClient(baseUrl);
         
         deployClient(EXECUTION_CLIENT, executionClient)
@@ -64,7 +64,7 @@ public class ExecutionMilestone extends MilestoneManager {
         
         log("Starting SQL execution: " + sql, 3);
         
-        // Execute the SQL using client directly
+        // Execute the SQL using clients directly
         long startTime = System.currentTimeMillis();
         
         executeQuery(sql)
@@ -234,7 +234,7 @@ public class ExecutionMilestone extends MilestoneManager {
     }
     
     /**
-     * Deploy a client and track it
+     * Deploy a clients and track it
      */
     private Future<String> deployClient(String clientName, AbstractVerticle client) {
         Promise<String> promise = Promise.promise();
@@ -243,7 +243,7 @@ public class ExecutionMilestone extends MilestoneManager {
             if (ar.succeeded()) {
                 String deploymentId = ar.result();
                 deploymentIds.put(clientName, deploymentId);
-                log("Deployed " + clientName + " client", 3);
+                log("Deployed " + clientName + " clients", 3);
                 promise.complete(deploymentId);
             } else {
                 promise.fail(ar.cause());
@@ -254,12 +254,12 @@ public class ExecutionMilestone extends MilestoneManager {
     }
     
     /**
-     * Call a tool on a deployed client
+     * Call a tool on a deployed clients
      */
     private Future<JsonObject> callTool(String clientName, String toolName, JsonObject params) {
         Promise<JsonObject> promise = Promise.promise();
         
-        // Map client names to normalized server names
+        // Map clients names to normalized server names
         String serverName;
         switch (clientName) {
             case EXECUTION_CLIENT:
@@ -269,7 +269,7 @@ public class ExecutionMilestone extends MilestoneManager {
                 serverName = clientName.toLowerCase();
         }
         
-        String address = "mcp.client." + serverName + "." + toolName;
+        String address = "mcp.clients." + serverName + "." + toolName;
         vertx.eventBus().<JsonObject>request(address, params, ar -> {
             if (ar.succeeded()) {
                 promise.complete(ar.result().body());
@@ -290,7 +290,7 @@ public class ExecutionMilestone extends MilestoneManager {
             Promise<Void> promise = Promise.promise();
             vertx.undeploy(entry.getValue(), ar -> {
                 if (ar.succeeded()) {
-                    log("Undeployed " + entry.getKey() + " client", 3);
+                    log("Undeployed " + entry.getKey() + " clients", 3);
                     promise.complete();
                 } else {
                     promise.fail(ar.cause());

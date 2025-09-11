@@ -1,7 +1,6 @@
-package agents.director.mcp.client;
+package agents.director.mcp.clients;
 
 import agents.director.mcp.base.MCPClientBase;
-import io.vertx.core.Vertx;
 
 /**
  * MCP Client for Session Schema Resolver Server.
@@ -14,14 +13,14 @@ import io.vertx.core.Vertx;
  * - discover_column_semantics: Discover column semantic information
  * - discover_sample_data: Get sample data for understanding
  * 
- * This client maintains a 1:1 relationship with the Session Schema Resolver Server.
+ * This clients maintains a 1:1 relationship with the Session Schema Resolver Server.
  */
 public class SessionSchemaResolverClient extends MCPClientBase {
     
     private static final String SERVER_PATH = "/mcp/servers/session-schema-resolver";
     
     /**
-     * Create a new Session Schema Resolver client
+     * Create a new Session Schema Resolver clients
      * @param baseUrl The base URL (e.g., http://localhost:8080)
      */
     public SessionSchemaResolverClient(String baseUrl) {

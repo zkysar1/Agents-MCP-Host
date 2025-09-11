@@ -15,9 +15,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static agents.director.Driver.logLevel;
 
 /**
- * Base class for all MCP client implementations.
+ * Base class for all MCP clients implementations.
  * Provides core MCP protocol functionality including tool discovery and invocation.
- * Each client maintains a 1:1 relationship with a single MCP server.
+ * Each clients maintains a 1:1 relationship with a single MCP server.
  */
 public abstract class MCPClientBase extends AbstractVerticle {
     
@@ -27,7 +27,7 @@ public abstract class MCPClientBase extends AbstractVerticle {
     protected final int port;
     protected final String basePath;
     
-    // HTTP client
+    // HTTP clients
     protected WebClient webClient;
     
     // Tool registry
@@ -46,7 +46,7 @@ public abstract class MCPClientBase extends AbstractVerticle {
     protected Long heartbeatTimerId;
     
     /**
-     * Constructor for MCP client base
+     * Constructor for MCP clients base
      * @param serverName Friendly name for the server
      * @param serverUrl Full URL including port and path
      */
@@ -79,7 +79,7 @@ public abstract class MCPClientBase extends AbstractVerticle {
     
     @Override
     public void start(Promise<Void> startPromise) {
-        // Create web client
+        // Create web clients
         WebClientOptions options = new WebClientOptions()
             .setDefaultHost("localhost")
             .setDefaultPort(port)
@@ -99,19 +99,19 @@ public abstract class MCPClientBase extends AbstractVerticle {
         // Discover tools on startup
         discoverTools().onComplete(ar -> {
             if (ar.succeeded()) {
-                vertx.eventBus().publish("log", serverName + " client started with " + tools.size() + " tools discovered,2," + getClass().getSimpleName() + ",MCP,System");
+                vertx.eventBus().publish("log", serverName + " clients started with " + tools.size() + " tools discovered,2," + getClass().getSimpleName() + ",MCP,System");
                 setupEventBusConsumers();
                 onClientReady();
                 startPromise.complete();
             } else {
-                vertx.eventBus().publish("log", serverName + " client failed to discover tools,0," + getClass().getSimpleName() + ",MCP,System");
+                vertx.eventBus().publish("log", serverName + " clients failed to discover tools,0," + getClass().getSimpleName() + ",MCP,System");
                 startPromise.fail(ar.cause());
             }
         });
     }
     
     /**
-     * Called when client is ready with tools loaded.
+     * Called when clients is ready with tools loaded.
      * Subclasses can override for additional initialization.
      */
     protected void onClientReady() {
@@ -125,11 +125,11 @@ public abstract class MCPClientBase extends AbstractVerticle {
     private void setupEventBusConsumers() {
         for (String toolName : tools.keySet()) {
             // Create event bus address for this tool
-            // Format: mcp.client.<servername>.<toolname>
+            // Format: mcp.clients.<servername>.<toolname>
             String normalizedServerName = serverName.toLowerCase()
                 .replace(" ", "")
                 .replace("_", "");
-            String address = "mcp.client." + normalizedServerName + "." + toolName;
+            String address = "mcp.clients." + normalizedServerName + "." + toolName;
             
             // Set up consumer that forwards to callTool
             vertx.eventBus().<JsonObject>consumer(address, message -> {
@@ -262,8 +262,8 @@ public abstract class MCPClientBase extends AbstractVerticle {
     }
     
     /**
-     * Check if this client is ready to handle requests
-     * @return true if the client is ready with loaded tools
+     * Check if this clients is ready to handle requests
+     * @return true if the clients is ready with loaded tools
      */
     public boolean isReady() {
         return toolsLoaded.get() && !tools.isEmpty();

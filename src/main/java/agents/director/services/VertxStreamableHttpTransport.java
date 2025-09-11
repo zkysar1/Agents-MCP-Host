@@ -33,7 +33,7 @@ public class VertxStreamableHttpTransport {
     private static final String MCP_PROTOCOL_VERSION = "2024-11-05";
     
     /**
-     * Create a new transport for client-side connections
+     * Create a new transport for clients-side connections
      */
     public VertxStreamableHttpTransport(Vertx vertx, String host, int port) {
         this.vertx = vertx;

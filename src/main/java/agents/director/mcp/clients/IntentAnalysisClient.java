@@ -1,7 +1,6 @@
-package agents.director.mcp.client;
+package agents.director.mcp.clients;
 
 import agents.director.mcp.base.MCPClientBase;
-import io.vertx.core.Vertx;
 
 /**
  * MCP Client for Intent Analysis Server.
@@ -12,14 +11,14 @@ import io.vertx.core.Vertx;
  * - intent_analysis__determine_output_format: Determine preferred output format
  * - intent_analysis__suggest_interaction_style: Suggest interaction patterns
  * 
- * This client maintains a 1:1 relationship with the Intent Analysis Server.
+ * This clients maintains a 1:1 relationship with the Intent Analysis Server.
  */
 public class IntentAnalysisClient extends MCPClientBase {
     
     private static final String SERVER_PATH = "/mcp/servers/intent-analysis";
     
     /**
-     * Create a new Intent Analysis client
+     * Create a new Intent Analysis clients
      * @param baseUrl The base URL (e.g., http://localhost:8080)
      */
     public IntentAnalysisClient(String baseUrl) {

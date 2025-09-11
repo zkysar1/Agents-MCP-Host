@@ -2,8 +2,8 @@ package agents.director.hosts.milestones;
 
 import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
-import agents.director.mcp.client.OracleQueryAnalysisClient;
-import agents.director.mcp.client.BusinessMappingClient;
+import agents.director.mcp.clients.OracleQueryAnalysisClient;
+import agents.director.mcp.clients.BusinessMappingClient;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
@@ -197,7 +197,7 @@ public class DataStatsMilestone extends MilestoneManager {
     }
     
     /**
-     * Deploy a client and track it
+     * Deploy a clients and track it
      */
     private Future<String> deployClient(String clientName, AbstractVerticle client) {
         Promise<String> promise = Promise.promise();
@@ -206,7 +206,7 @@ public class DataStatsMilestone extends MilestoneManager {
             if (ar.succeeded()) {
                 String deploymentId = ar.result();
                 deploymentIds.put(clientName, deploymentId);
-                log("Deployed " + clientName + " client", 3);
+                log("Deployed " + clientName + " clients", 3);
                 promise.complete(deploymentId);
             } else {
                 promise.fail(ar.cause());
@@ -217,7 +217,7 @@ public class DataStatsMilestone extends MilestoneManager {
     }
     
     /**
-     * Analyze table structure using the query analysis client
+     * Analyze table structure using the query analysis clients
      */
     private Future<JsonObject> analyzeTableStructure(String table, MilestoneContext context) {
         Promise<JsonObject> promise = Promise.promise();
@@ -229,7 +229,7 @@ public class DataStatsMilestone extends MilestoneManager {
         
         // Call the analysis tool
         vertx.eventBus().<JsonObject>request(
-            "mcp.client.oracle_query_analysis.oracle_query_analysis__analyze_query_requirements",
+            "mcp.clients.oracle_query_analysis.oracle_query_analysis__analyze_query_requirements",
             request,
             ar -> {
                 if (ar.succeeded()) {
@@ -250,7 +250,7 @@ public class DataStatsMilestone extends MilestoneManager {
     }
     
     /**
-     * Map business terms to columns using the business mapping client
+     * Map business terms to columns using the business mapping clients
      */
     private Future<JsonObject> mapBusinessTerms(String table, MilestoneContext context) {
         Promise<JsonObject> promise = Promise.promise();
@@ -262,7 +262,7 @@ public class DataStatsMilestone extends MilestoneManager {
         
         // Call the mapping tool
         vertx.eventBus().<JsonObject>request(
-            "mcp.client.business_mapping.business_mapping__map_terms_to_columns",
+            "mcp.clients.business_mapping.business_mapping__map_terms_to_columns",
             request,
             ar -> {
                 if (ar.succeeded()) {
@@ -287,7 +287,7 @@ public class DataStatsMilestone extends MilestoneManager {
             Promise<Void> promise = Promise.promise();
             vertx.undeploy(entry.getValue(), ar -> {
                 if (ar.succeeded()) {
-                    log("Undeployed " + entry.getKey() + " client", 3);
+                    log("Undeployed " + entry.getKey() + " clients", 3);
                     promise.complete();
                 } else {
                     promise.fail(ar.cause());

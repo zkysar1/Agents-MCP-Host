@@ -2,8 +2,8 @@ package agents.director.hosts.milestones;
 
 import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
-import agents.director.mcp.client.OracleSQLGenerationClient;
-import agents.director.mcp.client.OracleSQLValidationClient;
+import agents.director.mcp.clients.OracleSQLGenerationClient;
+import agents.director.mcp.clients.OracleSQLValidationClient;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
@@ -305,7 +305,7 @@ public class SQLGenerationMilestone extends MilestoneManager {
     }
     
     /**
-     * Deploy a client and track it
+     * Deploy a clients and track it
      */
     private Future<String> deployClient(String clientName, AbstractVerticle client) {
         Promise<String> promise = Promise.promise();
@@ -314,7 +314,7 @@ public class SQLGenerationMilestone extends MilestoneManager {
             if (ar.succeeded()) {
                 String deploymentId = ar.result();
                 deploymentIds.put(clientName, deploymentId);
-                log("Deployed " + clientName + " client", 3);
+                log("Deployed " + clientName + " clients", 3);
                 promise.complete(deploymentId);
             } else {
                 promise.fail(ar.cause());
@@ -325,12 +325,12 @@ public class SQLGenerationMilestone extends MilestoneManager {
     }
     
     /**
-     * Call a tool on a deployed client
+     * Call a tool on a deployed clients
      */
     private Future<JsonObject> callTool(String clientName, String toolName, JsonObject params) {
         Promise<JsonObject> promise = Promise.promise();
         
-        // Map client names to normalized server names
+        // Map clients names to normalized server names
         String serverName;
         switch (clientName) {
             case GENERATION_CLIENT:
@@ -343,7 +343,7 @@ public class SQLGenerationMilestone extends MilestoneManager {
                 serverName = clientName.toLowerCase();
         }
         
-        String address = "mcp.client." + serverName + "." + toolName;
+        String address = "mcp.clients." + serverName + "." + toolName;
         vertx.eventBus().<JsonObject>request(address, params, ar -> {
             if (ar.succeeded()) {
                 promise.complete(ar.result().body());
@@ -486,7 +486,7 @@ public class SQLGenerationMilestone extends MilestoneManager {
             Promise<Void> promise = Promise.promise();
             vertx.undeploy(entry.getValue(), ar -> {
                 if (ar.succeeded()) {
-                    log("Undeployed " + entry.getKey() + " client", 3);
+                    log("Undeployed " + entry.getKey() + " clients", 3);
                     promise.complete();
                 } else {
                     promise.fail(ar.cause());

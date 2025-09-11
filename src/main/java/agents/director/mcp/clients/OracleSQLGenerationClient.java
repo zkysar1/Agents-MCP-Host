@@ -1,7 +1,6 @@
-package agents.director.mcp.client;
+package agents.director.mcp.clients;
 
 import agents.director.mcp.base.MCPClientBase;
-import io.vertx.core.Vertx;
 
 /**
  * MCP Client for Oracle SQL Generation Server.
@@ -11,14 +10,14 @@ import io.vertx.core.Vertx;
  * - generate_oracle_sql: Generate SQL from natural language queries
  * - optimize_oracle_sql: Optimize existing SQL queries
  * 
- * This client maintains a 1:1 relationship with the Oracle SQL Generation Server.
+ * This clients maintains a 1:1 relationship with the Oracle SQL Generation Server.
  */
 public class OracleSQLGenerationClient extends MCPClientBase {
     
     private static final String SERVER_PATH = "/mcp/servers/oracle-sql-gen";
     
     /**
-     * Create a new Oracle SQL Generation client
+     * Create a new Oracle SQL Generation clients
      * @param baseUrl The base URL (e.g., http://localhost:8080)
      */
     public OracleSQLGenerationClient(String baseUrl) {

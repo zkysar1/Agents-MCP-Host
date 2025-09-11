@@ -49,7 +49,7 @@ public class MCPRegistryService extends AbstractVerticle {
     
     private EventBus eventBus;
     
-    // Inner class for client information
+    // Inner class for clients information
     private static class MCPClientInfo {
         String clientId;
         String serverName;
@@ -195,14 +195,14 @@ public class MCPRegistryService extends AbstractVerticle {
                 // Found an existing registration for the same server
                 // Check if it's the same clientId or a different one
                 if (existingClientId.equals(clientId)) {
-                    // Same client re-registering - just update heartbeat
+                    // Same clients re-registering - just update heartbeat
                     existingClient.lastHeartbeat = System.currentTimeMillis();
                     existingClient.active = true;
                     if (eventBusAddress != null && !eventBusAddress.equals(existingClient.eventBusAddress)) {
                         existingClient.eventBusAddress = eventBusAddress;
                     }
                     
-                    if (logLevel >= 4) vertx.eventBus().publish("log", "MCP client heartbeat via registration: " + serverName + " (" + clientId + "),4,MCPRegistryService,Registry,Client");
+                    if (logLevel >= 4) vertx.eventBus().publish("log", "MCP clients heartbeat via registration: " + serverName + " (" + clientId + "),4,MCPRegistryService,Registry,Client");
                     
                     message.reply(new JsonObject()
                         .put("status", "updated")
@@ -213,12 +213,12 @@ public class MCPRegistryService extends AbstractVerticle {
                     // Different clientId for same server - remove old entry
                     clients.remove(existingClientId);
                     deduplicationMap.remove(deduplicationKey);
-                    if (logLevel >= 2) vertx.eventBus().publish("log", "MCP client replaced due to new registration: " + serverName + " (old: " + existingClientId + ", new: " + clientId + "),2,MCPRegistryService,Registry,Client");
+                    if (logLevel >= 2) vertx.eventBus().publish("log", "MCP clients replaced due to new registration: " + serverName + " (old: " + existingClientId + ", new: " + clientId + "),2,MCPRegistryService,Registry,Client");
                 }
             }
         }
         
-        // Create client info
+        // Create clients info
         MCPClientInfo clientInfo = new MCPClientInfo(clientId, serverName, serverUrl, eventBusAddress);
         
         // Add any additional metadata
@@ -227,16 +227,16 @@ public class MCPRegistryService extends AbstractVerticle {
             clientInfo.metadata.putAll(metadata.getMap());
         }
         
-        // Register client
+        // Register clients
         clients.put(clientId, clientInfo);
         deduplicationMap.put(deduplicationKey, clientId); // Add to deduplication map
         totalRegistrations.incrementAndGet();
         updateActiveClientCount();
         
-        if (logLevel >= 2) vertx.eventBus().publish("log", "MCP client registered: " + serverName + " (" + clientId + "),2,MCPRegistryService,Registry,Client");
+        if (logLevel >= 2) vertx.eventBus().publish("log", "MCP clients registered: " + serverName + " (" + clientId + "),2,MCPRegistryService,Registry,Client");
         
         // Publish registration event
-        eventBus.publish("mcp.client.registered", new JsonObject()
+        eventBus.publish("mcp.clients.registered", new JsonObject()
             .put("clientId", clientId)
             .put("serverName", serverName)
             .put("timestamp", System.currentTimeMillis()));
@@ -279,10 +279,10 @@ public class MCPRegistryService extends AbstractVerticle {
             
             updateActiveClientCount();
             
-            if (logLevel >= 2) vertx.eventBus().publish("log", "MCP client deregistered: " + clientInfo.serverName + " (" + clientId + "),2,MCPRegistryService,Registry,Client");
+            if (logLevel >= 2) vertx.eventBus().publish("log", "MCP clients deregistered: " + clientInfo.serverName + " (" + clientId + "),2,MCPRegistryService,Registry,Client");
             
             // Publish deregistration event
-            eventBus.publish("mcp.client.deregistered", new JsonObject()
+            eventBus.publish("mcp.clients.deregistered", new JsonObject()
                 .put("clientId", clientId)
                 .put("serverName", clientInfo.serverName)
                 .put("timestamp", System.currentTimeMillis()));
@@ -306,7 +306,7 @@ public class MCPRegistryService extends AbstractVerticle {
                 if (!clientInfo.active) {
                     clientInfo.active = true;
                     updateActiveClientCount();
-                    if (logLevel >= 3) vertx.eventBus().publish("log", "MCP client reactivated: " + clientInfo.serverName + ",3,MCPRegistryService,Registry,Health");
+                    if (logLevel >= 3) vertx.eventBus().publish("log", "MCP clients reactivated: " + clientInfo.serverName + ",3,MCPRegistryService,Registry,Health");
                 }
             }
         }
@@ -326,7 +326,7 @@ public class MCPRegistryService extends AbstractVerticle {
         
         MCPClientInfo clientInfo = clients.get(clientId);
         if (clientInfo != null) {
-            // First, remove client from old tool mappings
+            // First, remove clients from old tool mappings
             if (clientInfo.tools != null) {
                 for (Object oldToolObj : clientInfo.tools) {
                     JsonObject oldTool = (JsonObject) oldToolObj;
@@ -346,7 +346,7 @@ public class MCPRegistryService extends AbstractVerticle {
             // Now update with new tools
             clientInfo.tools = tools;
             
-            // Update tool to client mappings
+            // Update tool to clients mappings
             for (Object toolObj : tools) {
                 JsonObject tool = (JsonObject) toolObj;
                 String toolName = tool.getString("name");
@@ -379,9 +379,9 @@ public class MCPRegistryService extends AbstractVerticle {
         boolean success = usage.getBoolean("success", true);
         long duration = usage.getLong("duration", 0L);
         
-        // Validate client exists
+        // Validate clients exists
         if (clientId != null && !clients.containsKey(clientId)) {
-            message.fail(404, "Unknown client: " + clientId);
+            message.fail(404, "Unknown clients: " + clientId);
             return;
         }
         
@@ -422,7 +422,7 @@ public class MCPRegistryService extends AbstractVerticle {
             .put("uptime", now - serviceStartTime)
             .put("timestamp", now);
         
-        // Add client breakdown by server type
+        // Add clients breakdown by server type
         JsonObject clientBreakdown = new JsonObject();
         clients.values().stream()
             .collect(Collectors.groupingBy(c -> c.serverName))
@@ -485,7 +485,7 @@ public class MCPRegistryService extends AbstractVerticle {
                 toolInfo.put("statistics", stats.toJson());
             }
             
-            // Add client details
+            // Add clients details
             JsonArray clientDetails = new JsonArray();
             for (String clientId : clientIds) {
                 MCPClientInfo clientInfo = clients.get(clientId);
@@ -612,7 +612,7 @@ public class MCPRegistryService extends AbstractVerticle {
             long now = System.currentTimeMillis();
             List<String> inactiveClients = new ArrayList<>();
             
-            // Use a snapshot of client IDs to avoid concurrent modification
+            // Use a snapshot of clients IDs to avoid concurrent modification
             Set<String> clientIds = new HashSet<>(clients.keySet());
             
             for (String clientId : clientIds) {
@@ -634,11 +634,11 @@ public class MCPRegistryService extends AbstractVerticle {
                 for (String clientId : inactiveClients) {
                     MCPClientInfo clientInfo = clients.get(clientId);
                     if (clientInfo != null) {
-                        if (logLevel >= 2) vertx.eventBus().publish("log", "MCP client inactive: " + clientInfo.serverName + " (no heartbeat for " + 
+                        if (logLevel >= 2) vertx.eventBus().publish("log", "MCP clients inactive: " + clientInfo.serverName + " (no heartbeat for " +
                             ((now - clientInfo.lastHeartbeat) / 1000) + "s),2,MCPRegistryService,Registry,Health");
                         
                         // Publish inactive event
-                        eventBus.publish("mcp.client.inactive", new JsonObject()
+                        eventBus.publish("mcp.clients.inactive", new JsonObject()
                             .put("clientId", clientId)
                             .put("serverName", clientInfo.serverName)
                             .put("lastHeartbeat", clientInfo.lastHeartbeat)

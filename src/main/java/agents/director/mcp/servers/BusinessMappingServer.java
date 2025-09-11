@@ -48,7 +48,7 @@ public class BusinessMappingServer extends MCPServerBase {
     private static final Map<String, List<String>> COMMON_TERM_PATTERNS = new HashMap<>();
     
     static {
-        COMMON_TERM_PATTERNS.put("customer", Arrays.asList("customer", "client", "account", "user", "member"));
+        COMMON_TERM_PATTERNS.put("customer", Arrays.asList("customer", "clients", "account", "user", "member"));
         COMMON_TERM_PATTERNS.put("order", Arrays.asList("order", "purchase", "transaction", "sale"));
         COMMON_TERM_PATTERNS.put("product", Arrays.asList("product", "item", "sku", "merchandise", "goods"));
         COMMON_TERM_PATTERNS.put("employee", Arrays.asList("employee", "staff", "worker", "personnel", "emp"));

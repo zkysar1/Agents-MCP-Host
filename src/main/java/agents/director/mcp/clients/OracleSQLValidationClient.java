@@ -1,7 +1,6 @@
-package agents.director.mcp.client;
+package agents.director.mcp.clients;
 
 import agents.director.mcp.base.MCPClientBase;
-import io.vertx.core.Vertx;
 
 /**
  * MCP Client for Oracle SQL Validation Server.
@@ -12,14 +11,14 @@ import io.vertx.core.Vertx;
  * - explain_oracle_error: Explain Oracle error codes
  * - explain_plan: Generate and explain query execution plans
  * 
- * This client maintains a 1:1 relationship with the Oracle SQL Validation Server.
+ * This clients maintains a 1:1 relationship with the Oracle SQL Validation Server.
  */
 public class OracleSQLValidationClient extends MCPClientBase {
     
     private static final String SERVER_PATH = "/mcp/servers/oracle-sql-val";
     
     /**
-     * Create a new Oracle SQL Validation client
+     * Create a new Oracle SQL Validation clients
      * @param baseUrl The base URL (e.g., http://localhost:8080)
      */
     public OracleSQLValidationClient(String baseUrl) {
