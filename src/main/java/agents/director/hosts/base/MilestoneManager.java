@@ -84,11 +84,55 @@ public abstract class MilestoneManager {
      * Publish a streaming event for this milestone
      */
     protected void publishStreamingEvent(String conversationId, String eventType, JsonObject data) {
-        String address = "streaming." + conversationId + "." + eventType;
+        String address;
+        
+        // Route milestone events to progress events that frontend expects
+        if (eventType.startsWith("milestone.")) {
+            // Convert milestone.* events to progress events with phase info
+            address = "streaming." + conversationId + ".progress";
+            data.put("phase", eventType.replace("milestone.", ""))
+                .put("step", milestoneName)
+                .put("message", "Milestone " + milestoneNumber + " completed");
+        } else {
+            // Keep standard event types as-is (tool.start, tool.complete, etc.)
+            address = "streaming." + conversationId + "." + eventType;
+        }
+        
         data.put("milestone", milestoneNumber)
             .put("milestone_name", milestoneName)
             .put("timestamp", System.currentTimeMillis());
         vertx.eventBus().publish(address, data);
+    }
+    
+    /**
+     * Publish a progress event with standard structure
+     */
+    protected void publishProgressEvent(String conversationId, String step, String message, JsonObject details) {
+        JsonObject progressData = new JsonObject()
+            .put("step", step)
+            .put("message", message)
+            .put("details", details != null ? details : new JsonObject());
+        publishStreamingEvent(conversationId, "progress", progressData);
+    }
+    
+    /**
+     * Publish tool start event
+     */
+    protected void publishToolStartEvent(String conversationId, String toolName, String description) {
+        JsonObject toolData = new JsonObject()
+            .put("tool", toolName)
+            .put("description", description != null ? description : "Calling " + toolName);
+        publishStreamingEvent(conversationId, "tool.start", toolData);
+    }
+    
+    /**
+     * Publish tool complete event
+     */
+    protected void publishToolCompleteEvent(String conversationId, String toolName, boolean success) {
+        JsonObject toolData = new JsonObject()
+            .put("tool", toolName)
+            .put("success", success);
+        publishStreamingEvent(conversationId, "tool.complete", toolData);
     }
     
     /**

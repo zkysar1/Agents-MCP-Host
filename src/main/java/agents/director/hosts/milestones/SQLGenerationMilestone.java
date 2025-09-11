@@ -60,6 +60,16 @@ public class SQLGenerationMilestone extends MilestoneManager {
         
         log("Starting SQL generation for intent: " + context.getIntent(), 3);
         
+        // Publish progress event at start
+        if (context.isStreaming() && context.getSessionId() != null) {
+            publishProgressEvent(context.getConversationId(),
+                "SQL Generation",
+                "Creating optimized SQL query...",
+                new JsonObject()
+                    .put("phase", "sql_generation")
+                    .put("intent", context.getIntent()));
+        }
+        
         // Build SQL generation context from previous milestones
         JsonObject sqlContext = buildSQLContext(context);
         
@@ -81,6 +91,17 @@ public class SQLGenerationMilestone extends MilestoneManager {
                     .put("is_valid", validation.getBoolean("is_valid", true))
                     .put("is_optimized", optimization.getBoolean("optimized", false))
                     .put("confidence", result.getDouble("confidence", 0.8)));
+                
+                // Publish SQL query event
+                if (context.isStreaming() && context.getSessionId() != null) {
+                    publishProgressEvent(context.getConversationId(),
+                        "SQL Query Ready",
+                        "Generated and validated SQL statement",
+                        new JsonObject()
+                            .put("phase", "sql_query")
+                            .put("query", generatedSql)
+                            .put("queryType", detectQueryType(generatedSql)));
+                }
                 
                 // Mark milestone as complete
                 context.completeMilestone(4);
@@ -475,6 +496,21 @@ public class SQLGenerationMilestone extends MilestoneManager {
         }
         
         return new JsonObject().put("matches", matches);
+    }
+    
+    /**
+     * Detect SQL query type from the statement
+     */
+    private String detectQueryType(String sql) {
+        String upperSQL = sql.trim().toUpperCase();
+        if (upperSQL.startsWith("SELECT")) return "SELECT";
+        if (upperSQL.startsWith("INSERT")) return "INSERT";
+        if (upperSQL.startsWith("UPDATE")) return "UPDATE";
+        if (upperSQL.startsWith("DELETE")) return "DELETE";
+        if (upperSQL.startsWith("CREATE")) return "CREATE";
+        if (upperSQL.startsWith("DROP")) return "DROP";
+        if (upperSQL.startsWith("ALTER")) return "ALTER";
+        return "OTHER";
     }
     
     @Override

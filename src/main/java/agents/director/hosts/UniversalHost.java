@@ -114,9 +114,19 @@ public class UniversalHost extends AbstractVerticle {
                 
                 // Publish milestone decision if streaming
                 if (streaming && sessionId != null) {
+                    // Publish as both milestone_decision and progress event
                     publishStreamingEvent(conversationId, "milestone_decision", new JsonObject()
                         .put("target_milestone", targetMilestone)
                         .put("description", MilestoneDecider.getMilestoneDescription(targetMilestone)));
+                    
+                    // Also publish as progress event so frontend sees it
+                    publishStreamingEvent(conversationId, "progress", new JsonObject()
+                        .put("step", "Processing Strategy")
+                        .put("message", "Selected milestone " + targetMilestone + ": " + 
+                            MilestoneDecider.getMilestoneDescription(targetMilestone))
+                        .put("details", new JsonObject()
+                            .put("phase", "milestone_decision")
+                            .put("target_milestone", targetMilestone)));
                 }
                 
                 // Step 2: Execute milestones sequentially
@@ -175,6 +185,17 @@ public class UniversalHost extends AbstractVerticle {
         }
         
         log("Executing milestone " + currentMilestone + ": " + milestone.getMilestoneName(), 3);
+        
+        // Publish milestone start event
+        if (context.isStreaming() && context.getSessionId() != null) {
+            publishStreamingEvent(context.getConversationId(), "progress", new JsonObject()
+                .put("step", "Milestone " + currentMilestone)
+                .put("message", "Starting: " + milestone.getMilestoneName())
+                .put("details", new JsonObject()
+                    .put("phase", "milestone_start")
+                    .put("milestone", currentMilestone)
+                    .put("milestone_name", milestone.getMilestoneName())));
+        }
         
         // Execute the milestone
         return milestone.execute(context)

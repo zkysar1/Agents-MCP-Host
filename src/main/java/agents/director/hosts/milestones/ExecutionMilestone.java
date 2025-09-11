@@ -64,6 +64,16 @@ public class ExecutionMilestone extends MilestoneManager {
         
         log("Starting SQL execution: " + sql, 3);
         
+        // Publish progress event at start
+        if (context.isStreaming() && context.getSessionId() != null) {
+            publishProgressEvent(context.getConversationId(),
+                "Executing Query",
+                "Running SQL query against database...",
+                new JsonObject()
+                    .put("phase", "sql_execution")
+                    .put("query", sql));
+        }
+        
         // Execute the SQL using clients directly
         long startTime = System.currentTimeMillis();
         
@@ -91,8 +101,19 @@ public class ExecutionMilestone extends MilestoneManager {
                 // Mark milestone as complete
                 context.completeMilestone(5);
                 
-                // Publish streaming event if applicable
+                // Publish SQL result event
                 if (context.isStreaming() && context.getSessionId() != null) {
+                    // First publish the SQL result progress event
+                    publishProgressEvent(context.getConversationId(),
+                        "Query Complete",
+                        "Retrieved " + rowCount + " rows in " + executionTime + "ms",
+                        new JsonObject()
+                            .put("phase", "sql_result")
+                            .put("rowCount", rowCount)
+                            .put("executionTime", executionTime)
+                            .put("preview", getResultPreview(rows)));
+                    
+                    // Then publish milestone complete
                     publishStreamingEvent(context.getConversationId(), "milestone.execution_complete",
                         getShareableResult(context));
                 }
@@ -279,6 +300,29 @@ public class ExecutionMilestone extends MilestoneManager {
         });
         
         return promise.future();
+    }
+    
+    /**
+     * Get preview of query results (first 5 rows)
+     */
+    private JsonArray getResultPreview(JsonArray results) {
+        if (results == null) return new JsonArray();
+        
+        JsonArray preview = new JsonArray();
+        int limit = Math.min(results.size(), 5);
+        
+        for (int i = 0; i < limit; i++) {
+            // Use getValue to avoid ClassCastException if not JsonObject
+            Object value = results.getValue(i);
+            if (value instanceof JsonObject) {
+                preview.add((JsonObject) value);
+            } else {
+                // If not JsonObject, wrap it
+                preview.add(new JsonObject().put("value", value));
+            }
+        }
+        
+        return preview;
     }
     
     @Override

@@ -390,6 +390,9 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         // Clean up the SQL
         sql = sql.replaceAll("```sql", "").replaceAll("```", "").trim();
         
+        // Remove trailing semicolons (JDBC doesn't need them and they can cause Oracle parsing errors)
+        sql = sql.replaceAll(";\\s*$", "").trim();
+        
         return sql;
     }
     
@@ -439,7 +442,10 @@ public class OracleSQLGenerationServer extends MCPServerBase {
             sql = addTimeframeCondition(sql, timeframe);
         }
         
-        return sql.trim();
+        // Ensure no trailing semicolons
+        sql = sql.replaceAll(";\\s*$", "").trim();
+        
+        return sql;
     }
     
     private JsonObject getExplainPlan(String sql) throws Exception {

@@ -60,6 +60,16 @@ public class IntentMilestone extends MilestoneManager {
         
         log("Starting intent extraction for query: " + context.getQuery(), 3);
         
+        // Publish progress event at start
+        if (context.isStreaming() && context.getSessionId() != null) {
+            publishProgressEvent(context.getConversationId(), 
+                "Analyzing Intent",
+                "Understanding what you're asking for...",
+                new JsonObject()
+                    .put("phase", "intent_analysis")
+                    .put("query", context.getQuery()));
+        }
+        
         // Build context for intent analysis
         JsonObject analysisContext = new JsonObject()
             .put("backstory", context.getBackstory())
@@ -67,20 +77,23 @@ public class IntentMilestone extends MilestoneManager {
             .put("history", new JsonArray());
         
         // Perform full intent analysis using the clients directly
-        fullIntentAnalysis(context.getQuery(), analysisContext)
+        fullIntentAnalysis(context, context.getQuery(), analysisContext)
             .onSuccess(result -> {
                 // Extract key intent information
                 JsonObject extractedIntent = result.getJsonObject("extractedIntent");
                 JsonObject intentEvaluation = result.getJsonObject("intentEvaluation");
                 JsonObject outputFormat = result.getJsonObject("outputFormat");
                 
-                // Get the primary intent
-                String primaryIntent = extractedIntent.getString("primary_intent", "");
-                String intentType = intentEvaluation.getString("intent_type", "query");
+                // Get the primary intent from the result within extractedIntent
+                JsonObject intentResult = extractedIntent != null ? 
+                    extractedIntent.getJsonObject("result", new JsonObject()) : new JsonObject();
+                String primaryIntent = intentResult.getString("primary_intent", "");
+                String intentType = intentEvaluation != null ? 
+                    intentEvaluation.getString("intent_type", "query") : "query";
                 
                 // Build a clear intent statement for the user
                 String intentStatement = buildIntentStatement(primaryIntent, intentType, 
-                                                              extractedIntent, intentEvaluation);
+                                                              extractedIntent, intentEvaluation, context.getQuery());
                 
                 // Update context with intent information
                 context.setIntent(intentStatement);
@@ -126,41 +139,46 @@ public class IntentMilestone extends MilestoneManager {
     /**
      * Perform full intent analysis on a query (replaces manager method)
      */
-    private Future<JsonObject> fullIntentAnalysis(String query, JsonObject context) {
+    private Future<JsonObject> fullIntentAnalysis(MilestoneContext milestoneContext, String query, JsonObject context) {
         // Extract primary and secondary intents first
-        Future<JsonObject> intentExtractFuture = callTool(ANALYSIS_CLIENT, 
+        Future<JsonObject> intentExtractFuture = callToolWithEvents(milestoneContext, ANALYSIS_CLIENT, 
             "intent_analysis__extract_intent",
             new JsonObject()
                 .put("query", query)
                 .put("conversation_history", context != null ? 
-                    context.getJsonArray("history") : new JsonArray()));
+                    context.getJsonArray("history") : new JsonArray()),
+            "Extracting user intent from query");
         
         // Chain the results - use extracted intent for output format determination
         Future<JsonObject> chainedAnalysis = intentExtractFuture.compose(extractedIntent -> {
             // Evaluate query intent in parallel with output format
-            Future<JsonObject> evaluationFuture = callTool(EVALUATION_CLIENT, 
+            Future<JsonObject> evaluationFuture = callToolWithEvents(milestoneContext, EVALUATION_CLIENT, 
                 "evaluate_query_intent",
                 new JsonObject()
                     .put("query", query)
                     .put("conversationHistory", context != null ? 
-                        context.getJsonArray("history") : new JsonArray()));
+                        context.getJsonArray("history") : new JsonArray()),
+                "Evaluating query intent");
             
             // Determine output format using the extracted intent
-            Future<JsonObject> outputFormatFuture = callTool(ANALYSIS_CLIENT, 
+            Future<JsonObject> outputFormatFuture = callToolWithEvents(milestoneContext, ANALYSIS_CLIENT, 
                 "intent_analysis__determine_output_format",
                 new JsonObject()
                     .put("intent", extractedIntent.getJsonObject("result"))
                     .put("query", query)
                     .put("user_preferences", context != null ? 
-                        context.getJsonObject("userProfile") : new JsonObject()));
+                        context.getJsonObject("userProfile") : new JsonObject()),
+                "Determining output format");
             
             // Suggest interaction style
-            Future<JsonObject> interactionStyleFuture = callTool(ANALYSIS_CLIENT,
+            Future<JsonObject> interactionStyleFuture = callToolWithEvents(milestoneContext, ANALYSIS_CLIENT,
                 "intent_analysis__suggest_interaction_style",
                 new JsonObject()
-                    .put("query", query)
-                    .put("user_profile", context != null ?
-                        context.getJsonObject("userProfile") : new JsonObject()));
+                    .put("intent", extractedIntent.getJsonObject("result"))
+                    .put("user_expertise", context != null && context.getJsonObject("userProfile") != null ?
+                        context.getJsonObject("userProfile").getString("expertise_level", "intermediate") : "intermediate")
+                    .put("query_complexity", 0.5f),
+                "Suggesting interaction style");
             
             return CompositeFuture.all(
                 Future.succeededFuture(extractedIntent),
@@ -229,6 +247,31 @@ public class IntentMilestone extends MilestoneManager {
         return promise.future();
     }
     
+    /**
+     * Call a tool with streaming event publishing
+     */
+    private Future<JsonObject> callToolWithEvents(MilestoneContext context, String clientName, 
+                                                  String toolName, JsonObject params, String description) {
+        if (context.isStreaming() && context.getSessionId() != null) {
+            // Publish tool start event
+            publishToolStartEvent(context.getConversationId(), toolName, description);
+            
+            return callTool(clientName, toolName, params)
+                .map(result -> {
+                    // Publish tool complete event AND return result
+                    publishToolCompleteEvent(context.getConversationId(), toolName, true);
+                    return result;  // MUST return the result!
+                })
+                .recover(err -> {
+                    // Publish tool error event AND re-throw
+                    publishToolCompleteEvent(context.getConversationId(), toolName, false);
+                    return Future.failedFuture(err);  // MUST propagate the error!
+                });
+        } else {
+            return callTool(clientName, toolName, params);
+        }
+    }
+    
     @Override
     public JsonObject getShareableResult(MilestoneContext context) {
         return new JsonObject()
@@ -245,9 +288,20 @@ public class IntentMilestone extends MilestoneManager {
      * Build a clear, user-friendly intent statement
      */
     private String buildIntentStatement(String primaryIntent, String intentType,
-                                       JsonObject extractedIntent, JsonObject evaluation) {
+                                       JsonObject extractedIntent, JsonObject evaluation, String query) {
         if (primaryIntent == null || primaryIntent.isEmpty()) {
-            return "process your query";
+            // Try to extract from the intent result or use a better fallback
+            if (extractedIntent != null && extractedIntent.getJsonObject("result") != null) {
+                String fallbackIntent = extractedIntent.getJsonObject("result").getString("primary_intent");
+                if (fallbackIntent != null && !fallbackIntent.isEmpty()) {
+                    primaryIntent = fallbackIntent;
+                }
+            }
+            
+            // If still empty, use the simple intent extraction
+            if (primaryIntent == null || primaryIntent.isEmpty()) {
+                return extractSimpleIntent(query);
+            }
         }
         
         // Clean up and format the primary intent

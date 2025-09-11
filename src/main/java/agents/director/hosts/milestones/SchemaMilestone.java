@@ -243,10 +243,20 @@ public class SchemaMilestone extends MilestoneManager {
         
         // Then match to Oracle schema
         Future<JsonObject> schemaMatchFuture = businessTermsFuture
-            .compose(mappedTerms -> callTool(SCHEMA_CLIENT, "match_oracle_schema",
-                new JsonObject()
-                    .put("query", query)
-                    .put("businessTerms", mappedTerms)));
+            .compose(mappedTerms -> {
+                // Create analysis object for match_oracle_schema
+                JsonObject analysis = new JsonObject()
+                    .put("intent", searchContext.getString("intent", ""))
+                    .put("queryType", searchContext.getString("intent_type", "query"))
+                    .put("entities", extractTermsFromQuery(query))
+                    .put("businessTerms", mappedTerms);
+                
+                return callTool(SCHEMA_CLIENT, "match_oracle_schema",
+                    new JsonObject()
+                        .put("analysis", analysis)
+                        .put("maxSuggestions", 5)
+                        .put("confidenceThreshold", 0.5));
+            });
         
         // Infer relationships if tables found
         Future<JsonObject> relationshipsFuture = schemaMatchFuture

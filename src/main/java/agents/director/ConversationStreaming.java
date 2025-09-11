@@ -386,7 +386,13 @@ public class ConversationStreaming extends AbstractVerticle {
         context.response().exceptionHandler(err -> {
             finalEnhancedSession.responseEnded = true;
             cleanupSession(finalSessionId);
-            vertx.eventBus().publish("log", "Connection error for session: " + finalSessionId + " - " + err.getMessage() + ",0,ConversationStreaming,Session,Error");
+            // Log as debug (level 3) for normal connection closes, error (level 0) for real errors
+            String errMsg = err.getMessage() != null ? err.getMessage() : err.toString();
+            boolean isNormalClose = errMsg.contains("Connection was closed") || errMsg.contains("Connection reset");
+            int errLogLevel = isNormalClose ? 3 : 0;
+            String logType = isNormalClose ? "Cleanup" : "Error";
+            vertx.eventBus().publish("log", "Connection ended for session: " + finalSessionId + " - " + errMsg + 
+                "," + errLogLevel + ",ConversationStreaming,Session," + logType);
         });
         
         // Build message for host

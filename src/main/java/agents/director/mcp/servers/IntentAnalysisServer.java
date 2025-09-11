@@ -172,6 +172,13 @@ public class IntentAnalysisServer extends MCPServerBase {
         JsonArray conversationHistory = arguments.getJsonArray("conversation_history", new JsonArray());
         JsonObject userProfile = arguments.getJsonObject("user_profile", new JsonObject());
         
+        // Validate required query parameter
+        if (query == null || query.trim().isEmpty()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, 
+                "Query parameter is required and cannot be empty");
+            return;
+        }
+        
         if (logLevel >= 3) vertx.eventBus().publish("log", "Extracting intent from query: " + query + ",3,IntentAnalysisServer,Intent,Extract");
         
         // If LLM is available, use it for deep analysis
@@ -365,6 +372,19 @@ public class IntentAnalysisServer extends MCPServerBase {
         String query = arguments.getString("query");
         JsonObject userPreferences = arguments.getJsonObject("user_preferences", new JsonObject());
         
+        // Validate required parameters
+        if (intent == null) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, 
+                "Intent parameter is required for determining output format");
+            return;
+        }
+        
+        if (query == null || query.trim().isEmpty()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, 
+                "Query parameter is required and cannot be empty");
+            return;
+        }
+        
         String primaryIntent = intent.getString("primary_intent", "answer_question");
         
         if (logLevel >= 3) vertx.eventBus().publish("log", "Determining output format for intent: " + primaryIntent + ",3,IntentAnalysisServer,Format,Determine");
@@ -374,11 +394,13 @@ public class IntentAnalysisServer extends MCPServerBase {
             DEFAULT_OUTPUT_FORMATS.get("answer_question")).copy();
         
         // Apply user preferences
-        if (userPreferences.containsKey("always_include_sql")) {
-            format.put("include_sql", userPreferences.getBoolean("always_include_sql"));
-        }
-        if (userPreferences.containsKey("preferred_verbosity")) {
-            format.put("verbosity", userPreferences.getString("preferred_verbosity"));
+        if (userPreferences != null && !userPreferences.isEmpty()) {
+            if (userPreferences.containsKey("always_include_sql")) {
+                format.put("include_sql", userPreferences.getBoolean("always_include_sql"));
+            }
+            if (userPreferences.containsKey("preferred_verbosity")) {
+                format.put("verbosity", userPreferences.getString("preferred_verbosity"));
+            }
         }
         
         // Adjust based on query characteristics
@@ -410,6 +432,12 @@ public class IntentAnalysisServer extends MCPServerBase {
         JsonObject intent = arguments.getJsonObject("intent");
         String userExpertise = arguments.getString("user_expertise", "intermediate");
         Float queryComplexity = arguments.getFloat("query_complexity", 0.5f);
+        
+        // Validate intent parameter
+        if (intent == null) {
+            vertx.eventBus().publish("log", "Intent parameter is missing in suggestInteractionStyle,1,IntentAnalysisServer,Style,Warning");
+            intent = new JsonObject().put("primary_intent", "answer_question");
+        }
         
         if (logLevel >= 3) vertx.eventBus().publish("log", "Suggesting interaction style for expertise: " + userExpertise + ",3,IntentAnalysisServer,Style,Suggest");
         
