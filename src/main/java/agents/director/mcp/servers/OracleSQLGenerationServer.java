@@ -32,14 +32,8 @@ public class OracleSQLGenerationServer extends MCPServerBase {
     private LlmAPIService llmService;
     
     // SQL generation templates and patterns
-    private static final Map<String, String> QUERY_TEMPLATES = Map.of(
-        "count", "SELECT COUNT(*) AS total_count FROM {table} {where}",
-        "sum", "SELECT SUM({column}) AS total_sum FROM {table} {where}",
-        "average", "SELECT AVG({column}) AS average_value FROM {table} {where}",
-        "list", "SELECT {columns} FROM {table} {where} {orderby}",
-        "distinct", "SELECT DISTINCT {columns} FROM {table} {where}",
-        "groupby", "SELECT {columns}, {aggregation} FROM {table} {where} GROUP BY {groupby} {having}"
-    );
+    // REMOVED: QUERY_TEMPLATES - template-based generation violates single source of truth
+    // All SQL generation happens through LLM to ensure consistent behavior
     
     public OracleSQLGenerationServer() {
         super("OracleSQLGenerationServer", "/mcp/servers/oracle-sql-gen");
@@ -138,6 +132,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         JsonObject analysis = arguments.getJsonObject("analysis");
         JsonObject schemaMatches = arguments.getJsonObject("schemaMatches");
         JsonObject fullSchema = arguments.getJsonObject("fullSchema"); // NEW: Extract full schema
+        JsonArray whereClauseHints = arguments.getJsonArray("whereClauseHints"); // Extract WHERE clause hints
         boolean includeEnums = arguments.getBoolean("includeEnums", true);
         String maxComplexity = arguments.getString("maxComplexity", "complex");
         
@@ -149,16 +144,14 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         
         executeBlocking(Promise.<JsonObject>promise(), promise -> {
             try {
-                JsonObject result = new JsonObject();
-                String sql;
-                
-                if (llmService.isInitialized()) {
-                    // Use LLM for SQL generation
-                    sql = generateSQLWithLLM(analysis, schemaMatches, fullSchema, includeEnums, maxComplexity);
-                } else {
-                    // Fall back to template-based generation
-                    sql = generateSQLWithTemplates(analysis, schemaMatches);
+                // LLM is REQUIRED - no fallbacks (single source of truth)
+                if (!llmService.isInitialized()) {
+                    throw new RuntimeException("LLM service is not initialized. SQL generation requires LLM to ensure consistent FULL OUTER JOIN behavior and WHERE clause processing.");
                 }
+                
+                JsonObject result = new JsonObject();
+                // Generate SQL using LLM (single source of truth)
+                String sql = generateSQLWithLLM(analysis, schemaMatches, fullSchema, whereClauseHints, includeEnums, maxComplexity);
                 
                 result.put("sql", sql);
                 result.put("dialect", "Oracle");
@@ -167,8 +160,8 @@ public class OracleSQLGenerationServer extends MCPServerBase {
                 
                 // Add metadata about the generation
                 JsonObject metadata = new JsonObject()
-                    .put("method", llmService.isInitialized() ? "llm" : "template")
-                    .put("confidence", llmService.isInitialized() ? 0.85 : 0.65)
+                    .put("method", "llm")  // Single source of truth - always LLM
+                    .put("confidence", 0.85)
                     .put("tables", extractTablesFromSQL(sql))
                     .put("hasJoins", sql.toUpperCase().contains("JOIN"))
                     .put("hasAggregation", hasAggregation(sql));
@@ -247,7 +240,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
     }
     
     private String generateSQLWithLLM(JsonObject analysis, JsonObject schemaMatches, JsonObject fullSchema,
-                                     boolean includeEnums, String maxComplexity) throws Exception {
+                                     JsonArray whereClauseHints, boolean includeEnums, String maxComplexity) throws Exception {
         String systemPrompt = """
             You are an Oracle SQL expert. Generate precise, efficient Oracle SQL queries based on:
             1. The user's analyzed intent
@@ -257,7 +250,22 @@ public class OracleSQLGenerationServer extends MCPServerBase {
             
             Rules:
             - Use proper Oracle syntax (e.g., ROWNUM for limiting rows)
-            - Include appropriate JOINs when multiple tables are needed
+            - CRITICAL: If whereClauseHints are provided, USE THEM EXACTLY AS SPECIFIED
+            - The hints contain ACTUAL DATABASE VALUES - use these instead of generic patterns
+            - IMPORTANT: When a query asks "how many X" where X matches a table name:
+              * This means COUNT rows in that table, NOT search for the word X
+              * DO NOT create WHERE clauses that search for entity names in their own ID columns
+              * Example: "How many orders" means COUNT(*) FROM ORDERS, not WHERE order_id LIKE '%orders%'
+            - For aggregate queries (COUNT, SUM, AVG) that return a single row, DO NOT add ORDER BY
+            - CRITICAL JOIN RULES - DEFAULT TO FULL OUTER JOIN:
+              * Always use FULL OUTER JOIN as the default when joining tables
+              * FULL OUTER JOIN preserves ALL data from both tables (better more data than less)
+              * Only use INNER JOIN if explicitly required for specific query logic
+              * Use LEFT JOIN only when you specifically need all from left table and matching from right
+              * Syntax: table1 FULL OUTER JOIN table2 ON condition
+              * Example: ORDERS o FULL OUTER JOIN ORDER_DETAILS od ON o.ORDER_ID = od.ORDER_ID
+              * For multiple joins: Use FULL OUTER JOIN for each unless specific logic requires otherwise
+              * This ensures no data is accidentally excluded from results
             - Add WHERE clauses for any filters mentioned
             - Use appropriate aggregate functions when needed
             - Consider enum translations if includeEnums is true
@@ -271,6 +279,19 @@ public class OracleSQLGenerationServer extends MCPServerBase {
             - Check the actual column names in the schema before using them
             - For location filters, check what location columns actually exist (e.g., CITY, COUNTRY_ID)
             - For status filters, check if there's a STATUS_ID that needs joining with enum tables
+            
+            ENUM HANDLING - CRITICAL:
+            - When whereClauseHints contain type: "enum_code", the term is a description (like "pending")
+            - The hint's value field contains the actual enum code to use in the WHERE clause
+            - If hint contains enum_table, enum_id_column, and enum_desc_column, use those for the JOIN:
+              * enum_table: The actual enum table name (e.g., ORDER_STATUS_ENUM)
+              * enum_id_column: The ID column in the enum table (e.g., STATUS_ID)
+              * enum_desc_column: The description column in the enum table (e.g., STATUS_DESCRIPTION)
+            - Example with metadata: If hint has enum_table="ORDER_STATUS_ENUM", enum_id_column="STATUS_ID", enum_desc_column="STATUS_DESCRIPTION":
+                FULL OUTER JOIN ORDER_STATUS_ENUM e ON o.STATUS_ID = e.STATUS_ID
+                WHERE UPPER(e.STATUS_DESCRIPTION) = 'PENDING' OR o.STATUS_ID = hint_value
+            - If enum metadata is not provided, try to infer the enum table name from the column name
+            - This ensures the query works whether the user provides a code or description
             
             IMPORTANT: Always use case-insensitive comparisons:
             - For string comparisons, use UPPER() function: UPPER(column) = 'VALUE'
@@ -293,6 +314,25 @@ public class OracleSQLGenerationServer extends MCPServerBase {
             
             If the required columns don't exist for the query, generate the best possible SQL with available columns.
             
+            WHERE CLAUSE GENERATION with PROVIDED HINTS:
+            - CRITICAL: WHERE clause hints contain ACTUAL DATA VALUES from the database
+            - Each hint contains: term, table, column, operator, values[], condition, confidence
+            - For enum hints (type="enum_code"), also check for: enum_table, enum_id_column, enum_desc_column
+            - USE THE EXACT VALUES and COLUMN NAMES from the hints, not generic patterns!
+            - Apply hints with confidence > 0.6 INTELLIGENTLY:
+              * Skip hints that don't make semantic sense
+              * Focus on location, status, and date filters
+              * Ignore hints about searching for entity names in their own tables
+            - MANDATORY: If a hint references a table, you MUST JOIN that table!
+            - The 'requiredTables' field lists ALL tables that MUST be joined
+            - For location filters, check BOTH customer and shipping locations
+            - Combine multiple conditions with OR when they represent alternatives
+            - Example: If hint has values ['San Francisco', 'Los Angeles'] for CUSTOMERS.CITY:
+              1. First JOIN the CUSTOMERS table: FULL OUTER JOIN CUSTOMERS c ON o.CUSTOMER_ID = c.CUSTOMER_ID
+              2. Then use the condition: c.CITY IN ('San Francisco', 'Los Angeles')
+            - DO NOT reference a table.column without joining that table first!
+            - Apply ALL location hints consistently - if one uses actual cities, ALL should
+            
             Respond with ONLY the SQL query, no explanations.
             """;
         
@@ -309,26 +349,39 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         for (int i = 0; i < matches.size(); i++) {
             JsonObject match = matches.getJsonObject(i);
             JsonObject table = match.getJsonObject("table");
+            
+            // Extract schema and table name
+            String schema = table.getString("schema", OracleConnectionManager.getDefaultSchema());
+            String tableName = table.getString("tableName");
+            
+            // Use fully qualified name if schema is provided
+            String fullTableName = schema != null && !schema.isEmpty() ? 
+                schema + "." + tableName : tableName;
+            
             tablesInfo.add(new JsonObject()
-                .put("tableName", table.getString("tableName"))
+                .put("tableName", fullTableName)  // Include schema prefix
+                .put("schema", schema)
                 .put("relevantColumns", match.getJsonArray("relevantColumns", new JsonArray()))
                 .put("confidence", match.getDouble("confidence")));
         }
         
         // If no matches, add common table hints based on entities
         if (tablesInfo.isEmpty()) {
+            String defaultSchema = OracleConnectionManager.getDefaultSchema();
             JsonArray entities = analysis.getJsonArray("entities", new JsonArray());
             for (int i = 0; i < entities.size(); i++) {
                 String entity = entities.getString(i).toLowerCase();
                 if (entity.contains("order")) {
                     tablesInfo.add(new JsonObject()
-                        .put("tableName", "ORDERS")
+                        .put("tableName", defaultSchema + ".ORDERS")  // Use DEFAULT_SCHEMA
+                        .put("schema", defaultSchema)
                         .put("hint", "Common table for order data")
                         .put("confidence", 0.7));
                 }
                 if (entity.contains("customer")) {
                     tablesInfo.add(new JsonObject()
-                        .put("tableName", "CUSTOMERS")
+                        .put("tableName", defaultSchema + ".CUSTOMERS")  // Use DEFAULT_SCHEMA
+                        .put("schema", defaultSchema)
                         .put("hint", "Common table for customer data")
                         .put("confidence", 0.7));
                 }
@@ -361,6 +414,29 @@ public class OracleSQLGenerationServer extends MCPServerBase {
                 analysis.getJsonArray("entities", new JsonArray()).toString().toLowerCase().contains("city")) {
                 promptData.put("locationQueryHint", "This is a location-based query. Check both customer location (CUSTOMERS.CITY) and shipping location (ORDERS.SHIPPING_CITY) fields.");
             }
+        }
+        
+        // Add WHERE clause hints if provided
+        if (whereClauseHints != null && !whereClauseHints.isEmpty()) {
+            promptData.put("whereClauseHints", whereClauseHints);
+            
+            // Extract required tables from hints
+            Set<String> requiredTables = new HashSet<>();
+            for (int i = 0; i < whereClauseHints.size(); i++) {
+                JsonObject hint = whereClauseHints.getJsonObject(i);
+                String table = hint.getString("table");
+                if (table != null && !table.isEmpty()) {
+                    requiredTables.add(table);
+                }
+            }
+            
+            promptData.put("requiredTables", new JsonArray(new ArrayList<>(requiredTables)));
+            promptData.put("whereClauseInstructions", 
+                "CRITICAL: USE THE EXACT VALUES FROM WHERE CLAUSE HINTS! " +
+                "Each hint contains actual data values sampled from the database. " +
+                "Use the 'values' array or 'condition' field directly. " +
+                "DO NOT generate generic LIKE patterns when specific values are provided! " +
+                "IMPORTANT: You MUST JOIN all tables listed in 'requiredTables' - these tables are referenced in WHERE clause hints!");
         }
         
         // Add complexity constraints
@@ -396,57 +472,8 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         return sql;
     }
     
-    private String generateSQLWithTemplates(JsonObject analysis, JsonObject schemaMatches) {
-        String queryType = analysis.getString("queryType", "retrieval");
-        JsonArray aggregations = analysis.getJsonArray("aggregations", new JsonArray());
-        JsonArray matches = schemaMatches.getJsonArray("matches", new JsonArray());
-        
-        if (matches.isEmpty()) {
-            throw new RuntimeException("No schema matches found to generate SQL");
-        }
-        
-        // Get the best match
-        JsonObject bestMatch = matches.getJsonObject(0);
-        JsonObject table = bestMatch.getJsonObject("table");
-        String tableName = table.getString("tableName");
-        JsonArray columns = table.getJsonArray("columns");
-        JsonArray relevantColumns = bestMatch.getJsonArray("relevantColumns", new JsonArray());
-        
-        String sql;
-        
-        if (queryType.equals("aggregation") && !aggregations.isEmpty()) {
-            String aggType = aggregations.getString(0).toLowerCase();
-            String template = QUERY_TEMPLATES.getOrDefault(aggType, QUERY_TEMPLATES.get("count"));
-            
-            String columnToAggregate = relevantColumns.isEmpty() ? "*" : relevantColumns.getString(0);
-            sql = template.replace("{table}", tableName)
-                         .replace("{column}", columnToAggregate)
-                         .replace("{where}", "");
-        } else {
-            // Default to list query
-            String columnsStr = relevantColumns.isEmpty() ? "*" : 
-                relevantColumns.stream()
-                    .map(Object::toString)
-                    .collect(Collectors.joining(", "));
-            
-            sql = QUERY_TEMPLATES.get("list")
-                .replace("{columns}", columnsStr)
-                .replace("{table}", tableName)
-                .replace("{where}", "")
-                .replace("{orderby}", "");
-        }
-        
-        // Add timeframe WHERE clause if present
-        String timeframe = analysis.getString("timeframe");
-        if (timeframe != null && !timeframe.isEmpty()) {
-            sql = addTimeframeCondition(sql, timeframe);
-        }
-        
-        // Ensure no trailing semicolons
-        sql = sql.replaceAll(";\\s*$", "").trim();
-        
-        return sql;
-    }
+    // REMOVED: generateSQLWithTemplates method - violates single source of truth
+    // SQL generation ONLY happens through LLM to ensure consistent FULL OUTER JOIN behavior
     
     private JsonObject getExplainPlan(String sql) throws Exception {
         try {
@@ -615,43 +642,8 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         }
     }
     
-    private String addTimeframeCondition(String sql, String timeframe) {
-        String condition = "";
-        
-        switch (timeframe.toLowerCase()) {
-            case "today":
-                condition = "TRUNC(date_column) = TRUNC(SYSDATE)";
-                break;
-            case "yesterday":
-                condition = "TRUNC(date_column) = TRUNC(SYSDATE - 1)";
-                break;
-            case "last week":
-                condition = "date_column >= TRUNC(SYSDATE) - 7";
-                break;
-            case "last month":
-                condition = "date_column >= ADD_MONTHS(TRUNC(SYSDATE), -1)";
-                break;
-            case "this month":
-                condition = "TRUNC(date_column, 'MM') = TRUNC(SYSDATE, 'MM')";
-                break;
-            case "last year":
-                condition = "TRUNC(date_column, 'YYYY') = TRUNC(SYSDATE, 'YYYY') - 1";
-                break;
-            case "this year":
-                condition = "TRUNC(date_column, 'YYYY') = TRUNC(SYSDATE, 'YYYY')";
-                break;
-        }
-        
-        if (!condition.isEmpty()) {
-            if (sql.toUpperCase().contains("WHERE")) {
-                sql += " AND " + condition;
-            } else {
-                sql += " WHERE " + condition;
-            }
-        }
-        
-        return sql;
-    }
+    // REMOVED: addTimeframeCondition - only used by template generation which violates single source of truth
+    // Timeframe handling now happens in LLM prompt for consistent behavior
     
     private String analyzeComplexity(String sql) {
         String upperSQL = sql.toUpperCase();

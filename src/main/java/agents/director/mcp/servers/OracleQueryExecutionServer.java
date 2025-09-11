@@ -6,6 +6,7 @@ import agents.director.mcp.base.MCPResponse;
 import io.vertx.core.Promise;
 import io.vertx.core.Future;
 import io.vertx.core.DeploymentOptions;
+import io.vertx.core.eventbus.DeliveryOptions;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.RoutingContext;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 
@@ -522,38 +524,59 @@ public class OracleQueryExecutionServer extends MCPServerBase {
     }
     
     /**
-     * Call the SessionSchemaResolverServer to resolve a single table
+     * Resolve schema for a table using SessionSchemaResolverServer via event bus
      */
     private String resolveSchemaForTable(String tableName, String sessionId) {
+        // Since we're in a Worker thread, we can block for the response
+        CompletableFuture<String> future = new CompletableFuture<>();
+        
+        JsonObject request = new JsonObject()
+            .put("tableName", tableName)
+            .put("sessionId", sessionId != null ? sessionId : "default");
+        
+        // Request resolution via event bus with timeout
+        vertx.eventBus().<JsonObject>request(
+            "session.schema.resolver.resolve",
+            request,
+            new DeliveryOptions().setSendTimeout(2000), // 2 second timeout
+            ar -> {
+                if (ar.succeeded() && ar.result().body() != null) {
+                    String schema = ar.result().body().getString("schema");
+                    if (schema != null) {
+                        vertx.eventBus().publish("log", 
+                            "Resolved schema for " + tableName + ": " + schema + 
+                            ",3,OracleQueryExecutionServer,SchemaResolution,Success");
+                        future.complete(schema);
+                    } else {
+                        // Resolver returned null, use DEFAULT_SCHEMA
+                        String defaultSchema = OracleConnectionManager.getDefaultSchema();
+                        vertx.eventBus().publish("log", 
+                            "No schema resolved for " + tableName + ", using default: " + defaultSchema + 
+                            ",3,OracleQueryExecutionServer,SchemaResolution,Default");
+                        future.complete(defaultSchema);
+                    }
+                } else {
+                    // Event bus error or timeout, fail open with DEFAULT_SCHEMA
+                    String defaultSchema = OracleConnectionManager.getDefaultSchema();
+                    vertx.eventBus().publish("log", 
+                        "Schema resolution failed for " + tableName + ", using default: " + defaultSchema + 
+                        (ar.cause() != null ? " (" + ar.cause().getMessage() + ")" : "") +
+                        ",2,OracleQueryExecutionServer,SchemaResolution,Fallback");
+                    future.complete(defaultSchema);
+                }
+            }
+        );
+        
         try {
-            // Create request to schema resolver
-            JsonObject request = new JsonObject()
-                .put("action", "call")
-                .put("tool", "resolve_table_schema")
-                .put("arguments", new JsonObject()
-                    .put("tableName", tableName)
-                    .put("sessionId", sessionId));
-            
-            // Schema resolution is handled by the host/manager layer, not directly between servers
-            // Log info and continue without schema resolution at this level
-            CompletableFuture<String> future = new CompletableFuture<>();
-            
-            vertx.eventBus().publish("log", 
-                "Schema resolution delegated to host orchestration layer for table: " + tableName + 
-                ",3,OracleQueryExecutionServer,SchemaResolution,Info");
-            
-            // Return null to indicate no schema resolution available at this level
-            // The OracleExecutionManager handles schema resolution properly
-            future.complete(null);
-            
-            // Wait for result (acceptable in Worker thread)
-            return future.get();
-            
+            // Block and wait for result (acceptable in Worker thread)
+            return future.get(3, TimeUnit.SECONDS);
         } catch (Exception e) {
+            // Timeout or error, return DEFAULT_SCHEMA
+            String defaultSchema = OracleConnectionManager.getDefaultSchema();
             vertx.eventBus().publish("log", 
-                "Error resolving schema for " + tableName + ": " + e.getMessage() + 
+                "Schema resolution exception for " + tableName + ", using default: " + defaultSchema + 
                 ",1,OracleQueryExecutionServer,SchemaResolution,Error");
-            return null;
+            return defaultSchema;
         }
     }
     

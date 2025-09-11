@@ -305,7 +305,8 @@ public class SchemaMilestone extends MilestoneManager {
                     .put("intent", searchContext.getString("intent", ""))
                     .put("queryType", searchContext.getString("intent_type", "query"))
                     .put("entities", extractTermsFromQuery(query))
-                    .put("businessTerms", mappedTerms);
+                    .put("businessTerms", mappedTerms)
+                    .put("originalQuery", query);  // Include original query for term extraction
                 
                 return callTool(SCHEMA_CLIENT, "match_oracle_schema",
                     new JsonObject()

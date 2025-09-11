@@ -9,6 +9,7 @@ import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.concurrent.TimeUnit;
 import oracle.ucp.admin.UniversalConnectionPoolManager;
 import oracle.ucp.admin.UniversalConnectionPoolManagerImpl;
 
@@ -136,12 +137,16 @@ public class Driver {
             )
     );
 
-    // Deploy OracleSchemaIntelligenceServer (Worker)
+    // Deploy OracleSchemaIntelligenceServer (Worker - with extended timeout for schema loading)
     System.out.println("[Driver] Deploying server " + (++serverCount) + ": OracleSchemaIntelligenceServer");
     deploymentFutures.add(
             vertx.deployVerticle(
                     "agents.director.mcp.servers.OracleSchemaIntelligenceServer",
-                    new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
+                    new DeploymentOptions()
+                        .setWorker(true)
+                        .setWorkerPoolSize(1)
+                        .setMaxWorkerExecuteTime(10)  // 10 minutes for schema loading
+                        .setMaxWorkerExecuteTimeUnit(TimeUnit.MINUTES)
             )
     );
 

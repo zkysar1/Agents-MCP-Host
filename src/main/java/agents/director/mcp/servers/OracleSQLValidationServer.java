@@ -249,7 +249,24 @@ public class OracleSQLValidationServer extends MCPServerBase {
                     return;
                 }
                 
-                // 2. Schema validation (parse and check tables/columns exist)
+                // 2. Check for missing JOINs (tables referenced but not joined)
+                JsonObject joinCheck = performJoinValidation(sql);
+                validationSteps.add(joinCheck);
+                
+                if (!joinCheck.getBoolean("passed", false)) {
+                    result.put("validationSteps", validationSteps);
+                    result.put("errors", joinCheck.getJsonArray("errors", new JsonArray()));
+                    result.put("valid", false);
+                    
+                    if (suggestFixes) {
+                        result.put("suggestedFix", joinCheck.getString("suggestedFix", ""));
+                    }
+                    
+                    promise.complete(result);
+                    return;
+                }
+                
+                // 3. Schema validation (parse and check tables/columns exist)
                 JsonObject schemaCheck = performSchemaValidation(sql);
                 validationSteps.add(schemaCheck);
                 
@@ -445,6 +462,111 @@ public class OracleSQLValidationServer extends MCPServerBase {
         }
         
         return check;
+    }
+    
+    /**
+     * Check for tables referenced in WHERE/SELECT but not in FROM/JOIN
+     */
+    private JsonObject performJoinValidation(String sql) {
+        JsonObject check = new JsonObject()
+            .put("step", "join_validation")
+            .put("description", "Check all referenced tables are properly joined");
+        
+        JsonArray errors = new JsonArray();
+        String upperSQL = sql.toUpperCase();
+        
+        try {
+            // Extract all table.column references using regex
+            Set<String> referencedTables = new HashSet<>();
+            Pattern tableColumnPattern = Pattern.compile("\\b([A-Z_][A-Z0-9_]*)\\.([A-Z_][A-Z0-9_]*)\\b");
+            Matcher matcher = tableColumnPattern.matcher(upperSQL);
+            
+            while (matcher.find()) {
+                String tableName = matcher.group(1);
+                // Skip common keywords that might look like table names
+                if (!isKeyword(tableName)) {
+                    referencedTables.add(tableName);
+                }
+            }
+            
+            // Extract tables from FROM and JOIN clauses
+            Set<String> joinedTables = new HashSet<>();
+            
+            // Extract main table from FROM clause
+            Pattern fromPattern = Pattern.compile("FROM\\s+([A-Z_][A-Z0-9_]*)(?:\\s+([A-Z][A-Z0-9]*))?");
+            Matcher fromMatcher = fromPattern.matcher(upperSQL);
+            if (fromMatcher.find()) {
+                String tableName = fromMatcher.group(1);
+                joinedTables.add(tableName);
+                // Check for alias
+                if (fromMatcher.group(2) != null) {
+                    joinedTables.add(fromMatcher.group(2));
+                }
+            }
+            
+            // Extract tables from JOIN clauses
+            Pattern joinPattern = Pattern.compile("(?:INNER|LEFT|RIGHT|FULL|CROSS)?\\s*(?:OUTER)?\\s*JOIN\\s+([A-Z_][A-Z0-9_]*)(?:\\s+([A-Z][A-Z0-9]*))?");
+            Matcher joinMatcher = joinPattern.matcher(upperSQL);
+            while (joinMatcher.find()) {
+                String tableName = joinMatcher.group(1);
+                joinedTables.add(tableName);
+                // Check for alias
+                if (joinMatcher.group(2) != null) {
+                    joinedTables.add(joinMatcher.group(2));
+                }
+            }
+            
+            // Find tables that are referenced but not joined
+            Set<String> missingTables = new HashSet<>(referencedTables);
+            missingTables.removeAll(joinedTables);
+            
+            if (!missingTables.isEmpty()) {
+                for (String table : missingTables) {
+                    errors.add(new JsonObject()
+                        .put("type", "missing_join")
+                        .put("table", table)
+                        .put("message", "Table '" + table + "' is referenced but not joined in the query"));
+                }
+                
+                // Generate suggested fix
+                StringBuilder suggestion = new StringBuilder();
+                suggestion.append("Add missing JOIN clauses for: ");
+                suggestion.append(String.join(", ", missingTables));
+                suggestion.append(". For example, if you need CUSTOMERS table, add: ");
+                suggestion.append("FULL OUTER JOIN CUSTOMERS c ON o.CUSTOMER_ID = c.CUSTOMER_ID");
+                
+                check.put("suggestedFix", suggestion.toString());
+                check.put("passed", false);
+            } else {
+                check.put("passed", true);
+            }
+            
+        } catch (Exception e) {
+            errors.add(new JsonObject()
+                .put("type", "validation_error")
+                .put("message", "Error during JOIN validation: " + e.getMessage()));
+            check.put("passed", false);
+        }
+        
+        if (!errors.isEmpty()) {
+            check.put("errors", errors);
+        }
+        
+        return check;
+    }
+    
+    /**
+     * Check if a word is a SQL keyword (to avoid false positives)
+     */
+    private boolean isKeyword(String word) {
+        Set<String> keywords = Set.of(
+            "SELECT", "FROM", "WHERE", "JOIN", "ON", "AND", "OR", "NOT",
+            "IN", "EXISTS", "BETWEEN", "LIKE", "IS", "NULL", "AS",
+            "ORDER", "GROUP", "BY", "HAVING", "UNION", "ALL", "DISTINCT",
+            "CASE", "WHEN", "THEN", "ELSE", "END", "UPPER", "LOWER",
+            "COUNT", "SUM", "AVG", "MAX", "MIN", "ROWNUM", "SYSDATE"
+        );
+        return keywords.contains(word.toUpperCase());
     }
     
     private JsonObject performSchemaValidation(String sql) {

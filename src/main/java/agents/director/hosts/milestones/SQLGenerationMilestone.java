@@ -4,6 +4,7 @@ import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
 import agents.director.mcp.clients.OracleSQLGenerationClient;
 import agents.director.mcp.clients.OracleSQLValidationClient;
+import agents.director.mcp.clients.BusinessMappingClient;
 import agents.director.services.LlmAPIService;
 import agents.director.services.OracleConnectionManager;
 import io.vertx.core.*;
@@ -23,9 +24,11 @@ public class SQLGenerationMilestone extends MilestoneManager {
     
     private static final String GENERATION_CLIENT = "generation";
     private static final String VALIDATION_CLIENT = "validation";
+    private static final String BUSINESS_CLIENT = "business";
     private final Map<String, String> deploymentIds = new HashMap<>();
     private LlmAPIService llmService;
     private OracleConnectionManager connectionManager;
+    private BusinessMappingClient businessMappingClient;
     
     public SQLGenerationMilestone(Vertx vertx, String baseUrl) {
         super(vertx, baseUrl, 4, "SQLGenerationMilestone", 
@@ -45,9 +48,11 @@ public class SQLGenerationMilestone extends MilestoneManager {
         
         OracleSQLGenerationClient generationClient = new OracleSQLGenerationClient(baseUrl);
         OracleSQLValidationClient validationClient = new OracleSQLValidationClient(baseUrl);
+        businessMappingClient = new BusinessMappingClient(baseUrl);
         
         deploymentFutures.add(deployClient(GENERATION_CLIENT, generationClient));
         deploymentFutures.add(deployClient(VALIDATION_CLIENT, validationClient));
+        deploymentFutures.add(deployClient(BUSINESS_CLIENT, businessMappingClient));
         
         CompositeFuture.all(deploymentFutures)
             .onSuccess(v -> {
@@ -346,11 +351,18 @@ public class SQLGenerationMilestone extends MilestoneManager {
         JsonObject schemaMatches = buildSchemaMatches(sqlContext);
         
         // Generate SQL with proper parameters
-        Future<JsonObject> generationFuture = callTool(GENERATION_CLIENT, "generate_oracle_sql",
-            new JsonObject()
-                .put("analysis", analysis)
-                .put("schemaMatches", schemaMatches)
-                .put("includeEnums", true));
+        JsonObject toolParams = new JsonObject()
+            .put("analysis", analysis)
+            .put("schemaMatches", schemaMatches)
+            .put("includeEnums", true);
+        
+        // Add WHERE clause hints if available
+        JsonArray whereClauseHints = sqlContext.getJsonArray("where_clause_hints");
+        if (whereClauseHints != null && !whereClauseHints.isEmpty()) {
+            toolParams.put("whereClauseHints", whereClauseHints);
+        }
+        
+        Future<JsonObject> generationFuture = callTool(GENERATION_CLIENT, "generate_oracle_sql", toolParams);
         
         // Validate the generated SQL
         Future<JsonObject> validationFuture = generationFuture
@@ -697,7 +709,9 @@ public class SQLGenerationMilestone extends MilestoneManager {
         }
         
         // Collect all high-confidence column mappings
+        @SuppressWarnings("rawtypes")  // Vert.x CompositeFuture.all() requires raw Future type
         List<Future> hintFutures = new ArrayList<>();
+        List<JsonObject> mappingsList = new ArrayList<>();  // Track original mappings for each future
         
         for (int i = 0; i < termMappings.size(); i++) {
             JsonObject termMapping = termMappings.getJsonObject(i);
@@ -713,6 +727,35 @@ public class SQLGenerationMilestone extends MilestoneManager {
                         String table = colMapping.getString("table");
                         String column = colMapping.getString("column");
                         
+                        // Skip nonsensical hints where term matches table name for ID columns
+                        // E.g., don't search for "orders" in ORDERS.ORDER_ID or ORDERS.STATUS_ID
+                        if (isNonsensicalHint(term, table, column)) {
+                            log("Skipping nonsensical hint: searching for '" + term + "' in " + 
+                                table + "." + column, 3);
+                            continue;
+                        }
+                        
+                        // Also skip if term is just the table name and column is an enum-like column
+                        boolean isEnumColumn = column.toUpperCase().endsWith("_ID") || 
+                                             column.toUpperCase().endsWith("_CODE") ||
+                                             column.toUpperCase().contains("STATUS");
+                        boolean isEntityTerm = term.equalsIgnoreCase(table) || 
+                                             term.equalsIgnoreCase(table + "s") ||
+                                             (table + "s").equalsIgnoreCase(term);
+                        
+                        if (isEnumColumn && isEntityTerm) {
+                            log("Skipping entity term '" + term + "' for enum column " + 
+                                table + "." + column, 3);
+                            continue;
+                        }
+                        
+                        // Create mapping object for tracking
+                        JsonObject mapping = new JsonObject()
+                            .put("term", term)
+                            .put("table", table)
+                            .put("column", column)
+                            .put("confidence", confidence);
+                        
                         // Sample actual data from this column
                         Future<JsonObject> sampleDataFuture = sampleColumnValues(table, column);
                         
@@ -722,28 +765,462 @@ public class SQLGenerationMilestone extends MilestoneManager {
                         });
                         
                         hintFutures.add(hintFuture);
+                        mappingsList.add(mapping);  // Keep mapping aligned with future
                     }
                 }
             }
         }
         
-        // Combine all hints
-        CompositeFuture.join(hintFutures)
-            .onSuccess(result -> {
-                for (int i = 0; i < result.size(); i++) {
-                    JsonObject hint = result.resultAt(i);
-                    if (hint != null && !hint.isEmpty()) {
-                        allHints.add(hint);
+        // Combine all hints - use .all() to get partial results even if some fail
+        CompositeFuture.all(hintFutures)
+            .onComplete(ar -> {
+                // Track failed mappings for enum resolution
+                List<JsonObject> failedMappings = new ArrayList<>();
+                
+                // Process all results, even if some failed
+                for (int i = 0; i < hintFutures.size(); i++) {
+                    @SuppressWarnings("unchecked")  // We know these are Future<JsonObject>
+                    Future<JsonObject> hintFuture = (Future<JsonObject>) hintFutures.get(i);
+                    JsonObject originalMapping = mappingsList.get(i);
+                    
+                    if (hintFuture.succeeded()) {
+                        JsonObject hint = hintFuture.result();
+                        if (hint != null && !hint.isEmpty()) {
+                            allHints.add(hint);
+                        }
+                    } else {
+                        Throwable cause = hintFuture.cause();
+                        String errorMsg = cause != null ? cause.getMessage() : "Unknown error";
+                        log("Hint generation failed for mapping: " + originalMapping.encode() + " - " + errorMsg, 2);
+                        
+                        // Track failed mappings for potential enum resolution
+                        if (errorMsg.contains("invalid identifier")) {
+                            failedMappings.add(originalMapping);
+                        }
                     }
                 }
-                promise.complete(allHints);
-            })
-            .onFailure(err -> {
-                log("Failed to generate WHERE clause hints: " + err.getMessage(), 1);
-                promise.complete(new JsonArray()); // Return empty on failure
+                
+                // If we have failed mappings, try enum resolution
+                if (!failedMappings.isEmpty()) {
+                    log("Attempting enum resolution for " + failedMappings.size() + " failed mappings", 2);
+                    attemptEnumResolution(failedMappings)
+                        .onComplete(enumAr -> {
+                            if (enumAr.succeeded()) {
+                                JsonArray enumHints = enumAr.result();
+                                for (int i = 0; i < enumHints.size(); i++) {
+                                    allHints.add(enumHints.getJsonObject(i));
+                                }
+                                log("Added " + enumHints.size() + " enum-resolved hints", 2);
+                            }
+                            
+                            // Complete with whatever hints we have
+                            if (allHints.isEmpty()) {
+                                log("WARNING: No WHERE clause hints generated - query may return unfiltered results!", 1);
+                            } else {
+                                log("Generated " + allHints.size() + " total WHERE clause hints", 2);
+                            }
+                            promise.complete(allHints);
+                        });
+                } else {
+                    // No failed mappings, complete normally
+                    if (allHints.isEmpty()) {
+                        log("WARNING: No WHERE clause hints generated - query may return unfiltered results!", 1);
+                    } else {
+                        log("Generated " + allHints.size() + " WHERE clause hints", 2);
+                    }
+                    promise.complete(allHints);
+                }
             });
         
         return promise.future();
+    }
+    
+    /**
+     * Attempt to resolve enum values when direct column sampling fails
+     */
+    private Future<JsonArray> attemptEnumResolution(List<JsonObject> failedMappings) {
+        Promise<JsonArray> promise = Promise.promise();
+        JsonArray resolvedHints = new JsonArray();
+        
+        if (failedMappings.isEmpty()) {
+            return Future.succeededFuture(resolvedHints);
+        }
+        
+        // Step 1: Call translate_enum for each failed mapping
+        List<Future> enumFutures = new ArrayList<>();
+        
+        for (JsonObject mapping : failedMappings) {
+            String term = mapping.getString("term");
+            String table = mapping.getString("table");
+            String column = mapping.getString("column");
+            
+            // Try to translate the term as an enum value
+            enumFutures.add(translateEnumValue(term, table, column));
+        }
+        
+        // Step 2: Combine results
+        CompositeFuture.all(enumFutures)
+            .onComplete(ar -> {
+                for (int i = 0; i < enumFutures.size(); i++) {
+                    @SuppressWarnings("unchecked")
+                    Future<JsonObject> enumFuture = (Future<JsonObject>) enumFutures.get(i);
+                    if (enumFuture.succeeded()) {
+                        JsonObject enumResult = enumFuture.result();
+                        if (enumResult != null && !enumResult.isEmpty()) {
+                            resolvedHints.add(enumResult);
+                        }
+                    }
+                }
+                
+                // Step 3: If still no hints, try intelligent column discovery
+                if (resolvedHints.isEmpty()) {
+                    discoverAlternativeColumns(failedMappings)
+                        .onComplete(discoverAr -> {
+                            if (discoverAr.succeeded()) {
+                                resolvedHints.addAll(discoverAr.result());
+                            }
+                            promise.complete(resolvedHints);
+                        });
+                } else {
+                    promise.complete(resolvedHints);
+                }
+            });
+        
+        return promise.future();
+    }
+    
+    /**
+     * Translate an enum value for a discovered column
+     */
+    private Future<JsonObject> translateEnumForColumn(String term, String table, String column) {
+        Promise<JsonObject> promise = Promise.promise();
+        
+        // First, try to find an enum table for this column
+        String enumTable = findEnumTableForColumn(table, column);
+        
+        if (enumTable != null) {
+            // Query the enum table directly
+            String query = String.format(
+                "SELECT %s as code FROM %s WHERE UPPER(STATUS_CODE) = '%s' OR UPPER(DESCRIPTION) = '%s'",
+                column.replace("_ID", "_ID"),  // Assuming ID column name pattern
+                enumTable,
+                term.toUpperCase(),
+                term.toUpperCase()
+            );
+            
+            connectionManager.executeQuery(query)
+                .onSuccess(results -> {
+                    if (!results.isEmpty()) {
+                        String code = results.getJsonObject(0).getValue("CODE").toString();
+                        JsonObject hint = new JsonObject()
+                            .put("term", term)
+                            .put("table", table)
+                            .put("column", column)
+                            .put("operator", "=")
+                            .put("values", new JsonArray().add(code))
+                            .put("condition", "OR")
+                            .put("enumResolved", true)
+                            .put("confidence", 0.9);
+                        promise.complete(hint);
+                    } else {
+                        // Try BusinessMapping service as fallback
+                        translateEnumValue(term, table, column)
+                            .onSuccess(promise::complete)
+                            .onFailure(err -> promise.complete(new JsonObject()));
+                    }
+                })
+                .onFailure(err -> {
+                    // Try BusinessMapping service as fallback
+                    translateEnumValue(term, table, column)
+                        .onSuccess(promise::complete)
+                        .onFailure(e -> promise.complete(new JsonObject()));
+                });
+        } else {
+            // No enum table found, try BusinessMapping service
+            translateEnumValue(term, table, column)
+                .onSuccess(promise::complete)
+                .onFailure(err -> promise.complete(new JsonObject()));
+        }
+        
+        return promise.future();
+    }
+    
+    /**
+     * Find enum table for a column dynamically
+     */
+    private String findEnumTableForColumn(String table, String column) {
+        // Common patterns for enum table names
+        if (column.toUpperCase().endsWith("_ID")) {
+            String baseName = column.substring(0, column.length() - 3).toUpperCase();  // Remove _ID
+            String tableUpper = table.toUpperCase();
+            
+            // Try to find enum table dynamically
+            String checkQuery = String.format(
+                "SELECT table_name FROM user_tables WHERE " +
+                "(table_name LIKE '%%%s_ENUM' OR " +
+                " table_name LIKE '%%%s_LOOKUP' OR " +
+                " table_name LIKE '%%%s_REF') " +
+                "AND ROWNUM = 1",
+                baseName, baseName, baseName
+            );
+            
+            try {
+                JsonArray results = connectionManager.executeQuery(checkQuery)
+                    .toCompletionStage()
+                    .toCompletableFuture()
+                    .get(1000, java.util.concurrent.TimeUnit.MILLISECONDS);
+                
+                if (!results.isEmpty()) {
+                    return results.getJsonObject(0).getString("TABLE_NAME");
+                }
+            } catch (Exception e) {
+                // Ignore and use pattern-based fallback
+            }
+            
+            // Return most likely pattern
+            return tableUpper.substring(0, Math.min(tableUpper.length(), 5)) + "_" + baseName + "_ENUM";
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Translate an enum value using the BusinessMapping service
+     */
+    private Future<JsonObject> translateEnumValue(String term, String table, String column) {
+        Promise<JsonObject> promise = Promise.promise();
+        
+        // First get enum metadata to know the actual column names
+        JsonObject metadataRequest = new JsonObject()
+            .put("table", table)
+            .put("column", column);
+        
+        businessMappingClient.callTool("get_enum_metadata", metadataRequest)
+            .compose(metadataResponse -> {
+                JsonArray enumTables = metadataResponse.getJsonArray("enumTables", new JsonArray());
+                
+                // Extract enum table info if available
+                JsonObject enumTableInfo = null;
+                for (int i = 0; i < enumTables.size(); i++) {
+                    JsonObject tableInfo = enumTables.getJsonObject(i);
+                    // Look for matching enum table (e.g., ORDER_STATUS_ENUM for STATUS_ID column)
+                    if (tableInfo.getString("table", "").contains(column.replace("_ID", "").replace("_CODE", ""))) {
+                        enumTableInfo = tableInfo;
+                        break;
+                    }
+                }
+                
+                // Now translate the enum value
+                JsonObject translateRequest = new JsonObject()
+                    .put("table", table)
+                    .put("column", column)
+                    .put("values", new JsonArray().add(term))
+                    .put("direction", "description_to_code");
+                
+                final JsonObject finalEnumTableInfo = enumTableInfo;
+                return businessMappingClient.callTool("translate_enum", translateRequest)
+                    .map(translateResponse -> {
+                        JsonArray translations = translateResponse.getJsonArray("translations", new JsonArray());
+                        if (!translations.isEmpty()) {
+                            JsonObject translation = translations.getJsonObject(0);
+                            String code = translation.getString("translated");
+                            
+                            // Create a hint with the enum code and metadata
+                            JsonObject hint = new JsonObject()
+                                .put("term", term)
+                                .put("table", table)
+                                .put("column", findEnumColumn(table, column))  // Try to find the actual enum column
+                                .put("value", code)
+                                .put("type", "enum_code")
+                                .put("confidence", 0.9);
+                            
+                            // Add enum table metadata if found
+                            if (finalEnumTableInfo != null) {
+                                hint.put("enum_table", finalEnumTableInfo.getString("table"))
+                                    .put("enum_id_column", finalEnumTableInfo.getString("idColumn"))
+                                    .put("enum_desc_column", finalEnumTableInfo.getString("descriptionColumn"));
+                            }
+                            
+                            return hint;
+                        }
+                        return new JsonObject();  // Empty result
+                    });
+            })
+            .onSuccess(hint -> promise.complete(hint))
+            .onFailure(err -> {
+                log("WARNING: Failed to translate enum value '" + term + "': " + err.getMessage(), 1);
+                // Return empty result but log the warning - don't hide the issue
+                promise.complete(new JsonObject());
+            });
+        
+        return promise.future();
+    }
+    
+    /**
+     * Find the actual enum column name (e.g., STATUS_ID instead of STATUS)
+     */
+    private String findEnumColumn(String table, String originalColumn) {
+        // Common patterns for enum columns
+        String[] patterns = {
+            originalColumn + "_ID",
+            originalColumn + "_CODE",
+            originalColumn.replace("_NAME", "_ID"),
+            originalColumn.replace("_DESC", "_ID"),
+            originalColumn.replace("_DESCRIPTION", "_ID")
+        };
+        
+        // For now, try the most common pattern
+        // In a full implementation, we'd query the database schema
+        return originalColumn.endsWith("_ID") ? originalColumn : originalColumn + "_ID";
+    }
+    
+    /**
+     * Discover alternative columns when the mapped column doesn't exist
+     */
+    private Future<JsonArray> discoverAlternativeColumns(List<JsonObject> failedMappings) {
+        Promise<JsonArray> promise = Promise.promise();
+        JsonArray hints = new JsonArray();
+        
+        // For each failed mapping, try to find alternative columns
+        List<Future> discoveryFutures = new ArrayList<>();
+        
+        for (JsonObject mapping : failedMappings) {
+            String term = mapping.getString("term");
+            String table = mapping.getString("table");
+            String column = mapping.getString("column");
+            
+            // Try common column variations
+            discoveryFutures.add(tryAlternativeColumn(term, table, column));
+        }
+        
+        CompositeFuture.all(discoveryFutures)
+            .onComplete(ar -> {
+                for (int i = 0; i < discoveryFutures.size(); i++) {
+                    @SuppressWarnings("unchecked")
+                    Future<JsonObject> future = (Future<JsonObject>) discoveryFutures.get(i);
+                    if (future.succeeded() && future.result() != null && !future.result().isEmpty()) {
+                        hints.add(future.result());
+                    }
+                }
+                promise.complete(hints);
+            });
+        
+        return promise.future();
+    }
+    
+    /**
+     * Try alternative column names for a failed mapping
+     */
+    private Future<JsonObject> tryAlternativeColumn(String term, String table, String originalColumn) {
+        Promise<JsonObject> promise = Promise.promise();
+        
+        // Generate alternative column names using patterns only (database-agnostic)
+        List<String> alternatives = new ArrayList<>();
+        String upperCol = originalColumn.toUpperCase();
+        
+        // Add suffix variations
+        if (!upperCol.endsWith("_ID")) {
+            alternatives.add(originalColumn + "_ID");
+        }
+        if (!upperCol.endsWith("_CODE")) {
+            alternatives.add(originalColumn + "_CODE");
+        }
+        
+        // Replace common patterns
+        if (upperCol.contains("STATUS") && !upperCol.contains("STATUS_ID")) {
+            alternatives.add(originalColumn.replace("STATUS", "STATUS_ID"));
+        }
+        if (upperCol.contains("TYPE") && !upperCol.contains("TYPE_ID")) {
+            alternatives.add(originalColumn.replace("TYPE", "TYPE_ID"));
+        }
+        if (upperCol.contains("STATE") && !upperCol.contains("STATE_ID")) {
+            alternatives.add(originalColumn.replace("STATE", "STATE_ID"));
+        }
+        
+        // Try without suffix if it has one
+        if (upperCol.endsWith("_NAME") || upperCol.endsWith("_DESC") || upperCol.endsWith("_DESCRIPTION")) {
+            String base = originalColumn.substring(0, originalColumn.lastIndexOf("_"));
+            alternatives.add(base + "_ID");
+            alternatives.add(base + "_CODE");
+        }
+        
+        // Try each alternative
+        tryNextAlternative(term, table, alternatives, 0, promise);
+        
+        return promise.future();
+    }
+    
+    /**
+     * Recursively try alternative column names
+     */
+    private void tryNextAlternative(String term, String table, List<String> alternatives, 
+                                   int index, Promise<JsonObject> promise) {
+        if (index >= alternatives.size()) {
+            // No more alternatives to try
+            log("WARNING: Could not find alternative column for '" + term + "' in table " + table, 1);
+            promise.complete(new JsonObject());
+            return;
+        }
+        
+        String column = alternatives.get(index);
+        
+        // Try to sample this column
+        sampleColumnValues(table, column)
+            .onSuccess(result -> {
+                // Success! But we need to be smart about which values to use
+                
+                // Check if this looks like an enum ID column (ends with _ID)
+                boolean isEnumIdColumn = column.toUpperCase().endsWith("_ID") || 
+                                        column.toUpperCase().endsWith("_CODE");
+                
+                if (isEnumIdColumn) {
+                    // Check if term is likely an entity name (table name) rather than a value
+                    boolean isEntityTerm = term.equalsIgnoreCase(table) || 
+                                         term.equalsIgnoreCase(table + "s") ||
+                                         (table + "s").equalsIgnoreCase(term);
+                    
+                    if (isEntityTerm) {
+                        // Don't try to use entity names as enum values
+                        log("Skipping enum translation for entity term '" + term + "' in " + table + "." + column, 3);
+                        // Try the next alternative instead of failing the entire promise
+                        tryNextAlternative(term, table, alternatives, index + 1, promise);
+                        return;
+                    }
+                    
+                    // Try to translate the term through enum system
+                    translateEnumForColumn(term, table, column)
+                        .onSuccess(enumHint -> {
+                            if (enumHint != null && !enumHint.isEmpty()) {
+                                promise.complete(enumHint);
+                            } else {
+                                // No fallback - fail if enum translation doesn't work
+                                log("Enum translation failed for '" + term + "' in " + table + "." + column, 2);
+                                promise.fail("Could not translate enum value");
+                            }
+                        })
+                        .onFailure(err -> {
+                            // Try next alternative
+                            tryNextAlternative(term, table, alternatives, index + 1, promise);
+                        });
+                } else {
+                    // For non-enum columns, use the term as the value to search for
+                    JsonObject hint = new JsonObject()
+                        .put("term", term)
+                        .put("table", table)
+                        .put("column", column)
+                        .put("operator", "LIKE")
+                        .put("values", new JsonArray().add("%" + term.toUpperCase() + "%"))
+                        .put("condition", "OR")
+                        .put("discoveredColumn", true)
+                        .put("confidence", 0.6);
+                    
+                    promise.complete(hint);
+                }
+            })
+            .onFailure(err -> {
+                // Try next alternative
+                tryNextAlternative(term, table, alternatives, index + 1, promise);
+            });
     }
     
     /**
@@ -757,13 +1234,15 @@ public class SQLGenerationMilestone extends MilestoneManager {
             return Future.failedFuture("Invalid table or column name: " + table + "." + column);
         }
         
-        // Proper Oracle syntax with CTE for sampling then grouping
+        // Proper Oracle syntax - use subquery for ROWNUM to work correctly
         String samplingSQL = String.format("""
             WITH sampled_data AS (
-                SELECT %s as value
-                FROM %s
-                WHERE %s IS NOT NULL
-                AND ROWNUM <= 1000
+                SELECT value FROM (
+                    SELECT %s as value
+                    FROM %s
+                    WHERE %s IS NOT NULL
+                )
+                WHERE ROWNUM <= 1000
             )
             SELECT value, COUNT(*) as frequency
             FROM sampled_data
@@ -779,8 +1258,8 @@ public class SQLGenerationMilestone extends MilestoneManager {
                 
                 for (int i = 0; i < Math.min(results.size(), 10); i++) {
                     JsonObject row = results.getJsonObject(i);
-                    String value = row.getString("value");
-                    Integer frequency = row.getInteger("frequency");
+                    String value = row.getString("VALUE");  // Oracle returns uppercase column aliases
+                    Integer frequency = row.getInteger("FREQUENCY");  // Oracle returns uppercase
                     topValues.add(new JsonObject()
                         .put("value", value)
                         .put("frequency", frequency));
@@ -798,6 +1277,42 @@ public class SQLGenerationMilestone extends MilestoneManager {
             });
         
         return promise.future();
+    }
+    
+    /**
+     * Check if a WHERE clause hint would be nonsensical
+     * E.g., searching for "orders" in ORDERS.ORDER_ID makes no sense
+     */
+    private boolean isNonsensicalHint(String term, String table, String column) {
+        // Normalize for comparison
+        String termUpper = term.toUpperCase();
+        String tableUpper = table.toUpperCase();
+        String columnUpper = column.toUpperCase();
+        
+        // Check if term matches table name (or singular/plural variations)
+        boolean termMatchesTable = termUpper.equals(tableUpper) ||
+                                   termUpper.equals(tableUpper + "S") ||
+                                   (termUpper + "S").equals(tableUpper) ||
+                                   termUpper.equals(tableUpper.replaceAll("S$", "")) ||
+                                   (termUpper + "ES").equals(tableUpper);
+        
+        // If term matches table name and column is an ID column, it's nonsensical
+        if (termMatchesTable) {
+            // Check if column is likely an ID column
+            if (columnUpper.endsWith("_ID") || 
+                columnUpper.equals("ID") ||
+                columnUpper.contains(tableUpper.replaceAll("S$", "") + "_ID") ||
+                columnUpper.equals(tableUpper.replaceAll("S$", "") + "ID")) {
+                return true; // Nonsensical to search for table name in its ID column
+            }
+            
+            // Also nonsensical to search for table name in DATE columns
+            if (columnUpper.endsWith("_DATE") || columnUpper.endsWith("_TIME")) {
+                return true;
+            }
+        }
+        
+        return false;
     }
     
     /**

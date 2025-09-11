@@ -18,6 +18,8 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * MCP Server for intelligent schema matching and discovery.
@@ -32,10 +34,29 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     private OracleConnectionManager connectionManager;
     private LlmAPIService llmService;
     
-    // Cache for schema metadata
-    private Map<String, List<TableInfo>> schemaCache = new ConcurrentHashMap<>();
-    private long cacheTimestamp = 0;
-    private static final long CACHE_TTL = 300000; // 5 minutes
+    // Session-scoped schema caching
+    private Map<String, SchemaSession> sessionSchemas = new ConcurrentHashMap<>();
+    private static final long CACHE_TTL = 300000; // 5 minutes per session
+    
+    // Fallback global cache for when no session is provided
+    private Map<String, List<TableInfo>> globalSchemaCache = new ConcurrentHashMap<>();
+    private long globalCacheTimestamp = 0;
+    
+    // Session schema container
+    private static class SchemaSession {
+        final String sessionId;
+        final Map<String, List<TableInfo>> schemaCache = new HashMap<>();
+        long cacheTimestamp;
+        
+        SchemaSession(String sessionId) {
+            this.sessionId = sessionId;
+            this.cacheTimestamp = System.currentTimeMillis();
+        }
+        
+        boolean isCacheValid() {
+            return (System.currentTimeMillis() - cacheTimestamp) < CACHE_TTL;
+        }
+    }
     
     // Inner classes for schema representation
     private static class TableInfo {
@@ -211,6 +232,7 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         JsonObject analysis = arguments.getJsonObject("analysis");
         int maxSuggestions = arguments.getInteger("maxSuggestions", 5);
         double confidenceThreshold = arguments.getDouble("confidenceThreshold", 0.5);
+        String sessionId = arguments.getString("sessionId", "default");
         
         if (analysis == null) {
             sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS, "Analysis object is required");
@@ -219,8 +241,8 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         
         executeBlocking(Promise.<JsonObject>promise(), promise -> {
             try {
-                // Load schema if not cached
-                loadSchemaIfNeeded();
+                // Load schema if not cached (session-scoped)
+                loadSchemaIfNeeded(sessionId);
                 
                 // Extract search terms from analysis
                 List<String> searchTerms = extractSearchTerms(analysis);
@@ -230,7 +252,7 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 
                 // STEP 1: Fuzzy matching
                 vertx.eventBus().publish("log", "Step 1: Performing fuzzy matching for terms: " + searchTerms + "" + ",2,OracleSchemaIntelligenceServer,MCP,System");
-                List<SchemaMatch> fuzzyMatches = performFuzzyMatching(searchTerms);
+                List<SchemaMatch> fuzzyMatches = performFuzzyMatching(searchTerms, sessionId);
                 
                 // STEP 2: LLM verification (if LLM is available)
                 List<SchemaMatch> verifiedMatches;
@@ -383,11 +405,21 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     
     // Helper methods for schema matching
     
-    private void loadSchemaIfNeeded() throws Exception {
+    private void loadSchemaIfNeeded(String sessionId) throws Exception {
+        // Check feature flag first
+        if (!OracleConnectionManager.useSchemaExplorerTools()) {
+            // Demo mode: Skip expensive schema loading
+            vertx.eventBus().publish("log", "Schema exploration disabled (demo mode), using DEFAULT_SCHEMA only,2,OracleSchemaIntelligenceServer,MCP,System");
+            return;
+        }
+        
         long now = System.currentTimeMillis();
         
-        // Check if cache is still valid
-        if (!schemaCache.isEmpty() && (now - cacheTimestamp < CACHE_TTL)) {
+        // Get or create session
+        SchemaSession session = sessionSchemas.computeIfAbsent(sessionId, SchemaSession::new);
+        
+        // Check if session cache is still valid
+        if (!session.schemaCache.isEmpty() && session.isCacheValid()) {
             return;
         }
         
@@ -402,35 +434,101 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
             Map<String, List<TableInfo>> newCache = connectionManager.executeWithConnection(conn -> {
                 try {
                     Map<String, List<TableInfo>> tempCache = new HashMap<>();
-                    DatabaseMetaData metaData = conn.getMetaData();
-                    String currentSchema = conn.getSchema();
                     
-                    // Get all tables
-                    ResultSet tablesRs = metaData.getTables(null, currentSchema, "%", new String[]{"TABLE"});
+                    // Use direct SQL queries instead of slow DatabaseMetaData methods
+                    // This is much faster than getTables() and getColumns()
                     
-                    while (tablesRs.next()) {
-                        TableInfo table = new TableInfo();
-                        table.schema = tablesRs.getString("TABLE_SCHEM");
-                        table.tableName = tablesRs.getString("TABLE_NAME");
-                        table.comment = tablesRs.getString("REMARKS");
-                        
-                        // Get columns for this table
-                        ResultSet columnsRs = metaData.getColumns(null, table.schema, table.tableName, "%");
-                        while (columnsRs.next()) {
-                            ColumnInfo column = new ColumnInfo();
-                            column.columnName = columnsRs.getString("COLUMN_NAME");
-                            column.dataType = columnsRs.getString("TYPE_NAME");
-                            column.size = columnsRs.getInt("COLUMN_SIZE");
-                            column.nullable = "YES".equals(columnsRs.getString("IS_NULLABLE"));
-                            column.comment = columnsRs.getString("REMARKS");
-                            table.columns.add(column);
+                    // First, get all accessible schemas (excluding Oracle system schemas)
+                    String schemaQuery = """
+                        SELECT DISTINCT username AS schema_name
+                        FROM all_users
+                        WHERE oracle_maintained = 'N'
+                        ORDER BY username
+                    """;
+                    
+                    List<String> schemas = new ArrayList<>();
+                    try (Statement stmt = conn.createStatement();
+                         ResultSet rs = stmt.executeQuery(schemaQuery)) {
+                        while (rs.next()) {
+                            schemas.add(rs.getString("schema_name"));
                         }
-                        columnsRs.close();
-                        
-                        // Add to cache
-                        tempCache.computeIfAbsent(table.schema, k -> new ArrayList<>()).add(table);
                     }
-                    tablesRs.close();
+                    
+                    vertx.eventBus().publish("log", "Found " + schemas.size() + " user schemas to load,2,OracleSchemaIntelligenceServer,MCP,System");
+                    
+                    // Now get all tables and columns in a single optimized query
+                    String tableColumnQuery = """
+                        SELECT 
+                            t.owner AS schema_name,
+                            t.table_name,
+                            t.comments AS table_comment,
+                            c.column_name,
+                            c.data_type,
+                            c.data_length,
+                            c.data_precision,
+                            c.data_scale,
+                            c.nullable,
+                            cc.comments AS column_comment,
+                            c.column_id
+                        FROM all_tables t
+                        JOIN all_tab_columns c ON t.owner = c.owner AND t.table_name = c.table_name
+                        LEFT JOIN all_col_comments cc ON c.owner = cc.owner 
+                            AND c.table_name = cc.table_name 
+                            AND c.column_name = cc.column_name
+                        LEFT JOIN all_tab_comments tc ON t.owner = tc.owner 
+                            AND t.table_name = tc.table_name
+                        WHERE t.owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N')
+                            AND t.dropped = 'NO'
+                        ORDER BY t.owner, t.table_name, c.column_id
+                    """;
+                    
+                    Map<String, TableInfo> tableMap = new HashMap<>();
+                    
+                    try (Statement stmt = conn.createStatement()) {
+                        // Set query timeout at statement level (60 seconds)
+                        stmt.setQueryTimeout(60);
+                        
+                        try (ResultSet rs = stmt.executeQuery(tableColumnQuery)) {
+                            while (rs.next()) {
+                                String schemaName = rs.getString("schema_name");
+                                String tableName = rs.getString("table_name");
+                                String tableKey = schemaName + "." + tableName;
+                                
+                                // Get or create table info
+                                TableInfo table = tableMap.get(tableKey);
+                                if (table == null) {
+                                    table = new TableInfo();
+                                    table.schema = schemaName;
+                                    table.tableName = tableName;
+                                    table.comment = rs.getString("table_comment");
+                                    tableMap.put(tableKey, table);
+                                    
+                                    // Add to cache by schema
+                                    tempCache.computeIfAbsent(schemaName, k -> new ArrayList<>()).add(table);
+                                }
+                                
+                                // Add column info
+                                ColumnInfo column = new ColumnInfo();
+                                column.columnName = rs.getString("column_name");
+                                column.dataType = rs.getString("data_type");
+                                
+                                // Handle different numeric types
+                                int dataLength = rs.getInt("data_length");
+                                int dataPrecision = rs.getInt("data_precision");
+                                int dataScale = rs.getInt("data_scale");
+                                
+                                if (dataPrecision > 0) {
+                                    column.size = dataPrecision;
+                                } else {
+                                    column.size = dataLength;
+                                }
+                                
+                                column.nullable = "Y".equals(rs.getString("nullable"));
+                                column.comment = rs.getString("column_comment");
+                                table.columns.add(column);
+                            }
+                        }
+                    }
                     
                     return tempCache;
                 } catch (SQLException e) {
@@ -438,10 +536,48 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 }
             }).toCompletionStage().toCompletableFuture().get();
             
-            schemaCache.clear();
-            schemaCache.putAll(newCache);
-            cacheTimestamp = System.currentTimeMillis();
-            vertx.eventBus().publish("log", "Loaded " + schemaCache.size() + " schemas with tables" + ",2,OracleSchemaIntelligenceServer,MCP,System");
+            // Update session cache
+            session.schemaCache.clear();
+            session.schemaCache.putAll(newCache);
+            session.cacheTimestamp = System.currentTimeMillis();
+            
+            // Also update global cache as fallback
+            globalSchemaCache.clear();
+            globalSchemaCache.putAll(newCache);
+            globalCacheTimestamp = System.currentTimeMillis();
+            
+            // Log loaded schemas for debugging
+            Set<String> loadedSchemas = newCache.keySet();
+            vertx.eventBus().publish("log", "Loaded " + session.schemaCache.size() + " schemas for session " + sessionId + ": " + 
+                String.join(", ", loadedSchemas) + ",2,OracleSchemaIntelligenceServer,MCP,System");
+        } catch (InterruptedException e) {
+            // Handle thread interruption (likely due to timeout)
+            vertx.eventBus().publish("log", "Schema loading interrupted. Using partial cache if available,1,OracleSchemaIntelligenceServer,MCP,Warning");
+            Thread.currentThread().interrupt(); // Restore interrupted status
+            // Use whatever we have in cache (global or session)
+            if (!globalSchemaCache.isEmpty()) {
+                session.schemaCache.putAll(globalSchemaCache);
+                session.cacheTimestamp = System.currentTimeMillis();
+                vertx.eventBus().publish("log", "Using global cache with " + globalSchemaCache.size() + " schemas,2,OracleSchemaIntelligenceServer,MCP,System");
+            } else {
+                vertx.eventBus().publish("log", "No cache available after interruption. Schema resolution may be limited,1,OracleSchemaIntelligenceServer,MCP,Warning");
+            }
+        } catch (java.util.concurrent.ExecutionException e) {
+            // Handle execution exceptions (wraps the actual exception)
+            Throwable cause = e.getCause();
+            if (cause != null && cause.getMessage() != null && cause.getMessage().contains("timeout")) {
+                // This is likely a database timeout
+                vertx.eventBus().publish("log", "Database operation timed out: " + cause.getMessage() + ",1,OracleSchemaIntelligenceServer,MCP,Warning");
+                // Use cache fallback
+                if (!globalSchemaCache.isEmpty()) {
+                    session.schemaCache.putAll(globalSchemaCache);
+                    session.cacheTimestamp = System.currentTimeMillis();
+                }
+            } else {
+                // Other execution error
+                vertx.eventBus().publish("log", "Failed to load schema: " + cause.getMessage() + ",0,OracleSchemaIntelligenceServer,MCP,System");
+                throw new RuntimeException("Schema loading failed: " + cause.getMessage(), cause);
+            }
         } catch (Exception e) {
             vertx.eventBus().publish("log", "Failed to load schema: " + e.getMessage() + ",0,OracleSchemaIntelligenceServer,MCP,System");
             throw e;
@@ -477,17 +613,44 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         return new ArrayList<>(terms);
     }
     
-    private List<SchemaMatch> performFuzzyMatching(List<String> searchTerms) {
+    private List<SchemaMatch> performFuzzyMatching(List<String> searchTerms, String sessionId) {
         List<SchemaMatch> matches = new ArrayList<>();
         
-        if (schemaCache.isEmpty()) {
-            vertx.eventBus().publish("log", "Warning: Schema cache is empty during fuzzy matching,1,OracleSchemaIntelligenceServer,MCP,System");
+        // Get session cache or fallback to global cache
+        SchemaSession session = sessionSchemas.get(sessionId);
+        Map<String, List<TableInfo>> cacheToUse = (session != null && !session.schemaCache.isEmpty()) ? 
+            session.schemaCache : globalSchemaCache;
+        
+        if (cacheToUse.isEmpty()) {
+            vertx.eventBus().publish("log", "Schema cache is empty - using DEFAULT_SCHEMA for matches,2,OracleSchemaIntelligenceServer,MCP,System");
+            
+            // When cache is empty (feature flag disabled schema loading), 
+            // create matches using DEFAULT_SCHEMA for each search term
+            String defaultSchema = OracleConnectionManager.getDefaultSchema();
+            for (String term : searchTerms) {
+                // Create a match for potential table names
+                if (term.length() > 2 && !isCommonWord(term)) {
+                    SchemaMatch match = new SchemaMatch();
+                    TableInfo table = new TableInfo();
+                    table.schema = defaultSchema;
+                    table.tableName = term.toUpperCase();
+                    table.columns = new ArrayList<>();  // Empty columns - will be discovered later
+                    
+                    match.table = table;
+                    match.confidence = 0.7;  // Lower confidence since we're guessing
+                    match.reason = "Using default schema (no schema exploration)";
+                    match.relevantColumns = new JsonArray();
+                    matches.add(match);
+                    
+                    vertx.eventBus().publish("log", "Created default schema match: " + defaultSchema + "." + table.tableName + ",3,OracleSchemaIntelligenceServer,MCP,System");
+                }
+            }
             return matches;
         }
         
-        vertx.eventBus().publish("log", "Performing fuzzy matching on " + schemaCache.size() + " schemas,3,OracleSchemaIntelligenceServer,MCP,System");
+        vertx.eventBus().publish("log", "Performing fuzzy matching on " + cacheToUse.size() + " schemas for session " + sessionId + ",3,OracleSchemaIntelligenceServer,MCP,System");
         
-        for (List<TableInfo> tables : schemaCache.values()) {
+        for (List<TableInfo> tables : cacheToUse.values()) {
             for (TableInfo table : tables) {
                 double tableScore = 0;
                 List<String> matchedColumns = new ArrayList<>();

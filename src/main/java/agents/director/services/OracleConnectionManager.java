@@ -23,6 +23,12 @@ public class OracleConnectionManager {
     private static final String DB_SERVICE = "gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com";
     private static final String DB_USER = "ADMIN";
     private static final String DB_PASSWORD = "Violet2.Barnstorm_A9";
+    private static final String DEFAULT_SCHEMA = "ADMIN"; // Default schema for unqualified tables
+    
+    // Feature flag to control schema exploration
+    // Set to false for demo mode (fast, uses DEFAULT_SCHEMA only)
+    // Set to true for full mode (explores all schemas, may be slow)
+    private static final Boolean USE_SCHEMA_EXPLORER_TOOLS = false;
 
 
     
@@ -65,6 +71,22 @@ public class OracleConnectionManager {
     }
     
     /**
+     * Get the default schema for unqualified table names
+     */
+    public static String getDefaultSchema() {
+        return DEFAULT_SCHEMA;
+    }
+    
+    /**
+     * Check if schema explorer tools should be used
+     * When false, system uses DEFAULT_SCHEMA for all unqualified tables
+     * When true, system explores all available schemas (may be slow)
+     */
+    public static boolean useSchemaExplorerTools() {
+        return USE_SCHEMA_EXPLORER_TOOLS;
+    }
+    
+    /**
      * Initialize - just saves Vertx instance
      */
     public Future<Void> initialize(Vertx vertx) {
@@ -89,7 +111,18 @@ public class OracleConnectionManager {
                 vertx.eventBus().publish("log", "[OracleConnectionManager] Attempting " + ENVIRONMENT + " connection to: " + DB_HOST + ":" + DB_PORT + "/" + DB_SERVICE + ",2,OracleConnectionManager,Connection,Attempt");
             }
             
-            Connection conn = DriverManager.getConnection(jdbcUrl, DB_USER, DB_PASSWORD);
+            // Configure connection properties including socket timeout
+            java.util.Properties props = new java.util.Properties();
+            props.setProperty("user", DB_USER);
+            props.setProperty("password", DB_PASSWORD);
+            
+            // Set socket read timeout to 60 seconds (60000ms) to prevent indefinite hangs
+            props.setProperty("oracle.jdbc.ReadTimeout", "60000");
+            
+            // Also set connection timeout for initial connection
+            props.setProperty("oracle.net.CONNECT_TIMEOUT", "30000");
+            
+            Connection conn = DriverManager.getConnection(jdbcUrl, props);
             
             if (vertx != null) {
                 vertx.eventBus().publish("log", "[OracleConnectionManager] Connection successful in " + ENVIRONMENT + " environment,1,OracleConnectionManager,Connection,Success");

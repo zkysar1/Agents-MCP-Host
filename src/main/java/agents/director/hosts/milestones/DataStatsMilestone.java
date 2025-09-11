@@ -81,22 +81,48 @@ public class DataStatsMilestone extends MilestoneManager {
             return promise.future();
         }
         
-        // Analyze each table
-        List<Future> analysisFutures = new ArrayList<>();
+        // Load enum cache first (important for proper value resolution)
+        Future<JsonObject> enumCacheFuture = loadEnumCache();
         
-        for (String table : context.getRelevantTables()) {
-            // Analyze table structure
-            Future<JsonObject> structureFuture = analyzeTableStructure(table, context);
-            
-            // Map business terms to columns
-            Future<JsonObject> mappingFuture = mapBusinessTerms(table, context);
-            
-            analysisFutures.add(structureFuture);
-            analysisFutures.add(mappingFuture);
-        }
-        
-        // Use CompositeFuture.join() to handle partial failures
-        CompositeFuture.join(analysisFutures)
+        // Then analyze each table after cache is ready
+        enumCacheFuture
+            .compose(cacheResult -> {
+                log("Enum cache loaded: " + cacheResult.getString("status", "unknown"), 2);
+                
+                List<Future> analysisFutures = new ArrayList<>();
+                
+                for (String table : context.getRelevantTables()) {
+                    // Analyze table structure
+                    Future<JsonObject> structureFuture = analyzeTableStructure(table, context);
+                    
+                    // Map business terms to columns
+                    Future<JsonObject> mappingFuture = mapBusinessTerms(table, context);
+                    
+                    analysisFutures.add(structureFuture);
+                    analysisFutures.add(mappingFuture);
+                }
+                
+                return CompositeFuture.join(analysisFutures);
+            })
+            .recover(err -> {
+                // If enum cache loading fails, continue without it
+                log("Enum cache loading failed, continuing without enum resolution: " + err.getMessage(), 1);
+                
+                List<Future> analysisFutures = new ArrayList<>();
+                
+                for (String table : context.getRelevantTables()) {
+                    // Analyze table structure
+                    Future<JsonObject> structureFuture = analyzeTableStructure(table, context);
+                    
+                    // Map business terms to columns
+                    Future<JsonObject> mappingFuture = mapBusinessTerms(table, context);
+                    
+                    analysisFutures.add(structureFuture);
+                    analysisFutures.add(mappingFuture);
+                }
+                
+                return CompositeFuture.join(analysisFutures);
+            })
             .map(results -> {
                 // Aggregate results, checking for partial failures
                 Map<String, List<String>> tableColumns = new HashMap<>();
@@ -353,6 +379,33 @@ public class DataStatsMilestone extends MilestoneManager {
                         .put("degraded", true)
                         .put("degradation_reason", "Could not map business terms: " + ar.cause().getMessage())
                         .put("mappings", new JsonObject())); // Empty mapping with degradation flag
+                }
+            });
+        
+        return promise.future();
+    }
+    
+    /**
+     * Load the enum cache for value resolution
+     */
+    private Future<JsonObject> loadEnumCache() {
+        Promise<JsonObject> promise = Promise.promise();
+        
+        JsonObject request = new JsonObject()
+            .put("force_refresh", false);  // Use cached values if available
+        
+        // Call the load_enum_cache tool
+        vertx.eventBus().<JsonObject>request(
+            "mcp.clients.businessmapping.load_enum_cache",
+            request,
+            ar -> {
+                if (ar.succeeded()) {
+                    JsonObject result = ar.result().body();
+                    log("Enum cache loaded with " + result.getInteger("cache_size", 0) + " mappings", 2);
+                    promise.complete(result);
+                } else {
+                    log("Failed to load enum cache: " + ar.cause().getMessage(), 1);
+                    promise.fail(ar.cause());
                 }
             });
         

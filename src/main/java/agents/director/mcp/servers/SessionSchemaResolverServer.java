@@ -103,6 +103,26 @@ public class SessionSchemaResolverServer extends MCPServerBase {
             String sessionId = msg.body().getString("sessionId");
             cleanupSession(sessionId);
         });
+        
+        // NEW: Direct resolution requests from OracleQueryExecutionServer
+        vertx.eventBus().<JsonObject>consumer("session.schema.resolver.resolve", msg -> {
+            JsonObject request = msg.body();
+            String tableName = request.getString("tableName");
+            String sessionId = request.getString("sessionId");
+            
+            // Resolve schema asynchronously
+            resolveSchemaAsync(tableName, sessionId)
+                .onSuccess(schema -> {
+                    msg.reply(new JsonObject().put("schema", schema));
+                })
+                .onFailure(err -> {
+                    vertx.eventBus().publish("log", 
+                        "Schema resolution failed: " + err.getMessage() + 
+                        ",1,SessionSchemaResolverServer,Resolution,Error");
+                    // Fail open - reply with null to use DEFAULT_SCHEMA
+                    msg.reply(new JsonObject().put("schema", null));
+                });
+        });
     }
     
     @Override
@@ -687,6 +707,72 @@ public class SessionSchemaResolverServer extends MCPServerBase {
             return matcher.group(1);
         }
         return null;
+    }
+    
+    /**
+     * Async version of schema resolution for event bus calls
+     */
+    private Future<String> resolveSchemaAsync(String tableName, String sessionId) {
+        // Check feature flag for demo mode
+        if (!OracleConnectionManager.useSchemaExplorerTools()) {
+            // Demo mode: Always return DEFAULT_SCHEMA immediately
+            vertx.eventBus().publish("log", 
+                "Schema exploration disabled (demo mode), using DEFAULT_SCHEMA for: " + tableName + 
+                ",2,SessionSchemaResolverServer,Resolution,DemoMode");
+            return Future.succeededFuture(OracleConnectionManager.getDefaultSchema());
+        }
+        
+        // Validate input
+        if (!isValidOracleIdentifier(tableName)) {
+            return Future.failedFuture("Invalid table name: " + tableName);
+        }
+        
+        SessionIntelligence session = getOrCreateSession(sessionId);
+        
+        // 1. Check cache first (FASTEST)
+        String cachedSchema = session.schemaCache.get(tableName.toUpperCase());
+        if (cachedSchema != null) {
+            vertx.eventBus().publish("log", "Schema cache hit for " + tableName + ": " + cachedSchema + 
+                ",3,SessionSchemaResolverServer,Resolution,Cache");
+            return Future.succeededFuture(cachedSchema);
+        }
+        
+        // 2. Try pattern-based guess
+        String patternGuess = guessSchemaFromPattern(tableName);
+        if (patternGuess != null) {
+            return quickVerifyTableAsync(patternGuess, tableName, session)
+                .map(exists -> {
+                    if (exists) {
+                        session.recordSuccess(tableName, patternGuess);
+                        return patternGuess;
+                    }
+                    return null;
+                });
+        }
+        
+        // 3. Use session affinity if available
+        if (session.dominantSchema != null) {
+            return quickVerifyTableAsync(session.dominantSchema, tableName, session)
+                .map(exists -> {
+                    if (exists) {
+                        session.recordSuccess(tableName, session.dominantSchema);
+                        return session.dominantSchema;
+                    }
+                    return null;
+                });
+        }
+        
+        // 4. Try DEFAULT_SCHEMA as last resort
+        String defaultSchema = OracleConnectionManager.getDefaultSchema();
+        return quickVerifyTableAsync(defaultSchema, tableName, session)
+            .map(exists -> {
+                if (exists) {
+                    session.recordSuccess(tableName, defaultSchema);
+                    return defaultSchema;
+                }
+                // Return DEFAULT_SCHEMA anyway (fail open)
+                return defaultSchema;
+            });
     }
     
     /**
