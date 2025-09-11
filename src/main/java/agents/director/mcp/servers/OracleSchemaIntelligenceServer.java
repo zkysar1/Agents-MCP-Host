@@ -406,13 +406,6 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     // Helper methods for schema matching
     
     private void loadSchemaIfNeeded(String sessionId) throws Exception {
-        // Check feature flag first
-        if (!OracleConnectionManager.useSchemaExplorerTools()) {
-            // Demo mode: Skip expensive schema loading
-            vertx.eventBus().publish("log", "Schema exploration disabled (demo mode), using DEFAULT_SCHEMA only,2,OracleSchemaIntelligenceServer,MCP,System");
-            return;
-        }
-        
         long now = System.currentTimeMillis();
         
         // Get or create session
@@ -423,7 +416,12 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
             return;
         }
         
-        vertx.eventBus().publish("log", "Loading Oracle schema metadata" + ",2,OracleSchemaIntelligenceServer,MCP,System");
+        // Determine scope based on feature flag
+        boolean useFullSchemaExploration = OracleConnectionManager.useSchemaExplorerTools();
+        String loadingMessage = useFullSchemaExploration ? 
+            "Loading all user schemas (feature flag enabled)" : 
+            "Loading DEFAULT_SCHEMA only (feature flag disabled)";
+        vertx.eventBus().publish("log", loadingMessage + ",2,OracleSchemaIntelligenceServer,MCP,System");
         
         // Check connection health first
         if (!connectionManager.isConnectionHealthy()) {
@@ -435,33 +433,44 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 try {
                     Map<String, List<TableInfo>> tempCache = new HashMap<>();
                     
-                    // Use direct SQL queries instead of slow DatabaseMetaData methods
-                    // This is much faster than getTables() and getColumns()
-                    
-                    // First, get all accessible schemas (excluding Oracle system schemas)
-                    String schemaQuery = """
-                        SELECT DISTINCT username AS schema_name
-                        FROM all_users
-                        WHERE oracle_maintained = 'N'
-                        ORDER BY username
-                    """;
-                    
+                    // Determine which schemas to load based on feature flag
                     List<String> schemas = new ArrayList<>();
-                    try (Statement stmt = conn.createStatement();
-                         ResultSet rs = stmt.executeQuery(schemaQuery)) {
-                        while (rs.next()) {
-                            schemas.add(rs.getString("schema_name"));
+                    
+                    if (!useFullSchemaExploration) {
+                        // Feature flag disabled: Only load DEFAULT_SCHEMA
+                        schemas.add(OracleConnectionManager.getDefaultSchema());
+                        vertx.eventBus().publish("log", "Loading schema metadata for DEFAULT_SCHEMA: " + 
+                            OracleConnectionManager.getDefaultSchema() + ",2,OracleSchemaIntelligenceServer,MCP,System");
+                    } else {
+                        // Feature flag enabled: Load all user schemas
+                        String schemaQuery = """
+                            SELECT DISTINCT username AS schema_name
+                            FROM all_users
+                            WHERE oracle_maintained = 'N'
+                            ORDER BY username
+                        """;
+                        
+                        try (Statement stmt = conn.createStatement();
+                             ResultSet rs = stmt.executeQuery(schemaQuery)) {
+                            while (rs.next()) {
+                                schemas.add(rs.getString("schema_name"));
+                            }
                         }
                     }
                     
-                    vertx.eventBus().publish("log", "Found " + schemas.size() + " user schemas to load,2,OracleSchemaIntelligenceServer,MCP,System");
+                    vertx.eventBus().publish("log", "Will load " + schemas.size() + " schema(s),2,OracleSchemaIntelligenceServer,MCP,System");
+                    
+                    // Build WHERE clause based on loaded schemas
+                    String schemaInClause = schemas.stream()
+                        .map(s -> "'" + s + "'")
+                        .collect(Collectors.joining(", "));
                     
                     // Now get all tables and columns in a single optimized query
                     String tableColumnQuery = """
                         SELECT 
                             t.owner AS schema_name,
                             t.table_name,
-                            t.comments AS table_comment,
+                            tc.comments AS table_comment,
                             c.column_name,
                             c.data_type,
                             c.data_length,
@@ -477,10 +486,10 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                             AND c.column_name = cc.column_name
                         LEFT JOIN all_tab_comments tc ON t.owner = tc.owner 
                             AND t.table_name = tc.table_name
-                        WHERE t.owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N')
+                        WHERE t.owner IN (%s)
                             AND t.dropped = 'NO'
                         ORDER BY t.owner, t.table_name, c.column_id
-                    """;
+                    """.formatted(schemaInClause);
                     
                     Map<String, TableInfo> tableMap = new HashMap<>();
                     
@@ -585,13 +594,16 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     }
     
     private List<String> extractSearchTerms(JsonObject analysis) {
-        Set<String> terms = new HashSet<>();
+        Set<String> structuralTerms = new HashSet<>();  // Terms likely to be table/column names
+        Set<String> valueTerms = new HashSet<>();       // Terms likely to be data values
         
         // Extract from entities
         JsonArray entities = analysis.getJsonArray("entities");
         if (entities != null) {
             for (int i = 0; i < entities.size(); i++) {
-                terms.add(entities.getString(i).toLowerCase());
+                String entity = entities.getString(i).toLowerCase();
+                // Entities are more likely to be table names
+                structuralTerms.add(entity);
             }
         }
         
@@ -603,20 +615,101 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
             .trim()
             .split("\\s+");
         
+        // Analyze intent to understand context
+        String intent = analysis.getString("intent", "").toLowerCase();
+        String queryType = analysis.getString("queryType", "").toLowerCase();
+        
         for (String word : words) {
             // Filter out empty strings and common words
             if (!word.isEmpty() && word.length() > 2 && !isCommonWord(word)) {
-                // Add the original term
-                terms.add(word);
-                // Also add mapped equivalent if different
-                String mapped = mapTermToDbEquivalent(word);
-                if (!mapped.equals(word)) {
-                    terms.add(mapped);
+                // CRITICAL: Classify terms based on context
+                if (isLikelyValueTerm(word, intent, queryType)) {
+                    // Terms like "pending", "active", "completed" are likely values
+                    valueTerms.add(word);
+                    vertx.eventBus().publish("log", "Classified '" + word + "' as potential value term,3,OracleSchemaIntelligenceServer,MCP,System");
+                } else if (isLikelyStructuralTerm(word)) {
+                    // Terms like "orders", "customers" are likely tables
+                    structuralTerms.add(word);
+                    // Also add mapped equivalent if different
+                    String mapped = mapTermToDbEquivalent(word);
+                    if (!mapped.equals(word)) {
+                        structuralTerms.add(mapped);
+                    }
                 }
             }
         }
         
-        return new ArrayList<>(terms);
+        // For schema matching, prioritize structural terms
+        // Value terms will be handled by BusinessMappingServer
+        List<String> searchTerms = new ArrayList<>(structuralTerms);
+        
+        // Log classification for debugging
+        if (!valueTerms.isEmpty()) {
+            vertx.eventBus().publish("log", "Value terms (for enum lookup): " + valueTerms + ",2,OracleSchemaIntelligenceServer,MCP,System");
+        }
+        if (!structuralTerms.isEmpty()) {
+            vertx.eventBus().publish("log", "Structural terms (for schema matching): " + structuralTerms + ",2,OracleSchemaIntelligenceServer,MCP,System");
+        }
+        
+        return searchTerms;
+    }
+    
+    /**
+     * Determine if a term is likely a data value (like an enum value)
+     */
+    private boolean isLikelyValueTerm(String word, String intent, String queryType) {
+        // Common status/state values
+        String[] valuePatterns = {
+            "pending", "active", "inactive", "completed", "cancelled", "approved", "rejected",
+            "open", "closed", "draft", "published", "archived", "deleted",
+            "enabled", "disabled", "true", "false", "yes", "no",
+            "new", "old", "current", "previous", "future", "past",
+            "high", "medium", "low", "critical", "normal", "minor"
+        };
+        
+        for (String pattern : valuePatterns) {
+            if (word.equalsIgnoreCase(pattern)) {
+                return true;
+            }
+        }
+        
+        // If the intent mentions filtering or status, non-entity terms are likely values
+        if ((intent.contains("status") || intent.contains("state") || intent.contains("filter")) 
+            && !word.endsWith("s")) {  // Plural words are more likely table names
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Determine if a term is likely a structural term (table/column name)
+     */
+    private boolean isLikelyStructuralTerm(String word) {
+        // Plural nouns are often table names
+        if (word.endsWith("s") || word.endsWith("es")) {
+            return true;
+        }
+        
+        // Common database object patterns
+        String[] structuralPatterns = {
+            "table", "column", "field", "attribute", "entity",
+            "order", "customer", "product", "user", "account",
+            "invoice", "payment", "transaction", "item", "detail"
+        };
+        
+        for (String pattern : structuralPatterns) {
+            if (word.contains(pattern)) {
+                return true;
+            }
+        }
+        
+        // Words with underscores are likely database identifiers
+        if (word.contains("_")) {
+            return true;
+        }
+        
+        return false;
     }
     
     private List<SchemaMatch> performFuzzyMatching(List<String> searchTerms, String sessionId) {
@@ -629,10 +722,16 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         
         if (cacheToUse.isEmpty()) {
             // FAIL FAST: Do not create fake tables from search terms
+            boolean featureFlagEnabled = OracleConnectionManager.useSchemaExplorerTools();
+            String scopeMessage = featureFlagEnabled ? 
+                "all user schemas" : 
+                "DEFAULT_SCHEMA (" + OracleConnectionManager.getDefaultSchema() + ")";
+            
             String errorMsg = String.format(
-                "SCHEMA ERROR: Schema cache is empty. Cannot resolve tables when USE_SCHEMA_EXPLORER_TOOLS=false. " +
-                "Search terms: %s. Either enable schema exploration or ensure schema cache is populated.",
-                searchTerms
+                "SCHEMA ERROR: Schema cache is empty. Failed to load %s. " +
+                "Search terms: %s. This may indicate a connection issue or the tables don't exist in the accessible schema(s). " +
+                "Feature flag USE_SCHEMA_EXPLORER_TOOLS=%s",
+                scopeMessage, searchTerms, featureFlagEnabled
             );
             vertx.eventBus().publish("log", errorMsg + ",0,OracleSchemaIntelligenceServer,MCP,ERROR");
             

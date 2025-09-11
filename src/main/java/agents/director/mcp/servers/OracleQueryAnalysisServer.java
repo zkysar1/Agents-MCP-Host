@@ -111,6 +111,7 @@ public class OracleQueryAnalysisServer extends MCPServerBase {
     
     private void analyzeQuery(RoutingContext ctx, String requestId, JsonObject arguments) {
         String query = arguments.getString("query");
+        String tableName = arguments.getString("table_name"); // NEW: Optional parameter for table-specific analysis
         JsonArray context = arguments.getJsonArray("context", new JsonArray());
         
         if (query == null || query.trim().isEmpty()) {
@@ -186,6 +187,12 @@ public class OracleQueryAnalysisServer extends MCPServerBase {
                 
                 // Add the original query to the result
                 analysis.put("originalQuery", query);
+                
+                // NEW: Add table-specific analysis if table name provided
+                if (tableName != null && !tableName.isEmpty()) {
+                    JsonObject tableRequirements = analyzeTableRequirements(query, tableName, analysis);
+                    analysis.put("tableRequirements", tableRequirements);
+                }
                 
                 promise.complete(analysis);
                 
@@ -386,6 +393,76 @@ public class OracleQueryAnalysisServer extends MCPServerBase {
         if (lowerQuery.contains("in (") || lowerQuery.contains("in(")) patterns.add("IN");
         
         return patterns;
+    }
+    
+    /**
+     * Analyze which columns and requirements are needed from a specific table
+     */
+    private JsonObject analyzeTableRequirements(String query, String tableName, JsonObject generalAnalysis) {
+        JsonObject requirements = new JsonObject();
+        JsonArray requiredColumns = new JsonArray();
+        JsonArray filterColumns = new JsonArray();
+        JsonArray joinColumns = new JsonArray();
+        JsonArray orderColumns = new JsonArray();
+        
+        // Extract entities and filters from general analysis
+        JsonArray entities = generalAnalysis.getJsonArray("entities", new JsonArray());
+        JsonArray filters = generalAnalysis.getJsonArray("filters", new JsonArray());
+        String queryType = generalAnalysis.getString("queryType", "retrieval");
+        
+        // Based on query type, determine what columns might be needed
+        if ("aggregation".equals(queryType)) {
+            // For aggregations, we typically need the aggregated column
+            JsonArray aggregations = generalAnalysis.getJsonArray("aggregations", new JsonArray());
+            for (int i = 0; i < aggregations.size(); i++) {
+                String agg = aggregations.getString(i);
+                if (agg.toLowerCase().contains("count")) {
+                    requiredColumns.add("*"); // COUNT(*) needs all rows
+                }
+            }
+        }
+        
+        // Extract potential column references from the query
+        // This is a simple heuristic - in production, would use more sophisticated parsing
+        String[] words = query.toLowerCase().split("\\s+");
+        for (String word : words) {
+            // Look for words that might be column names (no spaces, not SQL keywords)
+            if (word.matches("[a-z_][a-z0-9_]*") && !isSQLKeyword(word)) {
+                // Could be a column name
+                requiredColumns.add(word);
+            }
+        }
+        
+        // Build the requirements object
+        requirements.put("tableName", tableName);
+        requirements.put("requiredColumns", requiredColumns);
+        requirements.put("filterColumns", filterColumns);
+        requirements.put("joinColumns", joinColumns);
+        requirements.put("orderColumns", orderColumns);
+        requirements.put("analysisMethod", "heuristic"); // Not using LLM for this yet
+        
+        return requirements;
+    }
+    
+    /**
+     * Check if a word is a SQL keyword
+     */
+    private boolean isSQLKeyword(String word) {
+        String[] keywords = {
+            "select", "from", "where", "and", "or", "not", "in", "like", "between",
+            "join", "inner", "left", "right", "outer", "on", "as", "group", "by",
+            "having", "order", "asc", "desc", "limit", "offset", "union", "all",
+            "distinct", "count", "sum", "avg", "min", "max", "case", "when", "then",
+            "else", "end", "is", "null", "exists", "into", "values", "insert", "update",
+            "delete", "create", "alter", "drop", "table", "view", "index"
+        };
+        
+        for (String keyword : keywords) {
+            if (word.equalsIgnoreCase(keyword)) {
+                return true;
+            }
+        }
+        return false;
     }
     
     private JsonObject extractJsonFromContent(String content) {

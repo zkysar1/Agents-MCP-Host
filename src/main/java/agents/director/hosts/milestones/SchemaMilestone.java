@@ -267,7 +267,7 @@ public class SchemaMilestone extends MilestoneManager {
                 if (tables.isEmpty()) {
                     String errorMsg = String.format(
                         "No tables found for query '%s'. When USE_SCHEMA_EXPLORER_TOOLS=false, " +
-                        "only pre-cached tables are available. Ensure the required tables exist in schema %s",
+                        "only tables from DEFAULT_SCHEMA (%s) are loaded. Ensure the required tables exist in this schema",
                         query, "ADMIN"  // Using hardcoded ADMIN since we can't import OracleConnectionManager here
                     );
                     

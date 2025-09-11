@@ -327,14 +327,22 @@ public class DataStatsMilestone extends MilestoneManager {
     private Future<JsonObject> analyzeTableStructure(String table, MilestoneContext context) {
         Promise<JsonObject> promise = Promise.promise();
         
+        // Build context array with table information
+        JsonArray analysisContext = new JsonArray()
+            .add(new JsonObject()
+                .put("role", "system")
+                .put("content", "Analyzing requirements for table: " + table))
+            .add(new JsonObject()
+                .put("role", "user")
+                .put("content", "Intent: " + context.getIntent()));
+        
         JsonObject request = new JsonObject()
-            .put("table_name", table)
             .put("query", context.getQuery())
-            .put("intent", context.getIntent());
+            .put("context", analysisContext);
         
         // Call the analysis tool
         vertx.eventBus().<JsonObject>request(
-            "mcp.clients.oracle_query_analysis.oracle_query_analysis__analyze_query_requirements",
+            "mcp.clients.oracle_query_analysis.analyze_query",
             request,
             ar -> {
                 if (ar.succeeded()) {
@@ -359,14 +367,29 @@ public class DataStatsMilestone extends MilestoneManager {
     private Future<JsonObject> mapBusinessTerms(String table, MilestoneContext context) {
         Promise<JsonObject> promise = Promise.promise();
         
+        // Extract terms from the query (simple tokenization)
+        JsonArray terms = new JsonArray();
+        String[] words = context.getQuery().toLowerCase().split("\\s+");
+        for (String word : words) {
+            // Skip common words and short words
+            if (word.length() > 2 && !isCommonWord(word)) {
+                terms.add(word);
+            }
+        }
+        
+        // Build context object for the mapping
+        JsonObject mappingContext = new JsonObject()
+            .put("query", context.getQuery())
+            .put("intent", context.getIntent())
+            .put("table", table);
+        
         JsonObject request = new JsonObject()
-            .put("table_name", table)
-            .put("business_context", context.getQuery())
-            .put("intent", context.getIntent());
+            .put("terms", terms)
+            .put("context", mappingContext);
         
         // Call the mapping tool
         vertx.eventBus().<JsonObject>request(
-            "mcp.clients.business_mapping.business_mapping__map_terms_to_columns",
+            "mcp.clients.business_mapping.map_business_terms",
             request,
             ar -> {
                 if (ar.succeeded()) {
@@ -383,6 +406,26 @@ public class DataStatsMilestone extends MilestoneManager {
             });
         
         return promise.future();
+    }
+    
+    /**
+     * Check if a word is a common word that should be skipped
+     */
+    private boolean isCommonWord(String word) {
+        // Common SQL/query words to skip
+        String[] commonWords = {
+            "the", "and", "or", "is", "are", "was", "were", "been", "have", "has", "had",
+            "do", "does", "did", "will", "would", "could", "should", "may", "might",
+            "a", "an", "of", "in", "on", "at", "to", "for", "from", "with", "by",
+            "how", "what", "where", "when", "why", "who", "which", "there", "many", "much"
+        };
+        
+        for (String common : commonWords) {
+            if (word.equalsIgnoreCase(common)) {
+                return true;
+            }
+        }
+        return false;
     }
     
     /**

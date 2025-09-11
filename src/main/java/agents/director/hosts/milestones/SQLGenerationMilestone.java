@@ -640,6 +640,8 @@ public class SQLGenerationMilestone extends MilestoneManager {
                     if (confidence > 0.6) {  // Lower threshold to catch more possibilities
                         String table = colMapping.getString("table");
                         String column = colMapping.getString("column");
+                        String enumValue = colMapping.getString("enumValue"); // Check for pre-resolved enum value
+                        String matchType = colMapping.getString("matchType"); // Check if this is an enum match
                         
                         // Skip nonsensical hints where term matches table name for ID columns
                         // E.g., don't search for "orders" in ORDERS.ORDER_ID or ORDERS.STATUS_ID
@@ -657,10 +659,33 @@ public class SQLGenerationMilestone extends MilestoneManager {
                                              term.equalsIgnoreCase(table + "s") ||
                                              (table + "s").equalsIgnoreCase(term);
                         
+                        // CRITICAL FIX: Don't skip if this is an enum value match
+                        if ("enum_value".equals(matchType)) {
+                            // This is a matched enum value, not an entity term
+                            isEntityTerm = false;
+                        }
+                        
                         if (isEnumColumn && isEntityTerm) {
                             log("Skipping entity term '" + term + "' for enum column " + 
                                 table + "." + column, 3);
                             continue;
+                        }
+                        
+                        // If we already have an enum value from BusinessMappingServer, use it directly
+                        if (enumValue != null && !enumValue.isEmpty()) {
+                            log("Using pre-resolved enum value for " + term + ": " + column + " = " + enumValue, 2);
+                            JsonObject hint = new JsonObject()
+                                .put("table", table)
+                                .put("column", column)
+                                .put("operator", "=")
+                                .put("value", enumValue)
+                                .put("condition", table + "." + column + " = " + enumValue)
+                                .put("confidence", confidence)
+                                .put("source", "enum_cache")
+                                .put("type", "enum_filter")
+                                .put("reason", "Term '" + term + "' matched enum description, using cached ID");
+                            allHints.add(hint);
+                            continue; // Skip sampling since we have the value
                         }
                         
                         // Create mapping object for tracking
@@ -760,24 +785,43 @@ public class SQLGenerationMilestone extends MilestoneManager {
             return Future.succeededFuture(resolvedHints);
         }
         
-        // Step 1: Call translate_enum for each failed mapping
-        List<Future> enumFutures = new ArrayList<>();
+        // CRITICAL FIX: First check if these are likely enum columns that don't exist
+        // For each failed mapping, try to find the correct enum column
+        List<Future> resolutionFutures = new ArrayList<>();
         
         for (JsonObject mapping : failedMappings) {
             String term = mapping.getString("term");
             String table = mapping.getString("table");
             String column = mapping.getString("column");
             
-            // Try to translate the term as an enum value
-            enumFutures.add(translateEnumValue(term, table, column));
+            // If column doesn't exist but looks like it should be an enum, try alternatives
+            if (column.toUpperCase().equals("STATUS") || column.toUpperCase().equals("TYPE") || 
+                column.toUpperCase().equals("STATE") || column.toUpperCase().equals("CATEGORY")) {
+                
+                // Try common enum column patterns
+                String[] possibleColumns = {
+                    column + "_ID",        // STATUS -> STATUS_ID
+                    column + "_CODE",      // STATUS -> STATUS_CODE
+                    column.replace("_NAME", "_ID"),  // STATUS_NAME -> STATUS_ID
+                    column.replace("_DESC", "_ID")   // STATUS_DESC -> STATUS_ID
+                };
+                
+                // Create a future that tries each alternative
+                Promise<JsonObject> columnPromise = Promise.promise();
+                tryAlternativeEnumColumns(term, table, possibleColumns, 0, columnPromise);
+                resolutionFutures.add(columnPromise.future());
+            } else {
+                // Try standard enum resolution
+                resolutionFutures.add(translateEnumValue(term, table, column));
+            }
         }
         
-        // Step 2: Combine results
-        CompositeFuture.all(enumFutures)
+        // Combine all resolution attempts
+        CompositeFuture.all(resolutionFutures)
             .onComplete(ar -> {
-                for (int i = 0; i < enumFutures.size(); i++) {
+                for (int i = 0; i < resolutionFutures.size(); i++) {
                     @SuppressWarnings("unchecked")
-                    Future<JsonObject> enumFuture = (Future<JsonObject>) enumFutures.get(i);
+                    Future<JsonObject> enumFuture = (Future<JsonObject>) resolutionFutures.get(i);
                     if (enumFuture.succeeded()) {
                         JsonObject enumResult = enumFuture.result();
                         if (enumResult != null && !enumResult.isEmpty()) {
@@ -786,7 +830,7 @@ public class SQLGenerationMilestone extends MilestoneManager {
                     }
                 }
                 
-                // Step 3: If still no hints, try intelligent column discovery
+                // If still no hints, try intelligent column discovery
                 if (resolvedHints.isEmpty()) {
                     discoverAlternativeColumns(failedMappings)
                         .onComplete(discoverAr -> {
@@ -801,6 +845,54 @@ public class SQLGenerationMilestone extends MilestoneManager {
             });
         
         return promise.future();
+    }
+    
+    /**
+     * Try alternative enum column names recursively
+     */
+    private void tryAlternativeEnumColumns(String term, String table, String[] columns, 
+                                          int index, Promise<JsonObject> promise) {
+        if (index >= columns.length) {
+            // No more alternatives, return empty
+            promise.complete(new JsonObject());
+            return;
+        }
+        
+        String column = columns[index];
+        
+        // Try to get enum value for this column
+        businessMappingClient.callTool("translate_enum", new JsonObject()
+            .put("table", table)
+            .put("column", column)
+            .put("values", new JsonArray().add(term))
+            .put("direction", "description_to_code"))
+            .onSuccess(result -> {
+                JsonArray translations = result.getJsonArray("translations", new JsonArray());
+                if (!translations.isEmpty()) {
+                    JsonObject translation = translations.getJsonObject(0);
+                    if (translation.getBoolean("found", false)) {
+                        // Found a match!
+                        JsonObject hint = new JsonObject()
+                            .put("table", table)
+                            .put("column", column)
+                            .put("operator", "=")
+                            .put("value", translation.getString("translated"))
+                            .put("condition", table + "." + column + " = " + translation.getString("translated"))
+                            .put("confidence", 0.95)
+                            .put("source", "enum_resolution")
+                            .put("type", "enum_filter")
+                            .put("reason", "Found '" + term + "' in enum column " + column);
+                        promise.complete(hint);
+                        return;
+                    }
+                }
+                // Try next alternative
+                tryAlternativeEnumColumns(term, table, columns, index + 1, promise);
+            })
+            .onFailure(err -> {
+                // Try next alternative
+                tryAlternativeEnumColumns(term, table, columns, index + 1, promise);
+            });
     }
     
     /**

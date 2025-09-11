@@ -39,6 +39,9 @@ public class BusinessMappingServer extends MCPServerBase {
     private long enumCacheTimestamp = 0;
     private static final long ENUM_CACHE_TTL = 600000; // 10 minutes
     
+    // Storage for enum table relationships (which columns reference which enum tables)
+    private final Map<String, List<EnumRelationship>> enumRelationships = new ConcurrentHashMap<>();
+    
     // Common business term patterns (for fallback when LLM unavailable)
     private static final Map<String, List<String>> COMMON_TERM_PATTERNS = new HashMap<>();
     
@@ -80,6 +83,41 @@ public class BusinessMappingServer extends MCPServerBase {
         // Legacy constructor for backward compatibility (assumes column is ID column)
         EnumMapping(String code, String description, String table, String column) {
             this(code, description, table, column, null);
+        }
+    }
+    
+    /**
+     * Represents a relationship between an enum table and columns that reference it
+     */
+    private static class EnumRelationship {
+        final String enumTable;
+        final String enumIdColumn;
+        final String enumDescColumn;
+        final List<TableColumnRef> referencingColumns;
+        final String discoveryMethod; // "FK_CONSTRAINT" | "NAMING_PATTERN" | "DATA_CORRELATION"
+        final double confidence;
+        
+        EnumRelationship(String enumTable, String enumIdColumn, String enumDescColumn,
+                        List<TableColumnRef> referencingColumns, String discoveryMethod, double confidence) {
+            this.enumTable = enumTable;
+            this.enumIdColumn = enumIdColumn;
+            this.enumDescColumn = enumDescColumn;
+            this.referencingColumns = referencingColumns;
+            this.discoveryMethod = discoveryMethod;
+            this.confidence = confidence;
+        }
+    }
+    
+    /**
+     * Reference to a table.column
+     */
+    private static class TableColumnRef {
+        final String tableName;
+        final String columnName;
+        
+        TableColumnRef(String tableName, String columnName) {
+            this.tableName = tableName;
+            this.columnName = columnName;
         }
     }
     
@@ -217,6 +255,7 @@ public class BusinessMappingServer extends MCPServerBase {
      */
     private void mapBusinessTerms(RoutingContext ctx, String requestId, JsonObject arguments) {
         JsonArray terms = arguments.getJsonArray("terms");
+        String tableName = arguments.getString("table_name"); // NEW: Optional parameter for table-specific mapping
         JsonObject context = arguments.getJsonObject("context", new JsonObject());
         JsonArray tableContext = arguments.getJsonArray("tableContext", new JsonArray());
         
@@ -225,14 +264,80 @@ public class BusinessMappingServer extends MCPServerBase {
             return;
         }
         
+        // CRITICAL FIX: First check if any terms match enum descriptions
+        JsonArray enumMatches = new JsonArray();
+        for (int i = 0; i < terms.size(); i++) {
+            String term = terms.getString(i);
+            JsonArray termEnumMatches = searchEnumDescriptions(term);
+            if (!termEnumMatches.isEmpty()) {
+                vertx.eventBus().publish("log", "Found enum matches for term '" + term + "': " + 
+                    termEnumMatches.size() + " matches,2,BusinessMappingServer,MCP,System");
+                enumMatches.add(new JsonObject()
+                    .put("term", term)
+                    .put("enumMatches", termEnumMatches));
+            }
+        }
+        
+        // If we found enum matches, return them directly with high confidence
+        if (!enumMatches.isEmpty()) {
+            JsonArray mappings = new JsonArray();
+            for (int i = 0; i < enumMatches.size(); i++) {
+                JsonObject enumMatch = enumMatches.getJsonObject(i);
+                String term = enumMatch.getString("term");
+                JsonArray matches = enumMatch.getJsonArray("enumMatches");
+                
+                JsonArray termMappings = new JsonArray();
+                for (int j = 0; j < matches.size(); j++) {
+                    JsonObject match = matches.getJsonObject(j);
+                    termMappings.add(new JsonObject()
+                        .put("table", match.getString("table"))
+                        .put("column", match.getString("column"))
+                        .put("confidence", match.getDouble("confidence", 0.9))
+                        .put("reason", "Term '" + term + "' matches enum value '" + 
+                            match.getString("enumDescription") + "' (ID: " + match.getString("enumValue") + ")")
+                        .put("enumValue", match.getString("enumValue"))
+                        .put("matchType", "enum_value"));
+                }
+                
+                mappings.add(new JsonObject()
+                    .put("term", term)
+                    .put("mappings", termMappings));
+            }
+            
+            JsonObject result = new JsonObject();
+            result.put("mappings", new JsonObject().put("mappings", mappings));
+            result.put("method", "enum_cache_search");
+            result.put("confidence", 0.95);
+            result.put("enumMatchesFound", true);
+            if (tableName != null) {
+                result.put("table", tableName);
+            }
+            sendSuccess(ctx, requestId, result);
+            return;
+        }
+        
         JsonObject result = new JsonObject();
         JsonArray mappings = new JsonArray();
+        
+        // NEW: If table_name is provided, do column-specific mapping
+        if (tableName != null && !tableName.isEmpty()) {
+            // Add table context for more precise mapping
+            context.put("table", tableName);
+            context.put("mapping_scope", "table_columns");
+        }
         
         // If LLM is available and we have context, use LLM for intelligent mapping
         if (llmService.isInitialized() && !context.isEmpty()) {
             executeBlocking(Promise.<JsonObject>promise(), promise -> {
                 try {
-                    JsonArray llmMappings = mapTermsWithLLM(terms, context, tableContext);
+                    JsonArray llmMappings;
+                    if (tableName != null && !tableName.isEmpty()) {
+                        // Table-specific mapping
+                        llmMappings = mapTermsToColumnsWithLLM(terms, tableName, context);
+                    } else {
+                        // General mapping
+                        llmMappings = mapTermsWithLLM(terms, context, tableContext);
+                    }
                     promise.complete(new JsonObject().put("mappings", llmMappings));
                 } catch (Exception e) {
                     vertx.eventBus().publish("log", "LLM mapping failed" + ",0,BusinessMappingServer,MCP,System");
@@ -244,6 +349,9 @@ public class BusinessMappingServer extends MCPServerBase {
                 result.put("mappings", res.result());
                 result.put("method", res.succeeded() ? "llm_context_aware" : "pattern_matching");
                 result.put("confidence", res.succeeded() ? 0.85 : 0.6);
+                if (tableName != null) {
+                    result.put("table", tableName);
+                }
                 sendSuccess(ctx, requestId, result);
             });
         } else {
@@ -253,6 +361,9 @@ public class BusinessMappingServer extends MCPServerBase {
             result.put("method", "pattern_matching");
             result.put("confidence", 0.6);
             result.put("warning", "LLM unavailable or no context provided - using pattern matching");
+            if (tableName != null) {
+                result.put("table", tableName);
+            }
             sendSuccess(ctx, requestId, result);
         }
     }
@@ -420,22 +531,195 @@ public class BusinessMappingServer extends MCPServerBase {
         sendSuccess(ctx, requestId, result);
     }
     
+    /**
+     * Map terms specifically to columns within a given table
+     */
+    private JsonArray mapTermsToColumnsWithLLM(JsonArray terms, String tableName, JsonObject context) 
+            throws Exception {
+        // Build a focused prompt for column-specific mapping
+        String systemPrompt = """
+            You are a database expert. Map business terms to specific columns in the given table.
+            Focus ONLY on columns that might exist in this specific table.
+            Return mappings with confidence scores based on semantic similarity.
+            
+            Respond with a JSON array where each element has:
+            {
+              "term": "the business term",
+              "mappings": [
+                {
+                  "column": "COLUMN_NAME",
+                  "confidence": 0.0-1.0,
+                  "reason": "why this mapping makes sense"
+                }
+              ]
+            }
+            """;
+        
+        JsonObject promptData = new JsonObject()
+            .put("terms", terms)
+            .put("table", tableName)
+            .put("context", context);
+        
+        try {
+            // Call LLM for column mapping
+            List<JsonObject> messages = List.of(
+                new JsonObject().put("role", "system").put("content", systemPrompt),
+                new JsonObject().put("role", "user").put("content", 
+                    "Map these terms to columns in table " + tableName + ": " + promptData.encode())
+            );
+            
+            JsonObject llmResponse = llmService.chatCompletion(
+                messages.stream().map(JsonObject::encode).collect(Collectors.toList()),
+                0.3, // Low temperature for consistent mapping
+                1000
+            ).join();
+            
+            String content = llmResponse.getJsonArray("choices")
+                .getJsonObject(0)
+                .getJsonObject("message")
+                .getString("content");
+            
+            // Parse and return the mappings
+            return new JsonArray(content);
+        } catch (Exception e) {
+            vertx.eventBus().publish("log", "Column mapping with LLM failed: " + e.getMessage() + ",0,BusinessMappingServer,MCP,System");
+            // Return empty array on failure - no fallback data
+            return new JsonArray();
+        }
+    }
+    
+    /**
+     * Search enum cache for descriptions matching the given term
+     * Returns mappings with table, column, and the matching enum ID
+     */
+    private JsonArray searchEnumDescriptions(String term) {
+        JsonArray matches = new JsonArray();
+        
+        if (term == null || term.isEmpty() || enumCache.isEmpty()) {
+            return matches;
+        }
+        
+        String searchTerm = term.toLowerCase().trim();
+        
+        // Search through all cached enums
+        for (Map.Entry<String, Map<String, EnumMapping>> columnEntry : enumCache.entrySet()) {
+            String cacheKey = columnEntry.getKey(); // Could be "ORDERS.STATUS_ID" or "ORDER_STATUS_ENUM"
+            Map<String, EnumMapping> enumMappings = columnEntry.getValue();
+            
+            for (Map.Entry<String, EnumMapping> enumEntry : enumMappings.entrySet()) {
+                EnumMapping mapping = enumEntry.getValue();
+                
+                // Check if description matches (case-insensitive)
+                // CRITICAL FIX: Convert both to lowercase for proper matching
+                if (mapping.description != null && 
+                    mapping.description.toLowerCase().equals(searchTerm)) {
+                    
+                    // Handle both formats: "TABLE.COLUMN" and enum table names
+                    String[] parts = cacheKey.split("\\.");
+                    
+                    if (parts.length == 2) {
+                        // Regular column format: "ORDERS.STATUS_ID"
+                        JsonObject match = new JsonObject()
+                            .put("table", parts[0])
+                            .put("column", parts[1])
+                            .put("enumValue", mapping.code)
+                            .put("enumDescription", mapping.description)
+                            .put("confidence", calculateMatchConfidence(searchTerm, mapping.description))
+                            .put("matchType", "enum_description");
+                        matches.add(match);
+                    } else if (cacheKey.endsWith("_ENUM")) {
+                        // Enum table format: Look up discovered relationships
+                        List<EnumRelationship> relationships = enumRelationships.get(cacheKey);
+                        if (relationships != null) {
+                            for (EnumRelationship rel : relationships) {
+                                for (TableColumnRef ref : rel.referencingColumns) {
+                                    JsonObject match = new JsonObject()
+                                        .put("table", ref.tableName)
+                                        .put("column", ref.columnName)
+                                        .put("enumValue", mapping.code)
+                                        .put("enumDescription", mapping.description)
+                                        .put("confidence", rel.confidence)
+                                        .put("matchType", "enum_table_value")
+                                        .put("discoveryMethod", rel.discoveryMethod);
+                                    matches.add(match);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return matches;
+    }
+    
+    /**
+     * Calculate confidence score for enum description match
+     */
+    private double calculateMatchConfidence(String searchTerm, String description) {
+        if (description == null) return 0.0;
+        
+        String lowerDesc = description.toLowerCase();
+        String lowerTerm = searchTerm.toLowerCase();
+        
+        // Exact match
+        if (lowerDesc.equals(lowerTerm)) {
+            return 1.0;
+        }
+        // Description contains exact term
+        if (lowerDesc.contains(lowerTerm)) {
+            return 0.9;
+        }
+        // Term contains description
+        if (lowerTerm.contains(lowerDesc)) {
+            return 0.85;
+        }
+        // Partial word match
+        String[] descWords = lowerDesc.split("\\s+");
+        for (String word : descWords) {
+            if (word.equals(lowerTerm)) {
+                return 0.8;
+            }
+            if (word.contains(lowerTerm) || lowerTerm.contains(word)) {
+                return 0.7;
+            }
+        }
+        
+        return 0.5; // Default if we got here through other logic
+    }
+    
     private JsonArray mapTermsWithLLM(JsonArray terms, JsonObject context, JsonArray tableContext) 
             throws Exception {
+        
+        // First, check enum cache for matching descriptions
+        JsonArray enumMatches = new JsonArray();
+        for (int i = 0; i < terms.size(); i++) {
+            String term = terms.getString(i);
+            JsonArray termEnumMatches = searchEnumDescriptions(term);
+            if (!termEnumMatches.isEmpty()) {
+                enumMatches.add(new JsonObject()
+                    .put("term", term)
+                    .put("enumMatches", termEnumMatches));
+            }
+        }
         
         String systemPrompt = """
             You are a database schema expert. Map business terms to database columns based on:
             1. The ACTUAL database schema provided (fullDatabaseSchema)
-            2. The provided schema information and context
-            3. Common database naming conventions
-            4. The semantic meaning of terms
-            5. Regional terminology variations
+            2. Any enum mappings found (enumMappings) - USE THESE FIRST
+            3. The provided schema information and context
+            4. Common database naming conventions
+            5. The semantic meaning of terms
+            6. Regional terminology variations
             
-            CRITICAL: When fullDatabaseSchema is provided, use ONLY columns that exist in that schema!
+            CRITICAL RULES:
+            - When enumMappings are provided for a term, ALWAYS use those columns and values
+            - When fullDatabaseSchema is provided, use ONLY columns that exist in that schema
+            - If a term matches an enum description, map to the column containing the enum ID
             
             Consider:
             - Business terms may map to multiple columns
-            - Use the actual schema first, then schema matches and query analysis context
+            - Use enum mappings first, then actual schema, then schema matches
             - Prefer exact matches, then semantic matches
             - Consider compound terms (e.g., "employee name" -> EMPLOYEE.FULL_NAME)
             - Be aware of regional variations:
@@ -470,11 +754,22 @@ public class BusinessMappingServer extends MCPServerBase {
                 }
               ]
             }
+            
+            CRITICAL: 
+            - Do NOT include an enumValue field unless provided in enumMappings
+            - Never create placeholder values like "PENDING_STATUS_ID"
+            - If a term appears to be an enum value but no mapping is found, just map to the column without enumValue
             """;
         
         JsonObject promptData = new JsonObject();
         promptData.put("businessTerms", terms);
         promptData.put("context", context);
+        
+        // Add enum matches to prompt data
+        if (!enumMatches.isEmpty()) {
+            promptData.put("enumMappings", enumMatches);
+            vertx.eventBus().publish("log", "Found enum matches for terms: " + enumMatches.encode() + ",2,BusinessMappingServer,MCP,System");
+        }
         
         if (!tableContext.isEmpty()) {
             promptData.put("limitToTables", tableContext);
@@ -650,6 +945,17 @@ public class BusinessMappingServer extends MCPServerBase {
                 enumCacheTimestamp = System.currentTimeMillis();
                 vertx.eventBus().publish("log", "Enum cache loaded with " + enumCache.size() + 
                     " column mappings via intelligent discovery,2,BusinessMappingServer,MCP,System");
+                
+                // Discover relationships between enum tables and regular tables
+                discoverEnumRelationships().onComplete(relAr -> {
+                    if (relAr.succeeded()) {
+                        vertx.eventBus().publish("log", "Discovered " + relAr.result() + 
+                            " enum table relationships,2,BusinessMappingServer,MCP,System");
+                    } else {
+                        vertx.eventBus().publish("log", "Failed to discover enum relationships: " + 
+                            relAr.cause().getMessage() + ",1,BusinessMappingServer,MCP,System");
+                    }
+                });
             })
             .onFailure(throwable -> {
                 vertx.eventBus().publish("log", "Failed to load enum cache: " + 
@@ -859,6 +1165,392 @@ public class BusinessMappingServer extends MCPServerBase {
     }
     
     /**
+     * Discover relationships between enum tables and regular tables
+     * Returns the number of relationships discovered
+     */
+    private Future<Integer> discoverEnumRelationships() {
+        vertx.eventBus().publish("log", "Starting enum relationship discovery,2,BusinessMappingServer,MCP,System");
+        
+        // First try FK constraints
+        return discoverForeignKeyRelationships()
+            .compose(fkCount -> {
+                // Then try naming patterns
+                return discoverNamingPatternRelationships()
+                    .map(nameCount -> fkCount + nameCount);
+            })
+            .compose(totalCount -> {
+                // Finally try data correlation for remaining enum tables
+                return discoverDataCorrelationRelationships()
+                    .map(dataCount -> totalCount + dataCount);
+            })
+            .onSuccess(count -> {
+                vertx.eventBus().publish("log", "Discovered " + count + 
+                    " enum relationships total,2,BusinessMappingServer,MCP,System");
+            })
+            .onFailure(err -> {
+                vertx.eventBus().publish("log", "Enum relationship discovery failed: " + 
+                    err.getMessage() + ",1,BusinessMappingServer,MCP,System");
+            });
+    }
+    
+    /**
+     * Discover enum relationships through foreign key constraints
+     */
+    private Future<Integer> discoverForeignKeyRelationships() {
+        String query = """
+            SELECT 
+                a.table_name AS referencing_table,
+                a.column_name AS referencing_column,
+                c.table_name AS referenced_table,
+                c.column_name AS referenced_column
+            FROM all_cons_columns a
+            JOIN all_constraints b ON a.owner = b.owner 
+                AND a.constraint_name = b.constraint_name
+            JOIN all_cons_columns c ON b.r_owner = c.owner 
+                AND b.r_constraint_name = c.constraint_name
+            WHERE b.constraint_type = 'R'
+                AND (c.table_name LIKE '%ENUM%' 
+                    OR c.table_name LIKE '%LOOKUP%'
+                    OR c.table_name LIKE '%STATUS%'
+                    OR c.table_name LIKE '%TYPE%')
+                AND a.owner = USER
+            """;
+        
+        return connectionManager.executeQuery(query)
+            .map(results -> {
+                int count = 0;
+                for (int i = 0; i < results.size(); i++) {
+                    JsonObject row = results.getJsonObject(i);
+                    String refTable = row.getString("REFERENCING_TABLE");
+                    String refColumn = row.getString("REFERENCING_COLUMN");
+                    String enumTable = row.getString("REFERENCED_TABLE");
+                    
+                    // Store the relationship
+                    List<TableColumnRef> refs = new ArrayList<>();
+                    refs.add(new TableColumnRef(refTable, refColumn));
+                    
+                    // We'll determine the ID and desc columns from the enum cache later
+                    String idCol = row.getString("REFERENCED_COLUMN");
+                    EnumRelationship relationship = new EnumRelationship(
+                        enumTable, idCol, null, refs, "FK_CONSTRAINT", 1.0);
+                    
+                    enumRelationships.computeIfAbsent(enumTable, k -> new ArrayList<>())
+                        .add(relationship);
+                    
+                    vertx.eventBus().publish("log", "Found FK relationship: " + 
+                        refTable + "." + refColumn + " -> " + enumTable + 
+                        ",3,BusinessMappingServer,MCP,System");
+                    count++;
+                }
+                return count;
+            })
+            .onFailure(err -> {
+                vertx.eventBus().publish("log", "FK discovery failed: " + 
+                    err.getMessage() + ",1,BusinessMappingServer,MCP,System");
+            })
+            .recover(err -> Future.succeededFuture(0));
+    }
+    
+    /**
+     * Discover enum relationships through naming patterns
+     */
+    private Future<Integer> discoverNamingPatternRelationships() {
+        // Get all enum tables that don't have FK relationships yet
+        String enumQuery = """
+            SELECT table_name 
+            FROM user_tables 
+            WHERE (table_name LIKE '%ENUM%' 
+                OR table_name LIKE '%LOOKUP%'
+                OR table_name LIKE '%STATUS%'
+                OR table_name LIKE '%TYPE%')
+            ORDER BY table_name
+            """;
+        
+        return connectionManager.executeQuery(enumQuery)
+            .compose(enumTables -> {
+                List<Future<Integer>> futures = new ArrayList<>();
+                
+                for (int i = 0; i < enumTables.size(); i++) {
+                    String enumTable = enumTables.getJsonObject(i).getString("TABLE_NAME");
+                    
+                    // Skip if we already have relationships for this enum table
+                    if (enumRelationships.containsKey(enumTable)) {
+                        continue;
+                    }
+                    
+                    futures.add(findNamingPatternMatches(enumTable));
+                }
+                
+                return CompositeFuture.all(toRawFutureList(futures))
+                    .map(cf -> {
+                        int total = 0;
+                        for (int i = 0; i < cf.size(); i++) {
+                            total += (Integer) cf.resultAt(i);
+                        }
+                        return total;
+                    });
+            })
+            .recover(err -> Future.succeededFuture(0));
+    }
+    
+    /**
+     * Find tables/columns that match naming patterns for a given enum table
+     */
+    private Future<Integer> findNamingPatternMatches(String enumTable) {
+        // Extract base name from enum table (e.g., ORDER_STATUS_ENUM -> STATUS)
+        String baseName = extractBaseName(enumTable);
+        if (baseName == null) {
+            return Future.succeededFuture(0);
+        }
+        
+        // Look for columns that might reference this enum
+        String query = """
+            SELECT DISTINCT table_name, column_name
+            FROM user_tab_columns
+            WHERE (column_name LIKE '%" + baseName + "%'
+                OR column_name LIKE '%" + baseName + "_ID'
+                OR column_name LIKE '%" + baseName + "_CODE'
+                OR column_name = '" + baseName + "')
+                AND (column_name LIKE '%_ID' 
+                    OR column_name LIKE '%_CODE'
+                    OR column_name = '" + baseName + "')
+                AND table_name NOT LIKE '%ENUM%'
+                AND table_name NOT LIKE '%LOOKUP%'
+            """;
+        
+        return connectionManager.executeQuery(query)
+            .map(results -> {
+                int count = 0;
+                for (int i = 0; i < results.size(); i++) {
+                    JsonObject row = results.getJsonObject(i);
+                    String tableName = row.getString("TABLE_NAME");
+                    String columnName = row.getString("COLUMN_NAME");
+                    
+                    // Add the relationship
+                    List<TableColumnRef> refs = new ArrayList<>();
+                    refs.add(new TableColumnRef(tableName, columnName));
+                    
+                    // Try to find ID column from enum cache
+                    String idCol = findEnumIdColumn(enumTable);
+                    String descCol = findEnumDescColumn(enumTable);
+                    
+                    EnumRelationship relationship = new EnumRelationship(
+                        enumTable, idCol, descCol, refs, "NAMING_PATTERN", 0.8);
+                    
+                    enumRelationships.computeIfAbsent(enumTable, k -> new ArrayList<>())
+                        .add(relationship);
+                    
+                    vertx.eventBus().publish("log", "Found naming pattern match: " + 
+                        tableName + "." + columnName + " -> " + enumTable + 
+                        ",3,BusinessMappingServer,MCP,System");
+                    count++;
+                }
+                return count;
+            })
+            .recover(err -> Future.succeededFuture(0));
+    }
+    
+    /**
+     * Extract base name from enum table name
+     */
+    private String extractBaseName(String enumTableName) {
+        // Remove common suffixes
+        String name = enumTableName
+            .replaceAll("_ENUM$", "")
+            .replaceAll("_LOOKUP$", "")
+            .replaceAll("_REF$", "")
+            .replaceAll("_REFERENCE$", "")
+            .replaceAll("_TYPE$", "");
+        
+        // If we have something like ORDER_STATUS, extract STATUS
+        if (name.contains("_")) {
+            String[] parts = name.split("_");
+            if (parts.length > 1) {
+                return parts[parts.length - 1]; // Return last part
+            }
+        }
+        
+        return name;
+    }
+    
+    /**
+     * Discover relationships through data correlation
+     */
+    private Future<Integer> discoverDataCorrelationRelationships() {
+        // Get enum tables without relationships
+        List<String> unmappedEnumTables = new ArrayList<>();
+        for (String enumTable : enumCache.keySet()) {
+            if (!enumRelationships.containsKey(enumTable)) {
+                unmappedEnumTables.add(enumTable);
+            }
+        }
+        
+        if (unmappedEnumTables.isEmpty()) {
+            return Future.succeededFuture(0);
+        }
+        
+        vertx.eventBus().publish("log", "Checking data correlation for " + 
+            unmappedEnumTables.size() + " unmapped enum tables,2,BusinessMappingServer,MCP,System");
+        
+        List<Future<Integer>> futures = new ArrayList<>();
+        for (String enumTable : unmappedEnumTables) {
+            futures.add(correlateEnumTableData(enumTable));
+        }
+        
+        return CompositeFuture.all(toRawFutureList(futures))
+            .map(cf -> {
+                int total = 0;
+                for (int i = 0; i < cf.size(); i++) {
+                    total += (Integer) cf.resultAt(i);
+                }
+                return total;
+            })
+            .recover(err -> Future.succeededFuture(0));
+    }
+    
+    /**
+     * Correlate enum table data with potential referencing columns
+     */
+    private Future<Integer> correlateEnumTableData(String enumTable) {
+        // Get the ID column values from the enum table
+        Map<String, EnumMapping> enumData = enumCache.get(enumTable);
+        if (enumData == null || enumData.isEmpty()) {
+            return Future.succeededFuture(0);
+        }
+        
+        // Get sample ID values from the enum table
+        Set<String> enumIds = new HashSet<>();
+        for (EnumMapping enumMapping : enumData.values()) {
+            // The code is the ID value
+            enumIds.add(enumMapping.code);
+        }
+        
+        if (enumIds.isEmpty()) {
+            return Future.succeededFuture(0);
+        }
+        
+        // Look for columns in other tables that contain these values
+        String baseName = extractBaseName(enumTable);
+        String whereClause = baseName != null 
+            ? "(column_name LIKE '%" + baseName + "%' OR column_name LIKE '%_ID' OR column_name LIKE '%_CODE')"
+            : "(column_name LIKE '%_ID' OR column_name LIKE '%_CODE')";
+        
+        String query = """
+            SELECT table_name, column_name
+            FROM user_tab_columns
+            WHERE " + whereClause + "
+                AND table_name NOT LIKE '%ENUM%'
+                AND table_name NOT LIKE '%LOOKUP%'
+                AND data_type IN ('NUMBER', 'VARCHAR2', 'CHAR')
+            """;
+        
+        return connectionManager.executeQuery(query)
+            .compose(candidates -> {
+                List<Future<Boolean>> checkFutures = new ArrayList<>();
+                List<TableColumnRef> potentialRefs = new ArrayList<>();
+                
+                for (int i = 0; i < candidates.size(); i++) {
+                    JsonObject row = candidates.getJsonObject(i);
+                    String tableName = row.getString("TABLE_NAME");
+                    String columnName = row.getString("COLUMN_NAME");
+                    TableColumnRef ref = new TableColumnRef(tableName, columnName);
+                    potentialRefs.add(ref);
+                    checkFutures.add(checkColumnContainsEnumValues(tableName, columnName, enumIds));
+                }
+                
+                return CompositeFuture.all(toRawFutureList(checkFutures))
+                    .map(cf -> {
+                        int count = 0;
+                        for (int i = 0; i < cf.size(); i++) {
+                            Boolean matches = (Boolean) cf.resultAt(i);
+                            if (Boolean.TRUE.equals(matches)) {
+                                TableColumnRef ref = potentialRefs.get(i);
+                                List<TableColumnRef> refs = new ArrayList<>();
+                                refs.add(ref);
+                                
+                                // Try to find ID column from enum cache
+                                String idCol = findEnumIdColumn(enumTable);
+                                String descCol = findEnumDescColumn(enumTable);
+                                
+                                EnumRelationship relationship = new EnumRelationship(
+                                    enumTable, idCol, descCol, refs, "DATA_CORRELATION", 0.6);
+                                
+                                enumRelationships.computeIfAbsent(enumTable, k -> new ArrayList<>())
+                                    .add(relationship);
+                                vertx.eventBus().publish("log", "Found data correlation: " + 
+                                    ref.tableName + "." + ref.columnName + " -> " + enumTable + 
+                                    ",3,BusinessMappingServer,MCP,System");
+                                count++;
+                            }
+                        }
+                        return count;
+                    });
+            })
+            .recover(err -> Future.succeededFuture(0));
+    }
+    
+    /**
+     * Check if a column contains values from the enum table
+     */
+    private Future<Boolean> checkColumnContainsEnumValues(String tableName, String columnName, Set<String> enumIds) {
+        if (enumIds.isEmpty()) {
+            return Future.succeededFuture(false);
+        }
+        
+        // Sample the column to see if it contains enum values
+        String query = "SELECT DISTINCT " + columnName + " FROM " + tableName + 
+            " WHERE " + columnName + " IS NOT NULL AND ROWNUM <= 100";
+        
+        return connectionManager.executeQuery(query)
+            .map(results -> {
+                int matchCount = 0;
+                int totalCount = 0;
+                
+                for (int i = 0; i < results.size(); i++) {
+                    Object value = results.getJsonObject(i).getValue(columnName);
+                    if (value != null) {
+                        totalCount++;
+                        if (enumIds.contains(value.toString())) {
+                            matchCount++;
+                        }
+                    }
+                }
+                
+                // Consider it a match if >50% of sampled values are in the enum
+                return totalCount > 0 && (matchCount * 100 / totalCount) > 50;
+            })
+            .recover(err -> Future.succeededFuture(false));
+    }
+    
+    /**
+     * Find the ID column for an enum table from the cache
+     */
+    private String findEnumIdColumn(String enumTable) {
+        Map<String, EnumMapping> enumData = enumCache.get(enumTable);
+        if (enumData != null && !enumData.isEmpty()) {
+            // Get the first mapping to find the column name
+            EnumMapping first = enumData.values().iterator().next();
+            return first.column;
+        }
+        // Fallback to common patterns
+        return enumTable.replace("_ENUM", "") + "_ID";
+    }
+    
+    /**
+     * Find the description column for an enum table from the cache
+     */
+    private String findEnumDescColumn(String enumTable) {
+        Map<String, EnumMapping> enumData = enumCache.get(enumTable);
+        if (enumData != null && !enumData.isEmpty()) {
+            // Get the first mapping to find the description column
+            EnumMapping first = enumData.values().iterator().next();
+            return first.descriptionColumn;
+        }
+        // Fallback to common patterns
+        return enumTable.replace("_ENUM", "") + "_DESCRIPTION";
+    }
+    
+    /**
      * Pattern-based detection of likely enum columns
      */
     private boolean isLikelyEnumColumn(String columnName) {
@@ -988,6 +1680,12 @@ public class BusinessMappingServer extends MCPServerBase {
                                 if (code != null && desc != null) {
                                     mappings.put(code.toUpperCase(), 
                                         new EnumMapping(code, desc, enumTable, finalIdColumn, finalDescColumn));
+                                    
+                                    // Log what we're loading for debugging
+                                    if (desc.toLowerCase().contains("pending")) {
+                                        vertx.eventBus().publish("log", "Loaded enum mapping: " + enumTable + 
+                                            " -> " + code + " = '" + desc + "',2,BusinessMappingServer,MCP,DEBUG");
+                                    }
                                 }
                             }
                             
