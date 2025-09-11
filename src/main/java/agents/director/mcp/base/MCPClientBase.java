@@ -100,6 +100,7 @@ public abstract class MCPClientBase extends AbstractVerticle {
         discoverTools().onComplete(ar -> {
             if (ar.succeeded()) {
                 vertx.eventBus().publish("log", serverName + " client started with " + tools.size() + " tools discovered,2," + getClass().getSimpleName() + ",MCP,System");
+                setupEventBusConsumers();
                 onClientReady();
                 startPromise.complete();
             } else {
@@ -115,6 +116,37 @@ public abstract class MCPClientBase extends AbstractVerticle {
      */
     protected void onClientReady() {
         // Default: no additional action
+    }
+    
+    /**
+     * Set up event bus consumers for each discovered tool
+     * This allows milestones to call tools via event bus
+     */
+    private void setupEventBusConsumers() {
+        for (String toolName : tools.keySet()) {
+            // Create event bus address for this tool
+            // Format: mcp.client.<servername>.<toolname>
+            String normalizedServerName = serverName.toLowerCase()
+                .replace(" ", "")
+                .replace("_", "");
+            String address = "mcp.client." + normalizedServerName + "." + toolName;
+            
+            // Set up consumer that forwards to callTool
+            vertx.eventBus().<JsonObject>consumer(address, message -> {
+                JsonObject params = message.body();
+                
+                // Call the tool via HTTP using MCP protocol
+                callTool(toolName, params)
+                    .onSuccess(result -> message.reply(result))
+                    .onFailure(err -> message.fail(500, err.getMessage()));
+            });
+            
+            if (logLevel >= 3) {
+                vertx.eventBus().publish("log", 
+                    "Set up event bus consumer at: " + address + 
+                    ",3," + getClass().getSimpleName() + ",MCP,System");
+            }
+        }
     }
     
     /**

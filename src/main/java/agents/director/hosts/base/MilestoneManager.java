@@ -1,0 +1,115 @@
+package agents.director.hosts.base;
+
+import io.vertx.core.*;
+import io.vertx.core.json.JsonObject;
+
+/**
+ * Base class for milestone managers in the simplified 6-milestone architecture.
+ * Each milestone represents a clear step in processing a user's query.
+ * 
+ * Unlike the complex pipeline system, milestones are:
+ * - Sequential (1-6, cannot skip)
+ * - Self-contained (each does one clear thing)
+ * - User-facing (results are shared at each step)
+ * - Simple (no complex strategies or depth analysis)
+ * 
+ * Each milestone now deploys MCP clients directly without manager abstractions.
+ */
+public abstract class MilestoneManager {
+    
+    protected final Vertx vertx;
+    protected final String baseUrl;
+    protected final int milestoneNumber;
+    protected final String milestoneName;
+    protected final String description;
+    
+    /**
+     * Constructor for milestone manager
+     * @param vertx The Vert.x instance
+     * @param baseUrl The base URL for MCP servers
+     * @param milestoneNumber The milestone number (1-6)
+     * @param milestoneName The name of this milestone
+     * @param description What this milestone does
+     */
+    protected MilestoneManager(Vertx vertx, String baseUrl, int milestoneNumber, 
+                               String milestoneName, String description) {
+        this.vertx = vertx;
+        this.baseUrl = baseUrl;
+        this.milestoneNumber = milestoneNumber;
+        this.milestoneName = milestoneName;
+        this.description = description;
+    }
+    
+    /**
+     * Initialize the managers needed for this milestone
+     * @return Future that completes when initialization is done
+     */
+    public abstract Future<Void> initialize();
+    
+    /**
+     * Execute this milestone with the given context
+     * @param context The milestone context containing all data
+     * @return Future with the updated context
+     */
+    public abstract Future<MilestoneContext> execute(MilestoneContext context);
+    
+    /**
+     * Get the shareable result from this milestone to show the user
+     * @param context The current context
+     * @return JsonObject with user-friendly results
+     */
+    public abstract JsonObject getShareableResult(MilestoneContext context);
+    
+    /**
+     * Check if this milestone should be skipped based on context
+     * @param context The current context
+     * @return true if milestone should be skipped
+     */
+    public boolean shouldSkip(MilestoneContext context) {
+        // By default, never skip milestones
+        return false;
+    }
+    
+    /**
+     * Get milestone metadata
+     */
+    public JsonObject getMetadata() {
+        return new JsonObject()
+            .put("number", milestoneNumber)
+            .put("name", milestoneName)
+            .put("description", description);
+    }
+    
+    /**
+     * Publish a streaming event for this milestone
+     */
+    protected void publishStreamingEvent(String conversationId, String eventType, JsonObject data) {
+        String address = "streaming." + conversationId + "." + eventType;
+        data.put("milestone", milestoneNumber)
+            .put("milestone_name", milestoneName)
+            .put("timestamp", System.currentTimeMillis());
+        vertx.eventBus().publish(address, data);
+    }
+    
+    /**
+     * Log milestone activity
+     */
+    protected void log(String message, int level) {
+        vertx.eventBus().publish("log", 
+            message + "," + level + "," + milestoneName + ",Milestone,System");
+    }
+    
+    /**
+     * Clean up resources
+     * Each milestone should override this to undeploy its MCP clients
+     */
+    public Future<Void> cleanup() {
+        // Default implementation - subclasses should override to clean up their clients
+        return Future.succeededFuture();
+    }
+    
+    // Getters
+    public int getMilestoneNumber() { return milestoneNumber; }
+    public String getMilestoneName() { return milestoneName; }
+    public String getDescription() { return description; }
+}

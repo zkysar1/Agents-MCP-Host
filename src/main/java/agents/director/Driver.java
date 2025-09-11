@@ -255,8 +255,8 @@ public class Driver {
     // Deploy the UniversalHost (replaces the 3 legacy hosts)
     List<Future> hostFutures = new ArrayList<>();
 
-    // Deploy UniversalHost
-    System.out.println("[Driver] Deploying UniversalHost...");
+    // Deploy UniversalHost (new 6-milestone architecture)
+    System.out.println("[Driver] Deploying UniversalHost (Simplified 6-Milestone Architecture)...");
     hostFutures.add(
             vertx.deployVerticle(
                     "agents.director.hosts.UniversalHost",
