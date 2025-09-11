@@ -119,9 +119,9 @@ public class IntentMilestone extends MilestoneManager {
                 log("Intent extraction complete: " + intentStatement, 2);
                 promise.complete(context);
             })
-            .recover(err -> {
-                // Log the failure explicitly at WARNING level
-                log("Intent extraction failed, using degraded mode: " + err.getMessage(), 1);
+            .onFailure(err -> {
+                // Log the failure and fail fast
+                log("Intent extraction failed: " + err.getMessage(), 0);
                 
                 // Mark context as degraded
                 context.setMilestoneDegraded(1, "Intent analysis failed: " + err.getMessage());
@@ -129,37 +129,8 @@ public class IntentMilestone extends MilestoneManager {
                 // Publish degradation event
                 publishDegradationEvent(context, "intent_extraction", err.getMessage());
                 
-                // Use simple intent extraction as fallback
-                String fallbackIntent = extractSimpleIntent(context.getQuery());
-                context.setIntent(fallbackIntent);
-                context.setIntentType("unknown");
-                context.setIntentDetails(new JsonObject()
-                    .put("primary_intent", fallbackIntent)
-                    .put("degraded", true)
-                    .put("degradation_reason", err.getMessage())
-                    .put("confidence", 0.3)); // Low confidence for fallback
-                
-                // Mark milestone as complete (but degraded)
-                context.completeMilestone(1);
-                
-                // Publish streaming event about degradation
-                if (context.isStreaming() && context.getSessionId() != null) {
-                    JsonObject degradedResult = getShareableResult(context);
-                    degradedResult.put("degraded", true)
-                        .put("message", "⚠️ Intent analysis degraded: " + fallbackIntent);
-                    publishStreamingEvent(context.getConversationId(), "milestone.intent_complete", degradedResult);
-                }
-                
-                log("Using degraded intent extraction: " + fallbackIntent, 2);
-                
-                // Return empty result to continue pipeline
-                return Future.succeededFuture(new JsonObject()
-                    .put("extractedIntent", new JsonObject()
-                        .put("result", new JsonObject()
-                            .put("primary_intent", fallbackIntent)))
-                    .put("intentEvaluation", new JsonObject()
-                        .put("intent_type", "unknown"))
-                    .put("degraded", true));
+                // Fail the milestone execution
+                promise.fail(err);
             });
         
         return promise.future();
@@ -327,44 +298,16 @@ public class IntentMilestone extends MilestoneManager {
                 }
             }
             
-            // If still empty, use the simple intent extraction
+            // If still empty, return the original query as fallback
             if (primaryIntent == null || primaryIntent.isEmpty()) {
-                return extractSimpleIntent(query);
+                return "Process query: " + query;
             }
         }
         
         // Clean up and format the primary intent
         String intent = primaryIntent.toLowerCase();
         
-        // Add context based on intent type
-        switch (intentType.toLowerCase()) {
-            case "query":
-            case "data_retrieval":
-                if (!intent.startsWith("get") && !intent.startsWith("find") && 
-                    !intent.startsWith("show") && !intent.startsWith("list")) {
-                    intent = "retrieve " + intent;
-                }
-                break;
-                
-            case "aggregation":
-                if (!intent.contains("count") && !intent.contains("sum") && 
-                    !intent.contains("average") && !intent.contains("total")) {
-                    intent = "calculate " + intent;
-                }
-                break;
-                
-            case "exploration":
-                if (!intent.startsWith("explore")) {
-                    intent = "explore " + intent;
-                }
-                break;
-                
-            case "sql_generation":
-                if (!intent.contains("sql") && !intent.contains("query")) {
-                    intent = "generate SQL for " + intent;
-                }
-                break;
-        }
+        // Use the intent as-is from MCP analysis without template modifications
         
         // Ensure first letter is capitalized
         if (!intent.isEmpty()) {
@@ -374,28 +317,6 @@ public class IntentMilestone extends MilestoneManager {
         return intent;
     }
     
-    /**
-     * Simple fallback intent extraction
-     */
-    private String extractSimpleIntent(String query) {
-        String lower = query.toLowerCase();
-        
-        if (lower.contains("how many")) {
-            return "Count items based on your criteria";
-        } else if (lower.contains("show") || lower.contains("list")) {
-            return "Display data from the database";
-        } else if (lower.contains("what") || lower.contains("which")) {
-            return "Answer your question using database information";
-        } else if (lower.contains("sum") || lower.contains("total")) {
-            return "Calculate totals from the data";
-        } else if (lower.contains("average") || lower.contains("avg")) {
-            return "Calculate averages from the data";
-        } else if (lower.contains("find")) {
-            return "Find specific information in the database";
-        } else {
-            return "Process your database query";
-        }
-    }
     
     @Override
     public Future<Void> cleanup() {

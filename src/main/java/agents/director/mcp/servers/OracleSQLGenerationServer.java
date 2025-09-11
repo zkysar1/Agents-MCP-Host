@@ -354,6 +354,24 @@ public class OracleSQLGenerationServer extends MCPServerBase {
             String schema = table.getString("schema", OracleConnectionManager.getDefaultSchema());
             String tableName = table.getString("tableName");
             
+            // VALIDATION: Reject tables with invalid characters
+            // Oracle converts unquoted identifiers to uppercase, so normalize for validation
+            if (tableName == null || tableName.contains("?")) {
+                throw new IllegalArgumentException(
+                    "Invalid table name detected: '" + tableName + 
+                    "'. Table names cannot be null or contain special characters."
+                );
+            }
+            
+            // Check if the uppercase version matches valid Oracle identifier pattern
+            String normalizedTableName = tableName.toUpperCase();
+            if (!normalizedTableName.matches("^[A-Z0-9_]+$")) {
+                throw new IllegalArgumentException(
+                    "Invalid table name detected: '" + tableName + 
+                    "'. Table names must contain only letters, numbers, and underscores."
+                );
+            }
+            
             // Use fully qualified name if schema is provided
             String fullTableName = schema != null && !schema.isEmpty() ? 
                 schema + "." + tableName : tableName;
@@ -365,27 +383,12 @@ public class OracleSQLGenerationServer extends MCPServerBase {
                 .put("confidence", match.getDouble("confidence")));
         }
         
-        // If no matches, add common table hints based on entities
+        // FAIL FAST: No fallback table creation
         if (tablesInfo.isEmpty()) {
-            String defaultSchema = OracleConnectionManager.getDefaultSchema();
-            JsonArray entities = analysis.getJsonArray("entities", new JsonArray());
-            for (int i = 0; i < entities.size(); i++) {
-                String entity = entities.getString(i).toLowerCase();
-                if (entity.contains("order")) {
-                    tablesInfo.add(new JsonObject()
-                        .put("tableName", defaultSchema + ".ORDERS")  // Use DEFAULT_SCHEMA
-                        .put("schema", defaultSchema)
-                        .put("hint", "Common table for order data")
-                        .put("confidence", 0.7));
-                }
-                if (entity.contains("customer")) {
-                    tablesInfo.add(new JsonObject()
-                        .put("tableName", defaultSchema + ".CUSTOMERS")  // Use DEFAULT_SCHEMA
-                        .put("schema", defaultSchema)
-                        .put("hint", "Common table for customer data")
-                        .put("confidence", 0.7));
-                }
-            }
+            throw new IllegalArgumentException(
+                "Cannot generate SQL: No valid tables provided. Schema resolution failed. " +
+                "When USE_SCHEMA_EXPLORER_TOOLS=false, only pre-cached tables are available."
+            );
         }
         
         promptData.put("matchedTables", tablesInfo);

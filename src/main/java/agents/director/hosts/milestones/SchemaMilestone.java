@@ -168,56 +168,9 @@ public class SchemaMilestone extends MilestoneManager {
                 log("Schema exploration complete: found " + relevantTables.size() + " relevant tables", 2);
                 promise.complete(context);
             })
-            .recover(err -> {
-                // Log the failure explicitly at WARNING level
-                log("Schema exploration failed, using degraded mode: " + err.getMessage(), 1);
-                
-                // Mark context as degraded
-                context.setMilestoneDegraded(2, "Schema discovery failed: " + err.getMessage());
-                
-                // Publish degradation event
-                publishDegradationEvent(context, "schema_discovery", err.getMessage());
-                
-                // Fallback: Try to extract table names from the query itself
-                List<String> fallbackTables = extractTableNamesFromQuery(context.getQuery());
-                
-                // Log what we're doing as fallback
-                log("Using query parsing fallback, found potential tables: " + fallbackTables, 1);
-                
-                context.setRelevantTables(fallbackTables);
-                context.setSchemaDetails(new JsonObject()
-                    .put("degraded", true)
-                    .put("degradation_reason", err.getMessage())
-                    .put("fallback_method", "query_parsing")
-                    .put("tables", new JsonArray(fallbackTables))
-                    .put("confidence", 0.2)); // Very low confidence for query parsing
-                
-                // Mark milestone as complete (but degraded)
-                context.completeMilestone(2);
-                
-                // Publish streaming event about degradation
-                if (context.isStreaming() && context.getSessionId() != null) {
-                    JsonObject degradedResult = getShareableResult(context);
-                    degradedResult.put("degraded", true)
-                        .put("message", "⚠️ Schema discovery degraded: Using query parsing to guess tables");
-                    publishStreamingEvent(context.getConversationId(), "milestone.schema_complete", degradedResult);
-                    
-                    // Also publish a specific warning about the fallback
-                    publishStreamingEvent(context.getConversationId(), "degradation_warning", new JsonObject()
-                        .put("milestone", 2)
-                        .put("operation", "schema_discovery")
-                        .put("fallback_tables", new JsonArray(fallbackTables))
-                        .put("message", "Could not connect to database schema. Guessing table names from query.")
-                        .put("severity", "WARNING"));
-                }
-                
-                // Return degraded result to continue pipeline
-                return Future.succeededFuture(new JsonObject()
-                    .put("tables", new JsonArray(fallbackTables))
-                    .put("views", new JsonArray())
-                    .put("relationships", new JsonObject())
-                    .put("degraded", true)
-                    .put("confidence", 0.2));
+            .onFailure(err -> {
+                log("Schema exploration failed: " + err.getMessage(), 0);
+                promise.fail(err);
             });
         
         return promise.future();
@@ -256,33 +209,6 @@ public class SchemaMilestone extends MilestoneManager {
             .put("message", message);
     }
     
-    /**
-     * Simple fallback to extract potential table names from query
-     */
-    private List<String> extractTableNamesFromQuery(String query) {
-        List<String> tables = new ArrayList<>();
-        String lower = query.toLowerCase();
-        
-        // Common table name patterns
-        String[] commonTables = {
-            "orders", "customers", "products", "users", "transactions",
-            "sales", "inventory", "employees", "departments", "accounts",
-            "invoices", "payments", "items", "suppliers", "shipments"
-        };
-        
-        for (String table : commonTables) {
-            if (lower.contains(table)) {
-                tables.add(table.toUpperCase());
-            }
-        }
-        
-        // If no tables found, return a generic placeholder
-        if (tables.isEmpty()) {
-            tables.add("MAIN_TABLE");
-        }
-        
-        return tables;
-    }
     
     /**
      * Discover relevant schema elements (replaces manager method)
@@ -314,7 +240,7 @@ public class SchemaMilestone extends MilestoneManager {
                         .put("maxSuggestions", 5)
                         .put("confidenceThreshold", 0.5));
             })
-            .map(matchResult -> {
+            .compose(matchResult -> {
                 // Transform matches array to tables array for compatibility
                 JsonArray matches = matchResult.getJsonArray("matches", new JsonArray());
                 JsonArray tables = new JsonArray();
@@ -337,9 +263,24 @@ public class SchemaMilestone extends MilestoneManager {
                     }
                 }
                 
+                // FAIL FAST: If no tables found, return error
+                if (tables.isEmpty()) {
+                    String errorMsg = String.format(
+                        "No tables found for query '%s'. When USE_SCHEMA_EXPLORER_TOOLS=false, " +
+                        "only pre-cached tables are available. Ensure the required tables exist in schema %s",
+                        query, "ADMIN"  // Using hardcoded ADMIN since we can't import OracleConnectionManager here
+                    );
+                    
+                    // Log critical error
+                    vertx.eventBus().publish("log", errorMsg + ",0,SchemaMilestone,Schema,ERROR");
+                    
+                    // Return error that will stop processing
+                    return Future.failedFuture(new RuntimeException(errorMsg));
+                }
+                
                 // Return transformed result with tables array
                 matchResult.put("tables", tables);
-                return matchResult;
+                return Future.succeededFuture(matchResult);
             });
         
         // Infer relationships if tables found
@@ -502,10 +443,11 @@ public class SchemaMilestone extends MilestoneManager {
         // Remove common SQL keywords and stop words
         String[] stopWords = {"select", "from", "where", "and", "or", "the", "is", "are", 
                               "in", "of", "to", "for", "with", "how", "many", "what", 
-                              "show", "get", "find", "list", "all", "by", "group", "order"};
+                              "show", "get", "find", "list", "all", "by", "group", "order",
+                              "there", "much", "does", "do", "did", "when", "which", "who"};
         
-        // Split query into words and filter
-        String[] words = lower.replaceAll("[^a-z0-9\\s]", " ").split("\\s+");
+        // Split query into words and filter - CRITICAL: Strip punctuation first
+        String[] words = lower.replaceAll("[^a-z0-9\\s_]", " ").split("\\s+");
         Set<String> uniqueTerms = new HashSet<>();
         
         for (String word : words) {
@@ -529,13 +471,7 @@ public class SchemaMilestone extends MilestoneManager {
             terms.add(term);
         }
         
-        // If no terms found, add some generic ones based on query
-        if (terms.isEmpty()) {
-            if (lower.contains("order")) terms.add("orders");
-            if (lower.contains("customer")) terms.add("customers");
-            if (lower.contains("product")) terms.add("products");
-            if (terms.isEmpty()) terms.add("data");  // Fallback
-        }
+        // Return empty list if no terms found - don't inject fake data
         
         return terms;
     }

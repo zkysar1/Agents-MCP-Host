@@ -129,9 +129,9 @@ public class SQLGenerationMilestone extends MilestoneManager {
                 log("SQL generation complete: " + generatedSql, 2);
                 promise.complete(context);
             })
-            .recover(err -> {
-                // Log the failure explicitly at WARNING level
-                log("SQL generation failed, using degraded mode: " + err.getMessage(), 1);
+            .onFailure(err -> {
+                // Log the failure and let it propagate
+                log("SQL generation failed: " + err.getMessage(), 0);
                 
                 // Mark context as degraded
                 context.setMilestoneDegraded(4, "SQL generation failed: " + err.getMessage());
@@ -139,47 +139,8 @@ public class SQLGenerationMilestone extends MilestoneManager {
                 // Publish degradation event
                 publishDegradationEvent(context, "sql_generation", err.getMessage());
                 
-                // Fallback: Generate simple SQL based on intent
-                String fallbackSql = generateFallbackSQL(context);
-                
-                // Log what we're generating as fallback
-                log("Using fallback SQL generation based on intent type: " + context.getIntentType(), 1);
-                
-                context.setGeneratedSql(fallbackSql);
-                context.setSqlExplanation("⚠️ Basic SQL generated - advanced features unavailable");
-                context.setSqlMetadata(new JsonObject()
-                    .put("degraded", true)
-                    .put("degradation_reason", err.getMessage())
-                    .put("fallback_method", "intent_based_template")
-                    .put("confidence", 0.3)); // Low confidence for template SQL
-                
-                // Mark milestone as complete (but degraded)
-                context.completeMilestone(4);
-                
-                // Publish streaming event about degradation
-                if (context.isStreaming() && context.getSessionId() != null) {
-                    JsonObject degradedResult = getShareableResult(context);
-                    degradedResult.put("degraded", true)
-                        .put("message", "⚠️ SQL generation degraded: Using basic template");
-                    publishStreamingEvent(context.getConversationId(), "milestone.sql_complete", degradedResult);
-                    
-                    // Also warn about the fallback SQL
-                    publishStreamingEvent(context.getConversationId(), "degradation_warning", new JsonObject()
-                        .put("milestone", 4)
-                        .put("operation", "sql_generation")
-                        .put("fallback_sql", fallbackSql)
-                        .put("message", "Could not generate optimized SQL. Using basic template.")
-                        .put("severity", "WARNING"));
-                }
-                
-                // Return degraded SQL result
-                return Future.succeededFuture(new JsonObject()
-                    .put("sql", fallbackSql)
-                    .put("explanation", "⚠️ Basic SQL generated - advanced features unavailable")
-                    .put("validation", new JsonObject().put("is_valid", false))
-                    .put("optimization", new JsonObject().put("optimized", false))
-                    .put("degraded", true)
-                    .put("confidence", 0.3));
+                // Let the failure propagate instead of using fallback
+                promise.fail(err);
             });
         
         return promise.future();
@@ -287,53 +248,6 @@ public class SQLGenerationMilestone extends MilestoneManager {
         return Future.succeededFuture(sqlContext);
     }
     
-    /**
-     * Generate fallback SQL when the pipeline fails
-     */
-    private String generateFallbackSQL(MilestoneContext context) {
-        if (context.getRelevantTables().isEmpty()) {
-            return "-- Unable to generate SQL: No tables identified\n" +
-                   "-- Please specify the table names in your query";
-        }
-        
-        String primaryTable = context.getRelevantTables().get(0);
-        String intentType = context.getIntentType();
-        
-        // Generate basic SQL based on intent type
-        switch (intentType != null ? intentType.toLowerCase() : "query") {
-            case "count":
-            case "aggregation":
-                return String.format("SELECT COUNT(*) AS total_count\nFROM %s", primaryTable);
-                
-            case "sum":
-                return String.format("SELECT SUM(amount) AS total_amount\nFROM %s", primaryTable);
-                
-            case "average":
-                return String.format("SELECT AVG(value) AS average_value\nFROM %s", primaryTable);
-                
-            case "list":
-            case "show":
-                JsonArray columns = context.getTableColumns().get(primaryTable);
-                if (columns != null && !columns.isEmpty()) {
-                    // Extract up to 5 column names for the query
-                    List<String> columnNames = new ArrayList<>();
-                    int limit = Math.min(5, columns.size());
-                    for (int i = 0; i < limit; i++) {
-                        JsonObject col = columns.getJsonObject(i);
-                        String colName = col.getString("columnName");
-                        columnNames.add(colName);  // Add even if null
-                    }
-                    if (!columnNames.isEmpty()) {
-                        String columnList = String.join(", ", columnNames);
-                        return String.format("SELECT %s\nFROM %s\nWHERE ROWNUM <= 100", columnList, primaryTable);
-                    }
-                }
-                return String.format("SELECT *\nFROM %s\nWHERE ROWNUM <= 100", primaryTable);
-                
-            default:
-                return String.format("SELECT *\nFROM %s\nWHERE ROWNUM <= 10", primaryTable);
-        }
-    }
     
     /**
      * Execute full SQL pipeline (replaces manager method)
@@ -902,7 +816,7 @@ public class SQLGenerationMilestone extends MilestoneManager {
             // Query the enum table directly
             String query = String.format(
                 "SELECT %s as code FROM %s WHERE UPPER(STATUS_CODE) = '%s' OR UPPER(DESCRIPTION) = '%s'",
-                column.replace("_ID", "_ID"),  // Assuming ID column name pattern
+column.replace("_ID", "_CODE"),  // Map _ID to _CODE for enum lookup
                 enumTable,
                 term.toUpperCase(),
                 term.toUpperCase()

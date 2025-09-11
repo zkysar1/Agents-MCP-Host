@@ -62,8 +62,9 @@ public class NaturalResponseMilestone extends MilestoneManager {
         
         // Check if we have results to work with
         if (context.getRowCount() == 0 && context.getQueryResults() == null) {
-            // No data to generate response from
-            String simpleResponse = "I was unable to retrieve data for your query: " + context.getQuery();
+            // No data to generate response from - clearly indicate this is a failure response
+            String simpleResponse = "⚠️ FAILURE: I was unable to retrieve any data for your query: " + context.getQuery() + 
+                "\n\nThis indicates either the query found no matching records or there was an issue with data retrieval.";
             context.setNaturalResponse(simpleResponse);
             context.completeMilestone(6);
             promise.complete(context);
@@ -102,9 +103,9 @@ public class NaturalResponseMilestone extends MilestoneManager {
                     // Fallback to template-based response
                     String templateResponse = generateTemplateResponse(context);
                     
-                    // Add degradation indicator to response
+                    // Add explicit degradation indicator to response
                     if (context.isInDegradedMode()) {
-                        templateResponse = "⚠️ Note: This response was generated with limited capabilities due to service degradation.\n\n" + templateResponse;
+                        templateResponse = "⚠️ FALLBACK MODE: Natural language generation failed. Using template-based response due to service degradation.\n\n" + templateResponse;
                     }
                     
                     context.setNaturalResponse(templateResponse);
@@ -231,6 +232,9 @@ public class NaturalResponseMilestone extends MilestoneManager {
      */
     private String generateTemplateResponse(MilestoneContext context) {
         StringBuilder response = new StringBuilder();
+        
+        // Clearly indicate this is a fallback mode response
+        response.append("📋 FALLBACK MODE RESPONSE: Natural language generation is unavailable. Using structured template response.\n\n");
         
         // Start with acknowledgment
         response.append("Based on your query: \"").append(context.getQuery()).append("\"\n\n");

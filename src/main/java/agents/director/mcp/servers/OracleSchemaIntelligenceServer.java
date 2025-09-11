@@ -597,9 +597,15 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         
         // Extract from original query tokens
         String originalQuery = analysis.getString("originalQuery", "");
-        String[] words = originalQuery.toLowerCase().split("\\s+");
+        // CRITICAL FIX: Strip all punctuation BEFORE splitting
+        String[] words = originalQuery.toLowerCase()
+            .replaceAll("[^a-z0-9\\s_]", " ")  // Keep only letters, numbers, spaces, and underscores
+            .trim()
+            .split("\\s+");
+        
         for (String word : words) {
-            if (word.length() > 2 && !isCommonWord(word)) {
+            // Filter out empty strings and common words
+            if (!word.isEmpty() && word.length() > 2 && !isCommonWord(word)) {
                 // Add the original term
                 terms.add(word);
                 // Also add mapped equivalent if different
@@ -622,30 +628,16 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
             session.schemaCache : globalSchemaCache;
         
         if (cacheToUse.isEmpty()) {
-            vertx.eventBus().publish("log", "Schema cache is empty - using DEFAULT_SCHEMA for matches,2,OracleSchemaIntelligenceServer,MCP,System");
+            // FAIL FAST: Do not create fake tables from search terms
+            String errorMsg = String.format(
+                "SCHEMA ERROR: Schema cache is empty. Cannot resolve tables when USE_SCHEMA_EXPLORER_TOOLS=false. " +
+                "Search terms: %s. Either enable schema exploration or ensure schema cache is populated.",
+                searchTerms
+            );
+            vertx.eventBus().publish("log", errorMsg + ",0,OracleSchemaIntelligenceServer,MCP,ERROR");
             
-            // When cache is empty (feature flag disabled schema loading), 
-            // create matches using DEFAULT_SCHEMA for each search term
-            String defaultSchema = OracleConnectionManager.getDefaultSchema();
-            for (String term : searchTerms) {
-                // Create a match for potential table names
-                if (term.length() > 2 && !isCommonWord(term)) {
-                    SchemaMatch match = new SchemaMatch();
-                    TableInfo table = new TableInfo();
-                    table.schema = defaultSchema;
-                    table.tableName = term.toUpperCase();
-                    table.columns = new ArrayList<>();  // Empty columns - will be discovered later
-                    
-                    match.table = table;
-                    match.confidence = 0.7;  // Lower confidence since we're guessing
-                    match.reason = "Using default schema (no schema exploration)";
-                    match.relevantColumns = new JsonArray();
-                    matches.add(match);
-                    
-                    vertx.eventBus().publish("log", "Created default schema match: " + defaultSchema + "." + table.tableName + ",3,OracleSchemaIntelligenceServer,MCP,System");
-                }
-            }
-            return matches;
+            // Return empty matches - this will trigger proper error handling downstream
+            return new ArrayList<>();
         }
         
         vertx.eventBus().publish("log", "Performing fuzzy matching on " + cacheToUse.size() + " schemas for session " + sessionId + ",3,OracleSchemaIntelligenceServer,MCP,System");
@@ -832,10 +824,26 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     }
     
     private boolean isCommonWord(String word) {
-        Set<String> commonWords = Set.of("the", "a", "an", "and", "or", "but", "in", "on", "at", 
-                                        "to", "for", "of", "with", "by", "from", "is", "are", 
-                                        "was", "were", "been", "have", "has", "had");
-        return commonWords.contains(word);
+        Set<String> commonWords = Set.of(
+            // Articles and conjunctions
+            "the", "a", "an", "and", "or", "but", "nor", "yet", "so",
+            // Prepositions
+            "in", "on", "at", "to", "for", "of", "with", "by", "from", "into", "onto", "upon",
+            // Verb forms
+            "is", "are", "was", "were", "been", "be", "being",
+            "have", "has", "had", "having",
+            "do", "does", "did", "doing", "done",
+            "will", "would", "shall", "should", "may", "might", "must",
+            "can", "could", "cannot",
+            // Question words that are not table names
+            "how", "what", "when", "where", "why", "who", "whom", "which", "whose",
+            // Common query words
+            "many", "much", "all", "any", "some", "few", "several",
+            "there", "here", "this", "that", "these", "those",
+            // Other common words to filter
+            "get", "show", "find", "list", "display", "return", "fetch"
+        );
+        return commonWords.contains(word.toLowerCase());
     }
     
     /**

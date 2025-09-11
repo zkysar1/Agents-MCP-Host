@@ -759,10 +759,47 @@ public class ConversationStreaming extends AbstractVerticle {
         // Error events
         MessageConsumer<JsonObject> errorConsumer = eventBus.consumer("streaming." + conversationId + ".error", msg -> {
             JsonObject error = msg.body();
-            session.sendSSEEvent("error", error
-                .put("sessionId", sessionId)
-                .put("severity", error.getString("severity", "ERROR"))
-                .put("timestamp", System.currentTimeMillis()));
+            String errorMessage = error.getString("message", "");
+            String severity = error.getString("severity", "ERROR");
+            
+            // Check for critical schema resolution errors that should terminate the session
+            boolean isCriticalError = 
+                errorMessage.contains("No tables found") ||
+                errorMessage.contains("Schema resolution failed") ||
+                errorMessage.contains("Schema cache is empty") ||
+                errorMessage.contains("Cannot generate SQL") ||
+                errorMessage.contains("Invalid table name detected") ||
+                errorMessage.contains("Missing IN or OUT parameter");
+            
+            if (isCriticalError) {
+                // Send critical error event
+                session.sendSSEEvent("critical_error", new JsonObject()
+                    .put("sessionId", sessionId)
+                    .put("message", errorMessage)
+                    .put("severity", "CRITICAL")
+                    .put("suggestion", "Check that USE_SCHEMA_EXPLORER_TOOLS is properly configured and required tables exist in the database")
+                    .put("timestamp", System.currentTimeMillis()));
+                
+                // Log the critical error
+                vertx.eventBus().publish("log", 
+                    "Critical error in session " + sessionId + ": " + errorMessage + ",0,ConversationStreaming,Session,CRITICAL");
+                
+                // Terminate session immediately
+                session.completed = true;
+                session.sendSSEEvent("session_terminated", new JsonObject()
+                    .put("sessionId", sessionId)
+                    .put("reason", "Critical schema resolution error")
+                    .put("timestamp", System.currentTimeMillis()));
+                
+                // Schedule cleanup
+                vertx.setTimer(100, id -> cleanupSession(sessionId));
+            } else {
+                // Regular error handling
+                session.sendSSEEvent("error", error
+                    .put("sessionId", sessionId)
+                    .put("severity", severity)
+                    .put("timestamp", System.currentTimeMillis()));
+            }
         });
         session.consumers.add(errorConsumer);
         

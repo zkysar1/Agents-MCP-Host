@@ -329,6 +329,34 @@ public class OracleQueryAnalysisServer extends MCPServerBase {
             }
         }
         
+        // Calculate confidence based on successfully extracted components
+        double confidence = 0.0;
+        
+        // Intent extracted: +0.2
+        if (intent != null && !intent.isEmpty()) {
+            confidence += 0.2;
+        }
+        
+        // Query type identified: +0.2
+        if (queryType != null && !queryType.equals("retrieval")) {
+            confidence += 0.2;
+        }
+        
+        // Entities found: +0.2
+        if (entities.size() > 0) {
+            confidence += 0.2;
+        }
+        
+        // Aggregations detected: +0.2
+        if (aggregations.size() > 0) {
+            confidence += 0.2;
+        }
+        
+        // Timeframe identified: +0.2
+        if (timeframe != null) {
+            confidence += 0.2;
+        }
+
         analysis.put("intent", intent);
         analysis.put("queryType", queryType);
         analysis.put("entities", entities);
@@ -336,7 +364,7 @@ public class OracleQueryAnalysisServer extends MCPServerBase {
         analysis.put("filters", new JsonArray());
         analysis.put("aggregations", aggregations);
         analysis.put("orderBy", null);
-        analysis.put("confidence", 0.6); // Lower confidence for rule-based
+        analysis.put("confidence", confidence);
         analysis.put("originalQuery", query);
         analysis.put("analysisMethod", "rule-based");
         
