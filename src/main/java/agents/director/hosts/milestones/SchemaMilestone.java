@@ -248,8 +248,8 @@ public class SchemaMilestone extends MilestoneManager {
                 // FAIL FAST: If no tables found, return error
                 if (tables.isEmpty()) {
                     String errorMsg = String.format(
-                        "No tables found for query '%s'. When USE_SCHEMA_EXPLORER_TOOLS=false, " +
-                        "only tables from the current schema are loaded. Ensure the required tables exist in the current schema",
+                        "No tables found for query '%s'. " +
+                        "Ensure the required tables exist in the current schema.",
                         query
                     );
                     

@@ -382,7 +382,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         if (tablesInfo.isEmpty()) {
             throw new IllegalArgumentException(
                 "Cannot generate SQL: No valid tables provided. " +
-                "When USE_SCHEMA_EXPLORER_TOOLS=false, only pre-cached tables are available."
+                "Ensure the required tables exist in the current schema."
             );
         }
         

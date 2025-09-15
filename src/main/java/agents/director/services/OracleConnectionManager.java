@@ -25,9 +25,6 @@ public class OracleConnectionManager {
     private static final String DB_PASSWORD = "Violet2.Barnstorm_A9";
     private static final String DEFAULT_SCHEMA = "ADMIN"; // Schema to set as CURRENT_SCHEMA after connection
 
-    // Feature flag to control schema exploration
-    private static final Boolean USE_SCHEMA_EXPLORER_TOOLS = false;
-
 
     
     private OracleConnectionManager() {
@@ -68,14 +65,6 @@ public class OracleConnectionManager {
         return instance;
     }
     
-    /**
-     * Check if schema explorer tools should be used
-     * When false, system works with current schema only
-     * When true, system explores all available schemas (may be slow)
-     */
-    public static boolean useSchemaExplorerTools() {
-        return USE_SCHEMA_EXPLORER_TOOLS;
-    }
     
     /**
      * Initialize - just saves Vertx instance

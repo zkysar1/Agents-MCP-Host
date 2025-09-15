@@ -777,7 +777,7 @@ public class ConversationStreaming extends AbstractVerticle {
                     .put("sessionId", sessionId)
                     .put("message", errorMessage)
                     .put("severity", "CRITICAL")
-                    .put("suggestion", "Check that USE_SCHEMA_EXPLORER_TOOLS is properly configured and required tables exist in the database")
+                    .put("suggestion", "Check that required tables exist in the current schema")
                     .put("timestamp", System.currentTimeMillis()));
                 
                 // Log the critical error
