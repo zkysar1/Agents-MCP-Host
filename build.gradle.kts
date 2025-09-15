@@ -53,6 +53,9 @@ dependencies {
   // SQL parsing and manipulation
   implementation("com.github.jsqlparser:jsqlparser:4.7")
 
+  // Environment variable loading from .env files
+  implementation("io.github.cdimascio:dotenv-java:3.0.0")
+
 }
 
 java {

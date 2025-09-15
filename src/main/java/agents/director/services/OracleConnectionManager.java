@@ -15,24 +15,91 @@ public class OracleConnectionManager {
     
     private static OracleConnectionManager instance;
     private volatile Vertx vertx;
-    
-    // Environment detection
-    private static final String ENVIRONMENT = "PERSONAL";
-    private static final String DB_HOST = "adb.us-ashburn-1.oraclecloud.com";
-    private static final String DB_PORT = "1522";
-    private static final String DB_SERVICE = "gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com";
-    private static final String DB_USER = "ADMIN";
-    private static final String DB_PASSWORD = "Violet2.Barnstorm_A9";
-    private static final String DEFAULT_SCHEMA = "ADMIN"; // Schema to set as CURRENT_SCHEMA after connection
+
+    // Database configuration loaded from environment variables
+    private final String ENVIRONMENT;
+    private final String DB_HOST;
+    private final String DB_PORT;
+    private final String DB_SERVICE;
+    private final String DB_USER;
+    private final String DB_PASSWORD;
+    private final String DEFAULT_SCHEMA;
 
 
     
     private OracleConnectionManager() {
+        // Load configuration from environment variables
+        ENVIRONMENT = getRequiredEnv("ENVIRONMENT");
+        DB_HOST = getRequiredEnv("DB_HOST");
+        DB_PORT = getRequiredEnv("DB_PORT");
+        DB_SERVICE = getRequiredEnv("DB_SERVICE");
+        DB_USER = getRequiredEnv("DB_USER");
+        DB_PASSWORD = getRequiredEnv("DB_PASSWORD");
+        DEFAULT_SCHEMA = getRequiredEnv("DEFAULT_SCHEMA");
+
+        // Validate configuration
+        validateConfiguration();
+
         // Load Oracle JDBC driver
         try {
             Class.forName("oracle.jdbc.driver.OracleDriver");
         } catch (ClassNotFoundException e) {
             throw new RuntimeException("Oracle JDBC driver not found", e);
+        }
+    }
+
+    /**
+     * Get required environment variable or throw exception
+     * Checks both System.getProperty() (from dotenv) and System.getenv() (from OS)
+     */
+    private String getRequiredEnv(String key) {
+        // First try system properties (loaded by dotenv)
+        String value = System.getProperty(key);
+
+        // If not found, try environment variables
+        if (value == null || value.trim().isEmpty()) {
+            value = System.getenv(key);
+        }
+
+        // If still not found, throw error
+        if (value == null || value.trim().isEmpty()) {
+            throw new RuntimeException(
+                "Required configuration '" + key + "' is not set. " +
+                "Please ensure .env.local file is present and contains all required database configuration."
+            );
+        }
+        return value.trim();
+    }
+
+    /**
+     * Validate loaded configuration
+     */
+    private void validateConfiguration() {
+        // Log loaded configuration (without password)
+        System.out.println("[OracleConnectionManager] Configuration loaded:");
+        System.out.println("  Environment: " + ENVIRONMENT);
+        System.out.println("  Host: " + DB_HOST);
+        System.out.println("  Port: " + DB_PORT);
+        System.out.println("  Service: " + DB_SERVICE);
+        System.out.println("  User: " + DB_USER);
+        System.out.println("  Schema: " + DEFAULT_SCHEMA);
+        System.out.println("  Password: [REDACTED]");
+
+        // Validate ENVIRONMENT value
+        if (!"WORK".equals(ENVIRONMENT) && !"PERSONAL".equals(ENVIRONMENT)) {
+            throw new RuntimeException(
+                "Invalid ENVIRONMENT value: '" + ENVIRONMENT + "'. " +
+                "Must be either 'WORK' or 'PERSONAL'."
+            );
+        }
+
+        // Validate port is numeric
+        try {
+            Integer.parseInt(DB_PORT);
+        } catch (NumberFormatException e) {
+            throw new RuntimeException(
+                "Invalid DB_PORT value: '" + DB_PORT + "'. Must be a valid port number."
+            );
         }
     }
     

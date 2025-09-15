@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
 import oracle.ucp.admin.UniversalConnectionPoolManager;
 import oracle.ucp.admin.UniversalConnectionPoolManagerImpl;
+import io.github.cdimascio.dotenv.Dotenv;
 
 public class Driver {
   public static int logLevel = 3; // 0=errors, 1=info, 2=detail, 3=debug, 4=data
@@ -30,6 +31,19 @@ public class Driver {
   private boolean hostsReady = false;
 
   public static void main(String[] args) {
+    // Load environment variables from .env.local file
+    try {
+      Dotenv dotenv = Dotenv.configure()
+          .filename(".env.local")
+          .systemProperties()  // Load as system properties so they're accessible via System.getProperty()
+          .ignoreIfMissing()
+          .load();
+      System.out.println("=== Loaded environment configuration from .env.local ===");
+    } catch (Exception e) {
+      System.err.println("Warning: Could not load .env.local file: " + e.getMessage());
+      System.err.println("Continuing with system environment variables...");
+    }
+
     Driver me = new Driver();
     me.doIt();
   }
