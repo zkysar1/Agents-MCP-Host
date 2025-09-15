@@ -195,15 +195,6 @@ public class Driver {
       )
     );
 
-    // Deploy SessionSchemaResolverServer (Worker - uses DB and parallel operations)
-    System.out.println("[Driver] Deploying server " + (++serverCount) + ": SessionSchemaResolverServer");
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.SessionSchemaResolverServer",
-        new DeploymentOptions().setWorker(true).setWorkerPoolSize(8) // More workers for parallel operations
-      )
-    );
-    
     // Wait for all servers to deploy
     CompositeFuture.all(deploymentFutures).onComplete(ar -> {
       if (ar.succeeded()) {

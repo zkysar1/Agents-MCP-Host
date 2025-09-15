@@ -350,35 +350,30 @@ public class OracleSQLGenerationServer extends MCPServerBase {
             JsonObject match = matches.getJsonObject(i);
             JsonObject table = match.getJsonObject("table");
             
-            // Extract schema and table name
-            String schema = table.getString("schema", OracleConnectionManager.getDefaultSchema());
+            // Extract table name (no longer need schema since it's set at connection level)
             String tableName = table.getString("tableName");
-            
+
             // VALIDATION: Reject tables with invalid characters
             // Oracle converts unquoted identifiers to uppercase, so normalize for validation
             if (tableName == null || tableName.contains("?")) {
                 throw new IllegalArgumentException(
-                    "Invalid table name detected: '" + tableName + 
+                    "Invalid table name detected: '" + tableName +
                     "'. Table names cannot be null or contain special characters."
                 );
             }
-            
+
             // Check if the uppercase version matches valid Oracle identifier pattern
             String normalizedTableName = tableName.toUpperCase();
             if (!normalizedTableName.matches("^[A-Z0-9_]+$")) {
                 throw new IllegalArgumentException(
-                    "Invalid table name detected: '" + tableName + 
+                    "Invalid table name detected: '" + tableName +
                     "'. Table names must contain only letters, numbers, and underscores."
                 );
             }
-            
-            // Use fully qualified name if schema is provided
-            String fullTableName = schema != null && !schema.isEmpty() ? 
-                schema + "." + tableName : tableName;
-            
+
+            // No need for schema prefix - current schema is set at connection level
             tablesInfo.add(new JsonObject()
-                .put("tableName", fullTableName)  // Include schema prefix
-                .put("schema", schema)
+                .put("tableName", tableName)  // Just table name, no schema prefix needed
                 .put("relevantColumns", match.getJsonArray("relevantColumns", new JsonArray()))
                 .put("confidence", match.getDouble("confidence")));
         }
@@ -386,7 +381,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
         // FAIL FAST: No fallback table creation
         if (tablesInfo.isEmpty()) {
             throw new IllegalArgumentException(
-                "Cannot generate SQL: No valid tables provided. Schema resolution failed. " +
+                "Cannot generate SQL: No valid tables provided. " +
                 "When USE_SCHEMA_EXPLORER_TOOLS=false, only pre-cached tables are available."
             );
         }

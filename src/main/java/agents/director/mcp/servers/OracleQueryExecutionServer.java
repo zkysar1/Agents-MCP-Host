@@ -6,7 +6,6 @@ import agents.director.mcp.base.MCPResponse;
 import io.vertx.core.Promise;
 import io.vertx.core.Future;
 import io.vertx.core.DeploymentOptions;
-import io.vertx.core.eventbus.DeliveryOptions;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
 import io.vertx.ext.web.RoutingContext;
@@ -17,9 +16,6 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
-import java.util.regex.Matcher;
 
 import agents.director.services.LlmAPIService;
 import agents.director.services.OracleConnectionManager;
@@ -145,11 +141,8 @@ public class OracleQueryExecutionServer extends MCPServerBase {
             return;
         }
         
-        // ALWAYS resolve table schemas before execution
+        // No need to resolve schemas anymore - current schema is set at connection level
         String resolvedSql = sql;
-        if (sessionId != null) {
-            resolvedSql = resolveTableSchemas(sql, sessionId);
-        }
         
         // Add ROWNUM limit for SELECT queries if maxRows is specified
         String limitedSql = resolvedSql.trim();
@@ -458,128 +451,7 @@ public class OracleQueryExecutionServer extends MCPServerBase {
             .put("rowCount", rows.size())
             .put("method", "simple");
     }
-    
-    /**
-     * Resolve table schemas by calling the SessionSchemaResolverServer
-     * @param sql Original SQL query
-     * @param sessionId Session ID for schema resolution
-     * @return SQL with resolved schema prefixes
-     */
-    private String resolveTableSchemas(String sql, String sessionId) {
-        // Pattern to find table references after FROM, JOIN, INTO, UPDATE, DELETE FROM
-        // This pattern handles:
-        // - Table names with optional aliases
-        // - Multiple tables separated by commas
-        // - Different SQL keywords
-        Pattern tablePattern = Pattern.compile(
-            "\\b(FROM|JOIN|INTO|UPDATE|DELETE\\s+FROM)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+(?:AS\\s+)?[A-Za-z_][A-Za-z0-9_]*)?(?=\\s*(?:,|\\s|JOIN|WHERE|GROUP|ORDER|HAVING|$))",
-            Pattern.CASE_INSENSITIVE | Pattern.MULTILINE
-        );
-        
-        Matcher matcher = tablePattern.matcher(sql);
-        StringBuffer resolvedSql = new StringBuffer();
-        
-        while (matcher.find()) {
-            String keyword = matcher.group(1);
-            String tableName = matcher.group(2);
-            
-            // Check if table already has schema prefix by looking back
-            int tableStartPos = matcher.start(2); // Start position of table name
-            boolean hasSchema = false;
-            if (tableStartPos > 0) {
-                // Look for pattern like "schema." immediately before the table name
-                String beforeTable = sql.substring(Math.max(0, tableStartPos - 50), tableStartPos);
-                if (beforeTable.matches(".*\\b[A-Za-z_][A-Za-z0-9_]*\\.$")) {
-                    hasSchema = true;
-                }
-            }
-            
-            if (!hasSchema) {
-                // Call schema resolver synchronously (blocking since we're in a Worker thread)
-                String resolvedSchema = resolveSchemaForTable(tableName, sessionId);
-                
-                if (resolvedSchema != null) {
-                    // Replace with schema.table, preserving the rest of the match
-                    String replacement = matcher.group().replaceFirst(
-                        "(" + keyword + "\\s+)(" + tableName + ")",
-                        "$1" + resolvedSchema + "." + tableName
-                    );
-                    matcher.appendReplacement(resolvedSql, replacement);
-                    
-                    vertx.eventBus().publish("log", 
-                        "Resolved table " + tableName + " to " + resolvedSchema + "." + tableName + 
-                        ",3,OracleQueryExecutionServer,SchemaResolution,Success");
-                } else {
-                    // Keep original if no schema found
-                    matcher.appendReplacement(resolvedSql, matcher.group());
-                }
-            } else {
-                // Already has schema, keep as is
-                matcher.appendReplacement(resolvedSql, matcher.group());
-            }
-        }
-        
-        matcher.appendTail(resolvedSql);
-        return resolvedSql.toString();
-    }
-    
-    /**
-     * Resolve schema for a table using SessionSchemaResolverServer via event bus
-     */
-    private String resolveSchemaForTable(String tableName, String sessionId) {
-        // Since we're in a Worker thread, we can block for the response
-        CompletableFuture<String> future = new CompletableFuture<>();
-        
-        JsonObject request = new JsonObject()
-            .put("tableName", tableName)
-            .put("sessionId", sessionId != null ? sessionId : "default");
-        
-        // Request resolution via event bus with timeout
-        vertx.eventBus().<JsonObject>request(
-            "session.schema.resolver.resolve",
-            request,
-            new DeliveryOptions().setSendTimeout(2000), // 2 second timeout
-            ar -> {
-                if (ar.succeeded() && ar.result().body() != null) {
-                    String schema = ar.result().body().getString("schema");
-                    if (schema != null) {
-                        vertx.eventBus().publish("log", 
-                            "Resolved schema for " + tableName + ": " + schema + 
-                            ",3,OracleQueryExecutionServer,SchemaResolution,Success");
-                        future.complete(schema);
-                    } else {
-                        // Resolver returned null, use DEFAULT_SCHEMA
-                        String defaultSchema = OracleConnectionManager.getDefaultSchema();
-                        vertx.eventBus().publish("log", 
-                            "No schema resolved for " + tableName + ", using default: " + defaultSchema + 
-                            ",3,OracleQueryExecutionServer,SchemaResolution,Default");
-                        future.complete(defaultSchema);
-                    }
-                } else {
-                    // Event bus error or timeout, fail open with DEFAULT_SCHEMA
-                    String defaultSchema = OracleConnectionManager.getDefaultSchema();
-                    vertx.eventBus().publish("log", 
-                        "Schema resolution failed for " + tableName + ", using default: " + defaultSchema + 
-                        (ar.cause() != null ? " (" + ar.cause().getMessage() + ")" : "") +
-                        ",2,OracleQueryExecutionServer,SchemaResolution,Fallback");
-                    future.complete(defaultSchema);
-                }
-            }
-        );
-        
-        try {
-            // Block and wait for result (acceptable in Worker thread)
-            return future.get(3, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            // Timeout or error, return DEFAULT_SCHEMA
-            String defaultSchema = OracleConnectionManager.getDefaultSchema();
-            vertx.eventBus().publish("log", 
-                "Schema resolution exception for " + tableName + ", using default: " + defaultSchema + 
-                ",1,OracleQueryExecutionServer,SchemaResolution,Error");
-            return defaultSchema;
-        }
-    }
-    
+
     @Override
     public void stop(Promise<Void> stopPromise) {
         // Connection manager handles its own lifecycle

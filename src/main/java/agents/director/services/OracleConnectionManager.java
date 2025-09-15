@@ -23,11 +23,9 @@ public class OracleConnectionManager {
     private static final String DB_SERVICE = "gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com";
     private static final String DB_USER = "ADMIN";
     private static final String DB_PASSWORD = "Violet2.Barnstorm_A9";
-    private static final String DEFAULT_SCHEMA = "ADMIN"; // Default schema for unqualified tables
-    
+    private static final String DEFAULT_SCHEMA = "ADMIN"; // Schema to set as CURRENT_SCHEMA after connection
+
     // Feature flag to control schema exploration
-    // Set to false for demo mode (fast, uses DEFAULT_SCHEMA only)
-    // Set to true for full mode (explores all schemas, may be slow)
     private static final Boolean USE_SCHEMA_EXPLORER_TOOLS = false;
 
 
@@ -71,15 +69,8 @@ public class OracleConnectionManager {
     }
     
     /**
-     * Get the default schema for unqualified table names
-     */
-    public static String getDefaultSchema() {
-        return DEFAULT_SCHEMA;
-    }
-    
-    /**
      * Check if schema explorer tools should be used
-     * When false, system uses DEFAULT_SCHEMA for all unqualified tables
+     * When false, system works with current schema only
      * When true, system explores all available schemas (may be slow)
      */
     public static boolean useSchemaExplorerTools() {
@@ -123,9 +114,48 @@ public class OracleConnectionManager {
             props.setProperty("oracle.net.CONNECT_TIMEOUT", "30000");
             
             Connection conn = DriverManager.getConnection(jdbcUrl, props);
-            
+
+            // Validate DEFAULT_SCHEMA is a valid Oracle identifier
+            if (!DEFAULT_SCHEMA.matches("^[A-Z][A-Z0-9_]*$")) {
+                conn.close();
+                throw new SQLException("Invalid schema name: '" + DEFAULT_SCHEMA + "'. Schema names must start with a letter and contain only letters, numbers, and underscores.");
+            }
+
+            // Set the current schema to DEFAULT_SCHEMA so unqualified table names resolve correctly
+            try (Statement stmt = conn.createStatement()) {
+                // Use bind variable approach by validating the schema name first
+                // Since ALTER SESSION doesn't support bind variables, we validate the schema format above
+                String setSchemaSQL = "ALTER SESSION SET CURRENT_SCHEMA = " + DEFAULT_SCHEMA;
+                stmt.execute(setSchemaSQL);
+
+                if (vertx != null) {
+                    vertx.eventBus().publish("log", "[OracleConnectionManager] Set current schema to: " + DEFAULT_SCHEMA + ",1,OracleConnectionManager,Connection,Schema");
+                }
+
+                // Validate that the schema exists using prepared statement
+                String validateSQL = "SELECT COUNT(*) FROM all_users WHERE username = ?";
+                try (PreparedStatement ps = conn.prepareStatement(validateSQL)) {
+                    ps.setString(1, DEFAULT_SCHEMA.toUpperCase());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next() && rs.getInt(1) > 0) {
+                            if (vertx != null) {
+                                vertx.eventBus().publish("log", "[OracleConnectionManager] Schema validation successful: " + DEFAULT_SCHEMA + " exists,1,OracleConnectionManager,Connection,Validation");
+                            }
+                        } else {
+                            throw new SQLException("Schema '" + DEFAULT_SCHEMA + "' does not exist or is not accessible");
+                        }
+                    }
+                }
+            } catch (SQLException e) {
+                if (vertx != null) {
+                    vertx.eventBus().publish("log", "[OracleConnectionManager] Failed to set/validate schema: " + e.getMessage() + ",0,OracleConnectionManager,Connection,Error");
+                }
+                conn.close();  // Clean up the connection
+                throw e;
+            }
+
             if (vertx != null) {
-                vertx.eventBus().publish("log", "[OracleConnectionManager] Connection successful in " + ENVIRONMENT + " environment,1,OracleConnectionManager,Connection,Success");
+                vertx.eventBus().publish("log", "[OracleConnectionManager] Connection successful in " + ENVIRONMENT + " environment with schema " + DEFAULT_SCHEMA + ",1,OracleConnectionManager,Connection,Success");
             }
             return conn;
         } catch (SQLException e) {
@@ -238,8 +268,8 @@ public class OracleConnectionManager {
                 JsonObject tableInfo = new JsonObject();
                 JsonArray columns = new JsonArray();
                 
-                // Get column information
-                try (ResultSet rs = metaData.getColumns(null, DB_USER.toUpperCase(), 
+                // Get column information from the current schema
+                try (ResultSet rs = metaData.getColumns(null, DEFAULT_SCHEMA.toUpperCase(),
                                                         tableName.toUpperCase(), null)) {
                     while (rs.next()) {
                         JsonObject column = new JsonObject()
@@ -254,7 +284,7 @@ public class OracleConnectionManager {
                 
                 // Get primary keys
                 JsonArray primaryKeys = new JsonArray();
-                try (ResultSet rs = metaData.getPrimaryKeys(null, DB_USER.toUpperCase(), 
+                try (ResultSet rs = metaData.getPrimaryKeys(null, DEFAULT_SCHEMA.toUpperCase(),
                                                             tableName.toUpperCase())) {
                     while (rs.next()) {
                         primaryKeys.add(rs.getString("COLUMN_NAME"));
@@ -263,7 +293,7 @@ public class OracleConnectionManager {
                 
                 // Get foreign keys
                 JsonArray foreignKeys = new JsonArray();
-                try (ResultSet rs = metaData.getImportedKeys(null, DB_USER.toUpperCase(), 
+                try (ResultSet rs = metaData.getImportedKeys(null, DEFAULT_SCHEMA.toUpperCase(),
                                                              tableName.toUpperCase())) {
                     while (rs.next()) {
                         JsonObject fk = new JsonObject()
@@ -294,32 +324,35 @@ public class OracleConnectionManager {
         if (vertx == null) {
             return Future.failedFuture("OracleConnectionManager not initialized. Call initialize() first.");
         }
-        
+
         return vertx.executeBlocking(() -> {
             try (Connection conn = getConnection()) {
                 JsonArray tables = new JsonArray();
-                
+
+                // Use user_tables which automatically shows tables from the current schema
                 String sql = "SELECT table_name, num_rows " +
                            "FROM user_tables " +
                            "WHERE table_name NOT LIKE 'SYS_%' " +
                            "AND table_name NOT LIKE 'APEX_%' " +
                            "ORDER BY table_name";
-                
+
                 try (Statement stmt = conn.createStatement();
                      ResultSet rs = stmt.executeQuery(sql)) {
-                    
+
                     while (rs.next()) {
                         String tableName = rs.getString("TABLE_NAME");
                         long rowCount = rs.getLong("NUM_ROWS");
-                        
+
                         tables.add(new JsonObject()
                             .put("name", tableName)
                             .put("row_count", rowCount > 0 ? rowCount : 100));
                     }
                 }
-                
+
+                // No fallback - return what we found (empty if no tables)
+
                 return tables;
-                
+
             } catch (SQLException e) {
                 throw new RuntimeException("Failed to list tables: " + e.getMessage(), e);
             }

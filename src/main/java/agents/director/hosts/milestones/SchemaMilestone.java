@@ -4,7 +4,6 @@ import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
 import agents.director.mcp.clients.OracleSchemaIntelligenceClient;
 import agents.director.mcp.clients.BusinessMappingClient;
-import agents.director.mcp.clients.SessionSchemaResolverClient;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
@@ -22,7 +21,6 @@ public class SchemaMilestone extends MilestoneManager {
     
     private static final String SCHEMA_CLIENT = "schema";
     private static final String BUSINESS_CLIENT = "business";
-    private static final String SESSION_RESOLVER_CLIENT = "sessionresolver";
     private final Map<String, String> deploymentIds = new HashMap<>();
     
     public SchemaMilestone(Vertx vertx, String baseUrl) {
@@ -39,11 +37,8 @@ public class SchemaMilestone extends MilestoneManager {
         
         OracleSchemaIntelligenceClient schemaClient = new OracleSchemaIntelligenceClient(baseUrl);
         BusinessMappingClient businessClient = new BusinessMappingClient(baseUrl);
-        SessionSchemaResolverClient resolverClient = new SessionSchemaResolverClient(baseUrl);
-        
         deploymentFutures.add(deployClient(SCHEMA_CLIENT, schemaClient));
         deploymentFutures.add(deployClient(BUSINESS_CLIENT, businessClient));
-        deploymentFutures.add(deployClient(SESSION_RESOLVER_CLIENT, resolverClient));
         
         CompositeFuture.all(deploymentFutures)
             .onSuccess(v -> {
@@ -74,21 +69,8 @@ public class SchemaMilestone extends MilestoneManager {
                     .put("intent", context.getIntent()));
         }
         
-        // Initialize session schema resolver if sessionId is available
-        Future<JsonObject> initFuture;
-        if (context.getSessionId() != null) {
-            initFuture = callTool(SESSION_RESOLVER_CLIENT, "discover_available_schemas",
-                new JsonObject().put("sessionId", context.getSessionId()))
-                .onSuccess(result -> {
-                    log("Session schema resolver initialized with " + 
-                        result.getJsonArray("schemas", new JsonArray()).size() + " schemas", 3);
-                })
-                .onFailure(err -> {
-                    log("Failed to initialize session schema resolver: " + err.getMessage(), 2);
-                });
-        } else {
-            initFuture = Future.succeededFuture(new JsonObject());
-        }
+        // No longer need to initialize schema resolver - current schema is set at connection level
+        Future<JsonObject> initFuture = Future.succeededFuture(new JsonObject());
         
         // Build search context from intent
         JsonObject searchContext = new JsonObject()
@@ -267,8 +249,8 @@ public class SchemaMilestone extends MilestoneManager {
                 if (tables.isEmpty()) {
                     String errorMsg = String.format(
                         "No tables found for query '%s'. When USE_SCHEMA_EXPLORER_TOOLS=false, " +
-                        "only tables from DEFAULT_SCHEMA (%s) are loaded. Ensure the required tables exist in this schema",
-                        query, "ADMIN"  // Using hardcoded ADMIN since we can't import OracleConnectionManager here
+                        "only tables from the current schema are loaded. Ensure the required tables exist in the current schema",
+                        query
                     );
                     
                     // Log critical error
@@ -294,54 +276,8 @@ public class SchemaMilestone extends MilestoneManager {
                 return Future.succeededFuture(new JsonObject());
             });
         
-        // Resolve schema prefixes for discovered tables if sessionId is available
-        Future<JsonObject> schemaResolutionFuture = schemaMatchFuture
-            .compose(match -> {
-                if (sessionId == null) {
-                    return Future.succeededFuture(new JsonObject());
-                }
-                
-                JsonArray tables = match.getJsonArray("tables");
-                if (tables == null || tables.isEmpty()) {
-                    return Future.succeededFuture(new JsonObject());
-                }
-                
-                // Resolve schema for each table and collect results
-                List<Future> resolutionFutures = new ArrayList<>();
-                JsonObject resolvedSchemas = new JsonObject();
-                
-                for (int i = 0; i < tables.size(); i++) {
-                    JsonObject table = tables.getJsonObject(i);
-                    String tableName = table.getString("name");
-                    if (tableName != null) {
-                        Future<JsonObject> resolveFuture = callTool(SESSION_RESOLVER_CLIENT, "resolve_table_schema",
-                            new JsonObject()
-                                .put("tableName", tableName)
-                                .put("sessionId", sessionId)
-                                .put("queryContext", new JsonObject()
-                                    .put("queryType", searchContext.getString("intent_type"))))
-                            .onSuccess(result -> {
-                                String schema = result.getString("schema");
-                                if (schema != null) {
-                                    resolvedSchemas.put(tableName, schema);
-                                    // Learn from successful resolution
-                                    callTool(SESSION_RESOLVER_CLIENT, "learn_from_success",
-                                        new JsonObject()
-                                            .put("tableName", tableName)
-                                            .put("schema", schema)
-                                            .put("sessionId", sessionId))
-                                        .onFailure(err -> {
-                                            log("Failed to record learning for " + tableName + ": " + err.getMessage(), 3);
-                                        });
-                                }
-                            });
-                        resolutionFutures.add(resolveFuture);
-                    }
-                }
-                
-                return CompositeFuture.join(resolutionFutures)
-                    .map(v -> resolvedSchemas);
-            });
+        // No longer need schema resolution - current schema is set at connection level
+        Future<JsonObject> schemaResolutionFuture = Future.succeededFuture(new JsonObject());
         
         return CompositeFuture.join(businessTermsFuture, schemaMatchFuture, relationshipsFuture, schemaResolutionFuture)
             .map(composite -> {
@@ -413,9 +349,6 @@ public class SchemaMilestone extends MilestoneManager {
                 break;
             case BUSINESS_CLIENT:
                 serverName = "businessmapping";
-                break;
-            case SESSION_RESOLVER_CLIENT:
-                serverName = "sessionschemaresolver";
                 break;
             default:
                 serverName = clientName.toLowerCase();

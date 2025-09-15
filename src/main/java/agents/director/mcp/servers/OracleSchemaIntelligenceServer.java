@@ -417,46 +417,40 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         }
         
         // Determine scope based on feature flag
-        boolean useFullSchemaExploration = OracleConnectionManager.useSchemaExplorerTools();
-        String loadingMessage = useFullSchemaExploration ? 
-            "Loading all user schemas (feature flag enabled)" : 
-            "Loading DEFAULT_SCHEMA only (feature flag disabled)";
-        vertx.eventBus().publish("log", loadingMessage + ",2,OracleSchemaIntelligenceServer,MCP,System");
-        
+        // Now we only work with the current schema set at connection level
+        vertx.eventBus().publish("log", "Loading current schema metadata,2,OracleSchemaIntelligenceServer,MCP,System");
+
         // Check connection health first
         if (!connectionManager.isConnectionHealthy()) {
             throw new RuntimeException("Oracle connection is not healthy");
         }
-        
+
         try {
             Map<String, List<TableInfo>> newCache = connectionManager.executeWithConnection(conn -> {
                 try {
                     Map<String, List<TableInfo>> tempCache = new HashMap<>();
-                    
-                    // Determine which schemas to load based on feature flag
-                    List<String> schemas = new ArrayList<>();
-                    
-                    if (!useFullSchemaExploration) {
-                        // Feature flag disabled: Only load DEFAULT_SCHEMA
-                        schemas.add(OracleConnectionManager.getDefaultSchema());
-                        vertx.eventBus().publish("log", "Loading schema metadata for DEFAULT_SCHEMA: " + 
-                            OracleConnectionManager.getDefaultSchema() + ",2,OracleSchemaIntelligenceServer,MCP,System");
-                    } else {
-                        // Feature flag enabled: Load all user schemas
-                        String schemaQuery = """
-                            SELECT DISTINCT username AS schema_name
-                            FROM all_users
-                            WHERE oracle_maintained = 'N'
-                            ORDER BY username
-                        """;
-                        
-                        try (Statement stmt = conn.createStatement();
-                             ResultSet rs = stmt.executeQuery(schemaQuery)) {
-                            while (rs.next()) {
-                                schemas.add(rs.getString("schema_name"));
-                            }
+
+                    // Get the current schema name from the connection
+                    String currentSchemaQuery = "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS SCHEMA_NAME FROM DUAL";
+                    String currentSchema = null;
+
+                    try (Statement stmt = conn.createStatement();
+                         ResultSet rs = stmt.executeQuery(currentSchemaQuery)) {
+                        if (rs.next()) {
+                            currentSchema = rs.getString("SCHEMA_NAME");
                         }
                     }
+
+                    // Validate we got a valid schema
+                    if (currentSchema == null || currentSchema.trim().isEmpty()) {
+                        throw new SQLException("Failed to determine current schema from database connection");
+                    }
+
+                    // Load only the current schema's tables
+                    List<String> schemas = new ArrayList<>();
+                    schemas.add(currentSchema);
+                    vertx.eventBus().publish("log", "Loading schema metadata for current schema: " +
+                        currentSchema + ",2,OracleSchemaIntelligenceServer,MCP,System");
                     
                     vertx.eventBus().publish("log", "Will load " + schemas.size() + " schema(s),2,OracleSchemaIntelligenceServer,MCP,System");
                     
@@ -722,16 +716,10 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         
         if (cacheToUse.isEmpty()) {
             // FAIL FAST: Do not create fake tables from search terms
-            boolean featureFlagEnabled = OracleConnectionManager.useSchemaExplorerTools();
-            String scopeMessage = featureFlagEnabled ? 
-                "all user schemas" : 
-                "DEFAULT_SCHEMA (" + OracleConnectionManager.getDefaultSchema() + ")";
-            
             String errorMsg = String.format(
-                "SCHEMA ERROR: Schema cache is empty. Failed to load %s. " +
-                "Search terms: %s. This may indicate a connection issue or the tables don't exist in the accessible schema(s). " +
-                "Feature flag USE_SCHEMA_EXPLORER_TOOLS=%s",
-                scopeMessage, searchTerms, featureFlagEnabled
+                "SCHEMA ERROR: Schema cache is empty. Failed to load current schema. " +
+                "Search terms: %s. This may indicate a connection issue or the tables don't exist in the current schema.",
+                searchTerms
             );
             vertx.eventBus().publish("log", errorMsg + ",0,OracleSchemaIntelligenceServer,MCP,ERROR");
             
