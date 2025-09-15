@@ -355,13 +355,13 @@ public class Driver {
     boolean initialized = LlmAPIService.getInstance().setupService(vertx);
     
     if (initialized) {
-      if (logLevel >= 1) vertx.eventBus().publish("log", "OpenAI API service initialized successfully,1,Driver,StartUp,System");
+      if (logLevel >= 1) vertx.eventBus().publish("log", "LLM API service initialized successfully,1,Driver,StartUp,System");
       if (logLevel >= 3) vertx.eventBus().publish("log", "LLM API service initialized,3,Driver,StartUp,System");
     } else {
       // Keep warning in console - important configuration issue
-      System.out.println("WARNING: OpenAI API service not initialized (missing API key)");
-      System.out.println("Set OPENAI_API_KEY environment variable to enable LLM responses");
-      vertx.eventBus().publish("log", "OpenAI API service not initialized (missing API key),0,Driver,StartUp,System");
+      System.out.println("WARNING: LLM API service not initialized (missing configuration)");
+      System.out.println("Check .env.local file for required LLM configuration variables");
+      vertx.eventBus().publish("log", "LLM API service not initialized (missing configuration),0,Driver,StartUp,System");
     }
   }
 }

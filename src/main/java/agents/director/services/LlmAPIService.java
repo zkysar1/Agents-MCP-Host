@@ -17,18 +17,21 @@ import java.util.concurrent.CompletableFuture;
 import static agents.director.Driver.logLevel;
 
 /**
- * Service for interacting with OpenAI's Chat Completions API.
+ * Service for interacting with LLM Chat Completions API.
  * This is a singleton service (not a verticle) that can be used by any verticle.
+ * Supports any OpenAI-compatible API endpoint.
  */
 public class LlmAPIService {
   private static LlmAPIService instance;
   private WebClient webClient;
   private Vertx vertx;
-  private String apiKey;
-  private static final String OPENAI_API_URL = "api.openai.com";
-  private static final String CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
-  private static final String MODEL = "gpt-4o-mini-2024-07-18";
-  private static final int REQUEST_TIMEOUT_MS = 30000; // 30 seconds
+
+  // LLM configuration loaded from environment variables
+  private String LLM_API_KEY;
+  private String LLM_API_URL;
+  private String LLM_CHAT_COMPLETIONS_PATH;
+  private String LLM_MODEL_NAME;
+  private int LLM_REQUEST_TIMEOUT_MS;
   
   private LlmAPIService() {
     // Private constructor for singleton
@@ -46,19 +49,64 @@ public class LlmAPIService {
   }
   
   /**
+   * Get required environment variable or throw exception
+   * Checks both System.getProperty() (from dotenv) and System.getenv() (from OS)
+   */
+  private String getRequiredEnv(String key) {
+    // First try system properties (loaded by dotenv)
+    String value = System.getProperty(key);
+
+    // If not found, try environment variables
+    if (value == null || value.trim().isEmpty()) {
+      value = System.getenv(key);
+    }
+
+    // If still not found, throw error
+    if (value == null || value.trim().isEmpty()) {
+      throw new RuntimeException(
+        "Required configuration '" + key + "' is not set. " +
+        "Please ensure .env.local file contains all required LLM configuration."
+      );
+    }
+    return value.trim();
+  }
+
+  /**
    * Initialize the service with Vertx instance
    * @param vertx The Vertx instance
-   * @return true if initialization successful, false if API key missing
+   * @return true if initialization successful, false if configuration missing
    */
   public boolean setupService(Vertx vertx) {
     this.vertx = vertx;
-    this.apiKey = System.getenv("OPENAI_API_KEY");
-    
-    if (apiKey == null || apiKey.trim().isEmpty()) {
-      vertx.eventBus().publish("log", "WARNING: OPENAI_API_KEY environment variable not set" + ",0,LlmAPIService,Service,System");
-      vertx.eventBus().publish("log", "The conversation API will not function without a valid OpenAI API key" + ",0,LlmAPIService,Service,System");
-      vertx.eventBus().publish("log", 
-        "OPENAI_API_KEY not configured - LLM service disabled,0,LlmAPIService,Configuration,Error");
+
+    try {
+      // Load all required configuration from environment
+      this.LLM_API_KEY = getRequiredEnv("LLM_API_KEY");
+      this.LLM_API_URL = getRequiredEnv("LLM_API_URL");
+      this.LLM_CHAT_COMPLETIONS_PATH = getRequiredEnv("LLM_CHAT_COMPLETIONS_PATH");
+      this.LLM_MODEL_NAME = getRequiredEnv("LLM_MODEL_NAME");
+
+      // Parse timeout as integer
+      String timeoutStr = getRequiredEnv("LLM_REQUEST_TIMEOUT_MS");
+      try {
+        this.LLM_REQUEST_TIMEOUT_MS = Integer.parseInt(timeoutStr);
+      } catch (NumberFormatException e) {
+        throw new RuntimeException(
+          "Invalid LLM_REQUEST_TIMEOUT_MS value: '" + timeoutStr + "'. Must be a valid number in milliseconds."
+        );
+      }
+
+      // Log loaded configuration (without API key)
+      vertx.eventBus().publish("log", "LLM Service Configuration loaded:,1,LlmAPIService,Configuration,Info");
+      vertx.eventBus().publish("log", "  API URL: " + LLM_API_URL + ",2,LlmAPIService,Configuration,Info");
+      vertx.eventBus().publish("log", "  Endpoint: " + LLM_CHAT_COMPLETIONS_PATH + ",2,LlmAPIService,Configuration,Info");
+      vertx.eventBus().publish("log", "  Model: " + LLM_MODEL_NAME + ",2,LlmAPIService,Configuration,Info");
+      vertx.eventBus().publish("log", "  Timeout: " + LLM_REQUEST_TIMEOUT_MS + "ms,2,LlmAPIService,Configuration,Info");
+      vertx.eventBus().publish("log", "  API Key: [CONFIGURED],2,LlmAPIService,Configuration,Info");
+
+    } catch (RuntimeException e) {
+      vertx.eventBus().publish("log", "ERROR: " + e.getMessage() + ",0,LlmAPIService,Configuration,Error");
+      vertx.eventBus().publish("log", "LLM service disabled due to missing configuration,0,LlmAPIService,Configuration,Error");
       return false;
     }
     
@@ -71,8 +119,8 @@ public class LlmAPIService {
     
     this.webClient = WebClient.create(vertx, options);
     
-    vertx.eventBus().publish("log", "LlmAPIService initialized with OpenAI API" + ",2,LlmAPIService,Service,System");
-    vertx.eventBus().publish("log", 
+    vertx.eventBus().publish("log", "LlmAPIService initialized with LLM API at " + LLM_API_URL + ",2,LlmAPIService,Service,System");
+    vertx.eventBus().publish("log",
       "LlmAPIService initialized successfully,1,LlmAPIService,StartUp,System");
     
     return true;
@@ -83,41 +131,41 @@ public class LlmAPIService {
    * @return true if service is ready to use
    */
   public boolean isInitialized() {
-    return webClient != null && apiKey != null;
+    return webClient != null && LLM_API_KEY != null;
   }
   
   /**
-   * Make a chat completion request to OpenAI
+   * Make a chat completion request to the LLM API
    * @param messages The messages array for the conversation
-   * @return Future containing the OpenAI response
+   * @return Future containing the LLM response
    */
   public Future<JsonObject> chatCompletion(JsonArray messages) {
     return chatCompletion(messages, null);
   }
   
   /**
-   * Make a chat completion request to OpenAI with optional streaming
+   * Make a chat completion request to the LLM API with optional streaming
    * @param messages The messages array for the conversation
    * @param streamId Optional stream ID for publishing events
-   * @return Future containing the OpenAI response
+   * @return Future containing the LLM response
    */
   public Future<JsonObject> chatCompletion(JsonArray messages, String streamId) {
     Promise<JsonObject> promise = Promise.<JsonObject>promise();
     
     if (!isInitialized()) {
-      promise.fail("LlmAPIService not properly initialized - check OPENAI_API_KEY");
+      promise.fail("LlmAPIService not properly initialized - check LLM configuration in .env.local");
       return promise.future();
     }
     
     // Build the request body
     JsonObject requestBody = new JsonObject()
-      .put("model", MODEL)
+      .put("model", LLM_MODEL_NAME)  // Standard field name for OpenAI-compatible APIs
       .put("messages", messages)
       .put("temperature", 0.7)
       .put("max_tokens", 2000);
     
     if (logLevel >= 3) {
-      vertx.eventBus().publish("log", "[DEBUG] Sending request to OpenAI: " + requestBody.encodePrettily() + ",2,LlmAPIService,Service,System");
+      vertx.eventBus().publish("log", "[DEBUG] Sending request to LLM API: " + requestBody.encodePrettily() + ",2,LlmAPIService,Service,System");
     }
     
     // Publish LLM request event if streaming
@@ -128,13 +176,13 @@ public class LlmAPIService {
     
     // Create the HTTP request
     HttpRequest<Buffer> request = webClient
-      .post(443, OPENAI_API_URL, CHAT_COMPLETIONS_PATH)
-      .timeout(REQUEST_TIMEOUT_MS)
-      .putHeader("Authorization", "Bearer " + apiKey)
+      .post(443, LLM_API_URL, LLM_CHAT_COMPLETIONS_PATH)
+      .timeout(LLM_REQUEST_TIMEOUT_MS)
+      .putHeader("Authorization", "Bearer " + LLM_API_KEY)
       .putHeader("Content-Type", "application/json");
     
     // Log the API call
-    vertx.eventBus().publish("log", "Calling OpenAI API at " + OPENAI_API_URL + CHAT_COMPLETIONS_PATH + ",2,LlmAPIService,API,Request");
+    vertx.eventBus().publish("log", "Calling LLM API at " + LLM_API_URL + LLM_CHAT_COMPLETIONS_PATH + ",2,LlmAPIService,API,Request");
     
     // Send the request
     request.sendJsonObject(requestBody, ar -> {
@@ -142,7 +190,7 @@ public class LlmAPIService {
         HttpResponse<Buffer> response = ar.result();
         
         if (logLevel >= 3) {
-          vertx.eventBus().publish("log", "[DEBUG] OpenAI response status: " + response.statusCode() + ",2,LlmAPIService,Service,System");
+          vertx.eventBus().publish("log", "[DEBUG] LLM API response status: " + response.statusCode() + ",2,LlmAPIService,Service,System");
         }
         
         if (response.statusCode() == 200) {
@@ -150,14 +198,14 @@ public class LlmAPIService {
             JsonObject responseBody = response.bodyAsJsonObject();
             
             if (logLevel >= 4) {
-              vertx.eventBus().publish("log", "[DEBUG] OpenAI response body: " + responseBody.encodePrettily() + ",2,LlmAPIService,Service,System");
+              vertx.eventBus().publish("log", "[DEBUG] LLM API response body: " + responseBody.encodePrettily() + ",2,LlmAPIService,Service,System");
             }
             
             // Log token usage
             JsonObject usage = responseBody.getJsonObject("usage", new JsonObject());
-            vertx.eventBus().publish("log", 
-              "OpenAI API call successful - Tokens: " + usage.getInteger("total_tokens", 0) + 
-              " (prompt: " + usage.getInteger("prompt_tokens", 0) + 
+            vertx.eventBus().publish("log",
+              "LLM API call successful - Tokens: " + usage.getInteger("total_tokens", 0) +
+              " (prompt: " + usage.getInteger("prompt_tokens", 0) +
               ", completion: " + usage.getInteger("completion_tokens", 0) + "),2,LlmAPIService,API,Success");
             
             // Publish LLM response event if streaming
@@ -180,7 +228,7 @@ public class LlmAPIService {
             
             promise.complete(responseBody);
           } catch (Exception e) {
-            promise.fail("Failed to parse OpenAI response: " + e.getMessage());
+            promise.fail("Failed to parse LLM API response: " + e.getMessage());
           }
         } else if (response.statusCode() == 429) {
           // Rate limit exceeded
@@ -188,16 +236,16 @@ public class LlmAPIService {
           String errorMessage = errorBody.getJsonObject("error", new JsonObject())
             .getString("message", "Rate limit exceeded");
           
-          vertx.eventBus().publish("log", 
-            "OpenAI API rate limit exceeded,0,LlmAPIService,API,RateLimit");
+          vertx.eventBus().publish("log",
+            "LLM API rate limit exceeded,0,LlmAPIService,API,RateLimit");
           
           promise.fail("Rate limit: " + errorMessage);
         } else if (response.statusCode() == 401) {
           // Invalid API key
-          vertx.eventBus().publish("log", 
-            "OpenAI API authentication failed - invalid API key,0,LlmAPIService,API,Auth");
-          
-          promise.fail("Invalid OpenAI API key");
+          vertx.eventBus().publish("log",
+            "LLM API authentication failed - invalid API key,0,LlmAPIService,API,Auth");
+
+          promise.fail("Invalid LLM API key");
         } else {
           // Other errors
           String errorBody = "";
@@ -209,24 +257,24 @@ public class LlmAPIService {
             errorBody = response.bodyAsString();
           }
           
-          vertx.eventBus().publish("log", 
-            "OpenAI API error " + response.statusCode() + ": " + errorBody + 
+          vertx.eventBus().publish("log",
+            "LLM API error " + response.statusCode() + ": " + errorBody +
             ",0,LlmAPIService,API,Error");
-          
-          promise.fail("OpenAI API error (" + response.statusCode() + "): " + errorBody);
+
+          promise.fail("LLM API error (" + response.statusCode() + "): " + errorBody);
         }
       } else {
         // Network or timeout error
         String errorMessage = ar.cause().getMessage();
         
         if (errorMessage.contains("timeout")) {
-          vertx.eventBus().publish("log", 
-            "OpenAI API request timeout,0,LlmAPIService,API,Timeout");
-          promise.fail("Request timeout - OpenAI API took too long to respond");
+          vertx.eventBus().publish("log",
+            "LLM API request timeout,0,LlmAPIService,API,Timeout");
+          promise.fail("Request timeout - LLM API took too long to respond");
         } else {
-          vertx.eventBus().publish("log", 
-            "OpenAI API connection failed: " + errorMessage + ",0,LlmAPIService,API,Network");
-          promise.fail("Failed to connect to OpenAI API: " + errorMessage);
+          vertx.eventBus().publish("log",
+            "LLM API connection failed: " + errorMessage + ",0,LlmAPIService,API,Network");
+          promise.fail("Failed to connect to LLM API: " + errorMessage);
         }
       }
     });
@@ -235,11 +283,11 @@ public class LlmAPIService {
   }
   
   /**
-   * Make a chat completion request to OpenAI with custom parameters
+   * Make a chat completion request to the LLM API with custom parameters
    * @param messages The messages as a List of encoded JSON strings
    * @param temperature The temperature parameter (0.0 - 1.0)
    * @param maxTokens Maximum tokens in response
-   * @return CompletableFuture containing the OpenAI response
+   * @return CompletableFuture containing the LLM response
    */
   public CompletableFuture<JsonObject> chatCompletion(List<String> messages, double temperature, int maxTokens) {
     // Convert List<String> to JsonArray
@@ -255,7 +303,7 @@ public class LlmAPIService {
     
     // Build the request body
     JsonObject requestBody = new JsonObject()
-      .put("model", MODEL)
+      .put("model", LLM_MODEL_NAME)  // Standard field name for OpenAI-compatible APIs
       .put("messages", messageArray)
       .put("temperature", temperature)
       .put("max_tokens", maxTokens);
@@ -264,19 +312,19 @@ public class LlmAPIService {
     CompletableFuture<JsonObject> future = new CompletableFuture<>();
     
     if (!isInitialized()) {
-      future.completeExceptionally(new IllegalStateException("LlmAPIService not properly initialized - check OPENAI_API_KEY"));
+      future.completeExceptionally(new IllegalStateException("LlmAPIService not properly initialized - check LLM configuration in .env.local"));
       return future;
     }
     
     // Create the HTTP request
     HttpRequest<Buffer> request = webClient
-      .post(443, OPENAI_API_URL, CHAT_COMPLETIONS_PATH)
-      .timeout(REQUEST_TIMEOUT_MS)
-      .putHeader("Authorization", "Bearer " + apiKey)
+      .post(443, LLM_API_URL, LLM_CHAT_COMPLETIONS_PATH)
+      .timeout(LLM_REQUEST_TIMEOUT_MS)
+      .putHeader("Authorization", "Bearer " + LLM_API_KEY)
       .putHeader("Content-Type", "application/json");
     
     // Log the API call
-    vertx.eventBus().publish("log", "Calling OpenAI API at " + OPENAI_API_URL + CHAT_COMPLETIONS_PATH + ",2,LlmAPIService,API,Request");
+    vertx.eventBus().publish("log", "Calling LLM API at " + LLM_API_URL + LLM_CHAT_COMPLETIONS_PATH + ",2,LlmAPIService,API,Request");
     
     // Send the request
     request.sendJsonObject(requestBody, ar -> {
@@ -288,7 +336,7 @@ public class LlmAPIService {
             JsonObject responseBody = response.bodyAsJsonObject();
             future.complete(responseBody);
           } catch (Exception e) {
-            future.completeExceptionally(new RuntimeException("Failed to parse OpenAI response: " + e.getMessage()));
+            future.completeExceptionally(new RuntimeException("Failed to parse LLM API response: " + e.getMessage()));
           }
         } else {
           String errorBody = "";
@@ -299,7 +347,7 @@ public class LlmAPIService {
           } catch (Exception e) {
             errorBody = response.bodyAsString();
           }
-          future.completeExceptionally(new RuntimeException("OpenAI API error (" + response.statusCode() + "): " + errorBody));
+          future.completeExceptionally(new RuntimeException("LLM API error (" + response.statusCode() + "): " + errorBody));
         }
       } else {
         future.completeExceptionally(ar.cause());
