@@ -5,6 +5,7 @@ import agents.director.services.MCPRegistryService;
 import agents.director.services.LlmAPIService;
 import agents.director.services.Logger;
 import agents.director.services.OracleConnectionManager;
+import agents.director.services.KnowledgeGraphBuilder;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import java.util.List;
@@ -109,19 +110,43 @@ public class Driver {
   private void deployMCPServers() {
     if (logLevel >= 1) vertx.eventBus().publish("log", "Deploying MCP Servers...,1,Driver,StartUp,MCP");
     
-    // Initialize OracleConnectionManager first, then deploy all servers
+    // Initialize OracleConnectionManager first, then build knowledge graph, then deploy servers
     System.out.println("[Driver] Starting OracleConnectionManager initialization...");
     OracleConnectionManager.getInstance().initialize(vertx).onComplete(ar -> {
       if (ar.succeeded()) {
         System.out.println("[Driver] OracleConnectionManager initialization complete");
         if (logLevel >= 1) vertx.eventBus().publish("log", "Oracle Connection Manager initialized,1,Driver,StartUp,Database");
+
+        // Build knowledge graph after connection is ready
+        System.out.println("[Driver] Building knowledge graph...");
+        KnowledgeGraphBuilder.getInstance().initialize(vertx).onComplete(graphAr -> {
+          if (graphAr.succeeded()) {
+            JsonObject metadata = graphAr.result().getJsonObject("metadata");
+            System.out.println("[Driver] Knowledge graph built successfully in " +
+                metadata.getLong("buildTime") + "ms with " +
+                metadata.getInteger("tableCount") + " tables and " +
+                metadata.getInteger("relationshipCount") + " relationships");
+            if (logLevel >= 1) vertx.eventBus().publish("log",
+                "Knowledge graph built - Tables: " + metadata.getInteger("tableCount") +
+                ", Relationships: " + metadata.getInteger("relationshipCount") +
+                ", Build time: " + metadata.getLong("buildTime") + "ms,1,Driver,StartUp,Graph");
+          } else {
+            System.out.println("[Driver] Knowledge graph build failed: " + graphAr.cause().getMessage());
+            vertx.eventBus().publish("log",
+                "Failed to build knowledge graph: " + graphAr.cause().getMessage() + ",0,Driver,StartUp,Graph");
+            // Continue anyway - servers will fall back to on-demand loading
+          }
+
+          // Deploy all servers after graph build attempt
+          deployAllMCPServers();
+        });
       } else {
         System.out.println("[Driver] OracleConnectionManager initialization failed: " + ar.cause().getMessage());
         vertx.eventBus().publish("log", "Failed to initialize Oracle Connection Manager: " + ar.cause().getMessage() + ",0,Driver,StartUp,Database");
+
+        // Deploy servers anyway - they will operate with limited functionality
+        deployAllMCPServers();
       }
-      
-      // Deploy all servers AFTER Oracle initialization completes (whether success or failure)
-      deployAllMCPServers();
     });
   }
   
@@ -159,7 +184,7 @@ public class Driver {
                     new DeploymentOptions()
                         .setWorker(true)
                         .setWorkerPoolSize(1)
-                        .setMaxWorkerExecuteTime(10)  // 10 minutes for schema loading
+                        .setMaxWorkerExecuteTime(5)  // 5 minutes (reduced since graph is pre-built)
                         .setMaxWorkerExecuteTimeUnit(TimeUnit.MINUTES)
             )
     );
@@ -180,15 +205,6 @@ public class Driver {
                     "agents.director.mcp.servers.OracleSQLValidationServer",
                     new DeploymentOptions().setWorker(true).setWorkerPoolSize(1)
             )
-    );
-    
-    // Deploy BusinessMappingServer (Regular)
-    System.out.println("[Driver] Deploying server " + (++serverCount) + ": BusinessMappingServer");
-    deploymentFutures.add(
-      vertx.deployVerticle(
-        "agents.director.mcp.servers.BusinessMappingServer",
-        new DeploymentOptions().setWorker(false)
-      )
     );
 
     // Deploy QueryIntentEvaluationServer (Regular)

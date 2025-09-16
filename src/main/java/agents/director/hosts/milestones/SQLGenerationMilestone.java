@@ -4,7 +4,7 @@ import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
 import agents.director.mcp.clients.OracleSQLGenerationClient;
 import agents.director.mcp.clients.OracleSQLValidationClient;
-import agents.director.mcp.clients.BusinessMappingClient;
+import agents.director.mcp.clients.OracleSchemaIntelligenceClient;
 import agents.director.services.LlmAPIService;
 import agents.director.services.OracleConnectionManager;
 import io.vertx.core.*;
@@ -24,11 +24,11 @@ public class SQLGenerationMilestone extends MilestoneManager {
     
     private static final String GENERATION_CLIENT = "generation";
     private static final String VALIDATION_CLIENT = "validation";
-    private static final String BUSINESS_CLIENT = "business";
+    private static final String SCHEMA_CLIENT = "schema";
     private final Map<String, String> deploymentIds = new HashMap<>();
     private LlmAPIService llmService;
     private OracleConnectionManager connectionManager;
-    private BusinessMappingClient businessMappingClient;
+    private OracleSchemaIntelligenceClient schemaClient;
     
     public SQLGenerationMilestone(Vertx vertx, String baseUrl) {
         super(vertx, baseUrl, 4, "SQLGenerationMilestone", 
@@ -48,11 +48,11 @@ public class SQLGenerationMilestone extends MilestoneManager {
         
         OracleSQLGenerationClient generationClient = new OracleSQLGenerationClient(baseUrl);
         OracleSQLValidationClient validationClient = new OracleSQLValidationClient(baseUrl);
-        businessMappingClient = new BusinessMappingClient(baseUrl);
-        
+        OracleSchemaIntelligenceClient schemaClient = new OracleSchemaIntelligenceClient(baseUrl);
+        this.schemaClient = schemaClient;
         deploymentFutures.add(deployClient(GENERATION_CLIENT, generationClient));
         deploymentFutures.add(deployClient(VALIDATION_CLIENT, validationClient));
-        deploymentFutures.add(deployClient(BUSINESS_CLIENT, businessMappingClient));
+        deploymentFutures.add(deployClient(SCHEMA_CLIENT, schemaClient));
         
         CompositeFuture.all(deploymentFutures)
             .onSuccess(v -> {
@@ -220,12 +220,19 @@ public class SQLGenerationMilestone extends MilestoneManager {
         if (context.getSchemaDetails() != null) {
             JsonObject schemaDetails = context.getSchemaDetails();
             sqlContext.put("schema_details", schemaDetails);
-            
+
+            // Extract and add relationship data for JOIN generation
+            JsonObject relationships = schemaDetails.getJsonObject("relationships");
+            if (relationships != null && !relationships.isEmpty()) {
+                sqlContext.put("table_relationships", relationships);
+                log("Added table relationships for JOIN generation", 3);
+            }
+
             // Extract and enhance businessTerms for WHERE clause generation
             JsonObject businessTerms = schemaDetails.getJsonObject("businessTerms");
             if (businessTerms != null) {
                 sqlContext.put("business_term_mappings", businessTerms);
-                
+
                 // Use LLM-enhanced WHERE clause hints with data sampling
                 return extractWhereClauseHintsWithLLM(businessTerms, context)
                     .map(whereClauseHints -> {
@@ -860,8 +867,8 @@ public class SQLGenerationMilestone extends MilestoneManager {
         
         String column = columns[index];
         
-        // Try to get enum value for this column
-        businessMappingClient.callTool("translate_enum", new JsonObject()
+        // Try to get enum value for this column using schema client
+        schemaClient.callTool("translate_enum", new JsonObject()
             .put("table", table)
             .put("column", column)
             .put("values", new JsonArray().add(term))
@@ -1001,7 +1008,7 @@ column.replace("_ID", "_CODE"),  // Map _ID to _CODE for enum lookup
             .put("table", table)
             .put("column", column);
         
-        businessMappingClient.callTool("get_enum_metadata", metadataRequest)
+        schemaClient.callTool("get_enum_metadata", metadataRequest)
             .compose(metadataResponse -> {
                 JsonArray enumTables = metadataResponse.getJsonArray("enumTables", new JsonArray());
                 
@@ -1024,7 +1031,7 @@ column.replace("_ID", "_CODE"),  // Map _ID to _CODE for enum lookup
                     .put("direction", "description_to_code");
                 
                 final JsonObject finalEnumTableInfo = enumTableInfo;
-                return businessMappingClient.callTool("translate_enum", translateRequest)
+                return schemaClient.callTool("translate_enum", translateRequest)
                     .map(translateResponse -> {
                         JsonArray translations = translateResponse.getJsonArray("translations", new JsonArray());
                         if (!translations.isEmpty()) {

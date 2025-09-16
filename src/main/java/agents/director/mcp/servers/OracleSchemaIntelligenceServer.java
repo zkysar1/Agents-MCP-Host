@@ -13,6 +13,7 @@ import io.vertx.ext.web.RoutingContext;
 
 
 import agents.director.services.OracleConnectionManager;
+import agents.director.services.KnowledgeGraphBuilder;
 import java.sql.*;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -33,6 +34,7 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     
     private OracleConnectionManager connectionManager;
     private LlmAPIService llmService;
+    private KnowledgeGraphBuilder graphBuilder;
     
     // Session-scoped schema caching
     private Map<String, SchemaSession> sessionSchemas = new ConcurrentHashMap<>();
@@ -106,17 +108,25 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     public void start(Promise<Void> startPromise) {
         // Get connection manager instance (already initialized in Driver)
         connectionManager = OracleConnectionManager.getInstance();
-        
-        // Check if connection manager is healthy
-        if (!connectionManager.isConnectionHealthy()) {
-            vertx.eventBus().publish("log", "Oracle Connection Manager not healthy - server will operate with limited functionality,1,OracleSchemaIntelligenceServer,MCP,System");
+
+        // Get knowledge graph builder instance
+        graphBuilder = KnowledgeGraphBuilder.getInstance();
+
+        // Check if graph is built
+        if (!graphBuilder.isGraphBuilt()) {
+            vertx.eventBus().publish("log", "Knowledge graph not yet built - will use on-demand loading as fallback,1,OracleSchemaIntelligenceServer,MCP,System");
         } else {
-            vertx.eventBus().publish("log", "OracleSchemaIntelligenceServer using connection pool,2,OracleSchemaIntelligenceServer,MCP,System");
+            JsonObject metadata = graphBuilder.getGraphMetadata();
+            vertx.eventBus().publish("log", String.format(
+                "OracleSchemaIntelligenceServer using knowledge graph - Tables: %d, Relationships: %d,2,OracleSchemaIntelligenceServer,MCP,System",
+                metadata.getInteger("tableCount", 0),
+                metadata.getInteger("relationshipCount", 0)
+            ));
         }
-        
+
         // Initialize LLM service
         llmService = LlmAPIService.getInstance();
-        
+
         // Continue with parent initialization regardless
         super.start(startPromise);
     }
@@ -200,6 +210,96 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                         .put("default", 5)))
                 .put("required", new JsonArray().add("table_names"))
         ));
+
+        // Register knowledge graph query tools
+        registerTool(new MCPTool(
+            "find_join_path",
+            "Find the join path between two tables using the knowledge graph.",
+            new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("fromTable", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Starting table name."))
+                    .put("toTable", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Target table name.")))
+                .put("required", new JsonArray().add("fromTable").add("toTable"))
+        ));
+
+        registerTool(new MCPTool(
+            "resolve_synonym",
+            "Resolve a business term to schema elements using the knowledge graph.",
+            new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("term", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Business term to resolve.")))
+                .put("required", new JsonArray().add("term"))
+        ));
+
+        registerTool(new MCPTool(
+            "disambiguate_column",
+            "Disambiguate a column name that exists in multiple tables.",
+            new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("columnName", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Column name to disambiguate."))
+                    .put("contextTables", new JsonObject()
+                        .put("type", "array")
+                        .put("items", new JsonObject().put("type", "string"))
+                        .put("description", "Tables mentioned in the query context."))
+                    .put("queryIntent", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "The intent or purpose of the query.")))
+                .put("required", new JsonArray().add("columnName"))
+        ));
+
+        // Register enum translation tools (moved from BusinessMappingServer)
+        registerTool(new MCPTool(
+            "translate_enum",
+            "Translate enum codes to descriptions or vice versa using the knowledge graph.",
+            new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("table", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Table name that contains the enum."))
+                    .put("column", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Column name that contains the enum code or description."))
+                    .put("values", new JsonObject()
+                        .put("type", "array")
+                        .put("items", new JsonObject().put("type", "string"))
+                        .put("description", "List of values to translate."))
+                    .put("direction", new JsonObject()
+                        .put("type", "string")
+                        .put("enum", new JsonArray()
+                            .add("code_to_description")
+                            .add("description_to_code")
+                            .add("auto"))
+                        .put("description", "Translation direction. 'auto' will infer from input format.")
+                        .put("default", "auto")))
+                .put("required", new JsonArray().add("table").add("column").add("values"))
+        ));
+
+        registerTool(new MCPTool(
+            "get_enum_metadata",
+            "Get metadata about enum tables and columns from the knowledge graph.",
+            new JsonObject()
+                .put("type", "object")
+                .put("properties", new JsonObject()
+                    .put("table", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Optional: Specific enum table name to get metadata for"))
+                    .put("column", new JsonObject()
+                        .put("type", "string")
+                        .put("description", "Optional: Specific column name to check for enum mappings")))
+                .put("required", new JsonArray())
+        ));
     }
     
     @Override
@@ -217,8 +317,23 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
             case "discover_sample_data":
                 discoverSampleData(ctx, requestId, arguments);
                 break;
+            case "find_join_path":
+                findJoinPath(ctx, requestId, arguments);
+                break;
+            case "resolve_synonym":
+                resolveSynonym(ctx, requestId, arguments);
+                break;
+            case "disambiguate_column":
+                disambiguateColumn(ctx, requestId, arguments);
+                break;
+            case "translate_enum":
+                translateEnum(ctx, requestId, arguments);
+                break;
+            case "get_enum_metadata":
+                getEnumMetadata(ctx, requestId, arguments);
+                break;
             default:
-                sendError(ctx, requestId, MCPResponse.ErrorCodes.METHOD_NOT_FOUND, 
+                sendError(ctx, requestId, MCPResponse.ErrorCodes.METHOD_NOT_FOUND,
                     "Unknown tool: " + toolName);
         }
     }
@@ -241,8 +356,11 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         
         executeBlocking(Promise.<JsonObject>promise(), promise -> {
             try {
-                // Load schema if not cached (session-scoped)
-                loadSchemaIfNeeded(sessionId);
+                // Use knowledge graph if available, otherwise fall back to on-demand loading
+                if (!graphBuilder.isGraphBuilt()) {
+                    // Fall back to on-demand loading
+                    loadSchemaIfNeeded(sessionId);
+                }
                 
                 // Extract search terms from analysis
                 List<String> searchTerms = extractSearchTerms(analysis);
@@ -269,20 +387,13 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                     .sorted((a, b) -> Double.compare(b.confidence, a.confidence))
                     .limit(maxSuggestions)
                     .collect(Collectors.toList());
-                
-                // FALLBACK: If LLM rejected all matches but we have fuzzy matches, use them with reduced confidence
-                if (finalMatches.isEmpty() && !fuzzyMatches.isEmpty()) {
-                    vertx.eventBus().publish("log", "LLM rejected all matches, using top fuzzy matches as fallback,2,OracleSchemaIntelligenceServer,MCP,System");
-                    finalMatches = fuzzyMatches.stream()
-                        .peek(match -> {
-                            match.confidence *= 0.7; // Reduce confidence
-                            match.reason += " (Fuzzy match fallback - LLM verification inconclusive)";
-                        })
-                        .sorted((a, b) -> Double.compare(b.confidence, a.confidence))
-                        .limit(Math.min(3, maxSuggestions)) // Take top 3 fuzzy matches
-                        .collect(Collectors.toList());
+
+                // NO FALLBACK: If no matches meet criteria, return empty result (fail fast)
+                if (finalMatches.isEmpty()) {
+                    vertx.eventBus().publish("log",
+                        "No schema matches found that meet confidence threshold,1,OracleSchemaIntelligenceServer,MCP,System");
                 }
-                
+
                 // Build response
                 JsonObject result = new JsonObject();
                 JsonArray matches = new JsonArray();
@@ -379,7 +490,31 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                     for (int j = i + 1; j < tables.size(); j++) {
                         String table2 = tables.getString(j);
                         
-                        List<JsonObject> rels = findRelationships(table1, table2, includeIndirect);
+                        List<JsonObject> rels;
+
+                        // Use knowledge graph if available
+                        if (graphBuilder.isGraphBuilt()) {
+                            JsonArray joinPath = graphBuilder.findJoinPath(table1, table2);
+                            rels = new ArrayList<>();
+
+                            if (joinPath.size() > 0) {
+                                // Convert join path to relationship format
+                                for (int k = 0; k < joinPath.size(); k++) {
+                                    JsonObject join = joinPath.getJsonObject(k);
+                                    JsonObject rel = new JsonObject()
+                                        .put("type", "foreign_key")
+                                        .put("fromTable", join.getString("fromTable"))
+                                        .put("fromColumn", join.getString("fromColumn"))
+                                        .put("toTable", join.getString("toTable"))
+                                        .put("toColumn", join.getString("toColumn"))
+                                        .put("source", "knowledge_graph");
+                                    rels.add(rel);
+                                }
+                            }
+                        } else {
+                            // Fall back to dynamic discovery
+                            rels = findRelationships(table1, table2, includeIndirect);
+                        }
                         relationships.addAll(new JsonArray(rels));
                     }
                 }
@@ -708,12 +843,17 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     
     private List<SchemaMatch> performFuzzyMatching(List<String> searchTerms, String sessionId) {
         List<SchemaMatch> matches = new ArrayList<>();
-        
-        // Get session cache or fallback to global cache
+
+        // Try to use knowledge graph first
+        if (graphBuilder.isGraphBuilt()) {
+            return performGraphBasedMatching(searchTerms);
+        }
+
+        // Fall back to session/global cache
         SchemaSession session = sessionSchemas.get(sessionId);
-        Map<String, List<TableInfo>> cacheToUse = (session != null && !session.schemaCache.isEmpty()) ? 
+        Map<String, List<TableInfo>> cacheToUse = (session != null && !session.schemaCache.isEmpty()) ?
             session.schemaCache : globalSchemaCache;
-        
+
         if (cacheToUse.isEmpty()) {
             // FAIL FAST: Do not create fake tables from search terms
             String errorMsg = String.format(
@@ -722,7 +862,7 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 searchTerms
             );
             vertx.eventBus().publish("log", errorMsg + ",0,OracleSchemaIntelligenceServer,MCP,ERROR");
-            
+
             // Return empty matches - this will trigger proper error handling downstream
             return new ArrayList<>();
         }
@@ -1177,6 +1317,314 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         }
     }
     
+    /**
+     * Perform schema matching using the knowledge graph
+     */
+    private List<SchemaMatch> performGraphBasedMatching(List<String> searchTerms) {
+        List<SchemaMatch> matches = new ArrayList<>();
+        JsonObject graph = graphBuilder.getKnowledgeGraph();
+        JsonArray tables = graph.getJsonArray("tables");
+
+        vertx.eventBus().publish("log", "Performing graph-based matching on " + tables.size() + " tables,3,OracleSchemaIntelligenceServer,MCP,System");
+
+        for (int i = 0; i < tables.size(); i++) {
+            JsonObject table = tables.getJsonObject(i);
+            String tableName = table.getString("tableName");
+            JsonArray columns = table.getJsonArray("columns");
+
+            double tableScore = 0;
+            List<String> matchedColumns = new ArrayList<>();
+            String matchReason = "";
+
+            // Check table name match
+            for (String term : searchTerms) {
+                // Check synonym matches first
+                JsonArray synonymMatches = graphBuilder.resolveSynonym(term);
+                boolean foundSynonym = false;
+
+                for (int s = 0; s < synonymMatches.size(); s++) {
+                    JsonObject synMatch = synonymMatches.getJsonObject(s);
+                    if (synMatch.getString("type").equals("table") &&
+                        synMatch.getString("name").equals(tableName)) {
+                        tableScore = Math.max(tableScore, synMatch.getDouble("confidence"));
+                        matchReason = synMatch.getString("reason");
+                        foundSynonym = true;
+                        break;
+                    }
+                }
+
+                // If no synonym match, try direct similarity
+                if (!foundSynonym) {
+                    double similarity = calculateSimilarity(tableName.toLowerCase(), term);
+                    if (similarity > 0.6) {
+                        tableScore = Math.max(tableScore, similarity);
+                        matchReason = "Table name matches '" + term + "'";
+                    }
+                }
+            }
+
+            // Check column matches
+            for (int j = 0; j < columns.size(); j++) {
+                JsonObject column = columns.getJsonObject(j);
+                String columnName = column.getString("name");
+
+                for (String term : searchTerms) {
+                    // Check synonym matches for columns
+                    JsonArray synonymMatches = graphBuilder.resolveSynonym(term);
+                    boolean foundSynonym = false;
+
+                    for (int s = 0; s < synonymMatches.size(); s++) {
+                        JsonObject synMatch = synonymMatches.getJsonObject(s);
+                        if (synMatch.getString("type").equals("column") &&
+                            synMatch.getString("table").equals(tableName) &&
+                            synMatch.getString("column").equals(columnName)) {
+                            matchedColumns.add(columnName);
+                            tableScore = Math.max(tableScore, synMatch.getDouble("confidence") * 0.8);
+                            if (matchReason.isEmpty()) {
+                                matchReason = synMatch.getString("reason");
+                            }
+                            foundSynonym = true;
+                            break;
+                        }
+                    }
+
+                    // If no synonym match, try direct similarity
+                    if (!foundSynonym) {
+                        double similarity = calculateSimilarity(columnName.toLowerCase(), term);
+                        if (similarity > 0.6) {
+                            matchedColumns.add(columnName);
+                            tableScore = Math.max(tableScore, similarity * 0.8);
+                            if (matchReason.isEmpty()) {
+                                matchReason = "Column '" + columnName + "' matches '" + term + "'";
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (tableScore > 0) {
+                // Convert JsonObject table to TableInfo for compatibility
+                TableInfo tableInfo = new TableInfo();
+                tableInfo.schema = table.getString("schema", "");
+                tableInfo.tableName = tableName;
+
+                // Convert columns
+                for (int j = 0; j < columns.size(); j++) {
+                    JsonObject col = columns.getJsonObject(j);
+                    ColumnInfo colInfo = new ColumnInfo();
+                    colInfo.columnName = col.getString("name");
+                    colInfo.dataType = col.getString("type");
+                    colInfo.size = col.getInteger("size", 0);
+                    colInfo.nullable = col.getBoolean("nullable", true);
+                    tableInfo.columns.add(colInfo);
+                }
+
+                SchemaMatch match = new SchemaMatch();
+                match.table = tableInfo;
+                match.relevantColumns = new JsonArray(matchedColumns);
+                match.confidence = tableScore;
+                match.reason = matchReason;
+                matches.add(match);
+            }
+        }
+
+        return matches;
+    }
+
+    /**
+     * Translate enum values using the knowledge graph
+     */
+    private void translateEnum(RoutingContext ctx, String requestId, JsonObject arguments) {
+        String table = arguments.getString("table");
+        String column = arguments.getString("column");
+        JsonArray values = arguments.getJsonArray("values");
+        String direction = arguments.getString("direction", "auto");
+
+        if (table == null || column == null || values == null) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS,
+                "table, column, and values are required");
+            return;
+        }
+
+        if (graphBuilder == null || !graphBuilder.isGraphBuilt()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Knowledge graph not available");
+            return;
+        }
+
+        try {
+            JsonObject result = graphBuilder.translateEnum(table, column, values, direction);
+            sendSuccess(ctx, requestId, result);
+        } catch (Exception e) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Failed to translate enum: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Get enum metadata from the knowledge graph
+     */
+    private void getEnumMetadata(RoutingContext ctx, String requestId, JsonObject arguments) {
+        String table = arguments.getString("table");
+        String column = arguments.getString("column");
+
+        if (graphBuilder == null || !graphBuilder.isGraphBuilt()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Knowledge graph not available");
+            return;
+        }
+
+        try {
+            JsonObject result = graphBuilder.getEnumMetadata(table, column);
+            sendSuccess(ctx, requestId, result);
+        } catch (Exception e) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Failed to get enum metadata: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Find join path between two tables using the knowledge graph
+     */
+    private void findJoinPath(RoutingContext ctx, String requestId, JsonObject arguments) {
+        String fromTable = arguments.getString("fromTable");
+        String toTable = arguments.getString("toTable");
+
+        if (fromTable == null || toTable == null) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS,
+                "fromTable and toTable are required");
+            return;
+        }
+
+        if (graphBuilder == null || !graphBuilder.isGraphBuilt()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Knowledge graph not available");
+            return;
+        }
+
+        try {
+            JsonArray joinPath = graphBuilder.findJoinPath(fromTable, toTable);
+
+            JsonObject result = new JsonObject()
+                .put("fromTable", fromTable.toUpperCase())
+                .put("toTable", toTable.toUpperCase())
+                .put("pathFound", joinPath.size() > 0)
+                .put("joinPath", joinPath)
+                .put("pathLength", joinPath.size());
+
+            if (joinPath.size() > 0) {
+                // Build SQL JOIN clause example
+                StringBuilder sqlExample = new StringBuilder();
+                sqlExample.append("SELECT * FROM ").append(fromTable.toUpperCase());
+
+                for (int i = 0; i < joinPath.size(); i++) {
+                    JsonObject join = joinPath.getJsonObject(i);
+                    sqlExample.append("\n  ")
+                        .append(join.getString("joinType", "INNER JOIN"))
+                        .append(" ")
+                        .append(join.getString("toTable"))
+                        .append(" ON ")
+                        .append(join.getString("fromTable"))
+                        .append(".")
+                        .append(join.getString("fromColumn"))
+                        .append(" = ")
+                        .append(join.getString("toTable"))
+                        .append(".")
+                        .append(join.getString("toColumn"));
+                }
+
+                result.put("sqlExample", sqlExample.toString());
+            }
+
+            sendSuccess(ctx, requestId, result);
+
+        } catch (Exception e) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Failed to find join path: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Resolve a business term to schema elements
+     */
+    private void resolveSynonym(RoutingContext ctx, String requestId, JsonObject arguments) {
+        String term = arguments.getString("term");
+
+        if (term == null || term.trim().isEmpty()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS,
+                "term is required");
+            return;
+        }
+
+        if (graphBuilder == null || !graphBuilder.isGraphBuilt()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Knowledge graph not available");
+            return;
+        }
+
+        try {
+            JsonArray matches = graphBuilder.resolveSynonym(term);
+
+            JsonObject result = new JsonObject()
+                .put("term", term)
+                .put("matchCount", matches.size())
+                .put("matches", matches);
+
+            sendSuccess(ctx, requestId, result);
+
+        } catch (Exception e) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Failed to resolve synonym: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Disambiguate a column name
+     */
+    private void disambiguateColumn(RoutingContext ctx, String requestId, JsonObject arguments) {
+        String columnName = arguments.getString("columnName");
+        JsonArray contextTables = arguments.getJsonArray("contextTables", new JsonArray());
+        String queryIntent = arguments.getString("queryIntent", "");
+
+        if (columnName == null || columnName.trim().isEmpty()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INVALID_PARAMS,
+                "columnName is required");
+            return;
+        }
+
+        if (graphBuilder == null || !graphBuilder.isGraphBuilt()) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Knowledge graph not available");
+            return;
+        }
+
+        try {
+            JsonObject context = new JsonObject()
+                .put("tables", contextTables)
+                .put("intent", queryIntent);
+
+            JsonArray suggestions = graphBuilder.disambiguateColumn(columnName, context);
+
+            JsonObject result = new JsonObject()
+                .put("columnName", columnName.toUpperCase())
+                .put("suggestionCount", suggestions.size())
+                .put("suggestions", suggestions);
+
+            if (suggestions.size() > 0) {
+                // Add the most likely suggestion
+                JsonObject topSuggestion = suggestions.getJsonObject(0);
+                result.put("recommendedTable", topSuggestion.getString("table"));
+                result.put("recommendedConfidence", topSuggestion.getDouble("confidence"));
+            }
+
+            sendSuccess(ctx, requestId, result);
+
+        } catch (Exception e) {
+            sendError(ctx, requestId, MCPResponse.ErrorCodes.INTERNAL_ERROR,
+                "Failed to disambiguate column: " + e.getMessage());
+        }
+    }
+
     // Inner class for schema matches
     private static class SchemaMatch {
         TableInfo table;

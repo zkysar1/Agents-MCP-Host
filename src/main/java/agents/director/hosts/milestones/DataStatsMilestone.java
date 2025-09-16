@@ -3,7 +3,7 @@ package agents.director.hosts.milestones;
 import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
 import agents.director.mcp.clients.OracleQueryAnalysisClient;
-import agents.director.mcp.clients.BusinessMappingClient;
+import agents.director.mcp.clients.OracleSchemaIntelligenceClient;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
@@ -13,7 +13,7 @@ import java.util.*;
  * Milestone 3: Data Statistics Analysis
  * 
  * Analyzes table columns and data statistics related to the intent and schema.
- * Uses OracleQueryAnalysisServer and BusinessMappingServer.
+ * Uses OracleQueryAnalysisServer and OracleSchemaIntelligenceServer.
  * 
  * Output shared with user: Column information and data statistics
  * 
@@ -23,7 +23,7 @@ import java.util.*;
 public class DataStatsMilestone extends MilestoneManager {
     
     private static final String ANALYSIS_CLIENT = "query_analysis";
-    private static final String MAPPING_CLIENT = "business_mapping";
+    private static final String SCHEMA_CLIENT = "schema";
     private final Map<String, String> deploymentIds = new HashMap<>();
     
     public DataStatsMilestone(Vertx vertx, String baseUrl) {
@@ -39,10 +39,10 @@ public class DataStatsMilestone extends MilestoneManager {
         List<Future> deploymentFutures = new ArrayList<>();
         
         OracleQueryAnalysisClient analysisClient = new OracleQueryAnalysisClient(baseUrl);
-        BusinessMappingClient mappingClient = new BusinessMappingClient(baseUrl);
-        
+        OracleSchemaIntelligenceClient schemaClient = new OracleSchemaIntelligenceClient(baseUrl);
+
         deploymentFutures.add(deployClient(ANALYSIS_CLIENT, analysisClient));
-        deploymentFutures.add(deployClient(MAPPING_CLIENT, mappingClient));
+        deploymentFutures.add(deployClient(SCHEMA_CLIENT, schemaClient));
         
         CompositeFuture.all(deploymentFutures)
             .onSuccess(v -> {
@@ -88,107 +88,76 @@ public class DataStatsMilestone extends MilestoneManager {
         enumCacheFuture
             .compose(cacheResult -> {
                 log("Enum cache loaded: " + cacheResult.getString("status", "unknown"), 2);
-                
+
                 List<Future> analysisFutures = new ArrayList<>();
-                
+
                 for (String table : context.getRelevantTables()) {
                     // Analyze table structure
                     Future<JsonObject> structureFuture = analyzeTableStructure(table, context);
-                    
+
                     // Map business terms to columns
                     Future<JsonObject> mappingFuture = mapBusinessTerms(table, context);
-                    
+
                     analysisFutures.add(structureFuture);
                     analysisFutures.add(mappingFuture);
                 }
-                
-                return CompositeFuture.join(analysisFutures);
-            })
-            .recover(err -> {
-                // If enum cache loading fails, continue without it
-                log("Enum cache loading failed, continuing without enum resolution: " + err.getMessage(), 1);
-                
-                List<Future> analysisFutures = new ArrayList<>();
-                
-                for (String table : context.getRelevantTables()) {
-                    // Analyze table structure
-                    Future<JsonObject> structureFuture = analyzeTableStructure(table, context);
-                    
-                    // Map business terms to columns
-                    Future<JsonObject> mappingFuture = mapBusinessTerms(table, context);
-                    
-                    analysisFutures.add(structureFuture);
-                    analysisFutures.add(mappingFuture);
-                }
-                
+
                 return CompositeFuture.join(analysisFutures);
             })
             .map(results -> {
-                // Aggregate results, checking for partial failures
+                // Aggregate results - fail fast if any operation failed
                 Map<String, List<String>> tableColumns = new HashMap<>();
                 Map<String, JsonObject> columnStats = new HashMap<>();
                 JsonObject dataProfile = new JsonObject();
-                boolean anyFailed = false;
-                
+
                 int resultIndex = 0;
                 for (String table : context.getRelevantTables()) {
                     // Structure result
-                    if (results.succeeded(resultIndex)) {
-                        JsonObject structure = (JsonObject) results.resultAt(resultIndex);
-                        if (structure != null && !structure.getBoolean("degraded", false)) {
-                            JsonArray columns = structure.getJsonArray("columns");
-                            List<String> columnNames = new ArrayList<>();
-                            
-                            if (columns != null) {
-                                for (int i = 0; i < columns.size(); i++) {
-                                    JsonObject col = columns.getJsonObject(i);
-                                    String colName = col.getString("name");
+                    if (!results.succeeded(resultIndex)) {
+                        throw new RuntimeException("Table structure analysis failed for " + table + ": " +
+                            results.cause(resultIndex).getMessage());
+                    }
+
+                    JsonObject structure = (JsonObject) results.resultAt(resultIndex);
+                    if (structure != null) {
+                        JsonArray columns = structure.getJsonArray("columns");
+                        List<String> columnNames = new ArrayList<>();
+
+                        if (columns != null) {
+                            for (int i = 0; i < columns.size(); i++) {
+                                JsonObject col = columns.getJsonObject(i);
+                                // Check both "columnName" and "name" for compatibility
+                                String colName = col.getString("columnName");
+                                if (colName == null) {
+                                    colName = col.getString("name");
+                                }
+
+                                // Only add non-null column names
+                                if (colName != null) {
                                     columnNames.add(colName);
-                                    
+
                                     // Store column statistics
                                     String statKey = table + "." + colName;
                                     columnStats.put(statKey, col);
                                 }
                             }
-                            
-                            tableColumns.put(table, columnNames);
-                        } else if (structure != null && structure.getBoolean("degraded", false)) {
-                            anyFailed = true;
-                            log("Table structure analysis degraded for: " + table, 1);
                         }
-                    } else {
-                        anyFailed = true;
-                        log("Table structure analysis failed for: " + table + " - " + results.cause(resultIndex), 1);
+
+                        tableColumns.put(table, columnNames);
                     }
                     resultIndex++;
-                    
+
                     // Mapping result
-                    if (results.succeeded(resultIndex)) {
-                        JsonObject mapping = (JsonObject) results.resultAt(resultIndex);
-                        if (mapping != null && !mapping.getBoolean("degraded", false)) {
-                            dataProfile.put(table + "_mapping", mapping);
-                        } else if (mapping != null && mapping.getBoolean("degraded", false)) {
-                            anyFailed = true;
-                            log("Business mapping degraded for: " + table, 1);
-                        }
-                    } else {
-                        anyFailed = true;
-                        log("Business mapping failed for: " + table + " - " + results.cause(resultIndex), 1);
+                    if (!results.succeeded(resultIndex)) {
+                        throw new RuntimeException("Business term mapping failed for " + table + ": " +
+                            results.cause(resultIndex).getMessage());
+                    }
+
+                    JsonObject mapping = (JsonObject) results.resultAt(resultIndex);
+                    if (mapping != null) {
+                        dataProfile.put(table + "_mapping", mapping);
                     }
                     resultIndex++;
-                }
-                
-                // If any operations failed, mark as degraded
-                if (anyFailed) {
-                    context.setMilestoneDegraded(3, "Some data analysis operations failed or were degraded");
-                    publishDegradationEvent(context, "data_analysis", "Partial failure in table analysis");
-                    
-                    if (context.isStreaming() && context.getSessionId() != null) {
-                        publishStreamingEvent(context.getConversationId(), "degradation_warning", new JsonObject()
-                            .put("milestone", 3)
-                            .put("message", "⚠️ Data analysis partially degraded - some tables could not be fully analyzed")
-                            .put("severity", "WARNING"));
-                    }
                 }
                 
                 // Don't overwrite column information from SchemaMilestone
@@ -198,7 +167,10 @@ public class DataStatsMilestone extends MilestoneManager {
                         // Convert List<String> to JsonArray of simple column objects
                         JsonArray columns = new JsonArray();
                         for (String colName : entry.getValue()) {
-                            columns.add(new JsonObject().put("columnName", colName));
+                            // Only add non-null column names
+                            if (colName != null) {
+                                columns.add(new JsonObject().put("columnName", colName));
+                            }
                         }
                         context.setTableColumns(entry.getKey(), columns);
                     }
@@ -215,41 +187,12 @@ public class DataStatsMilestone extends MilestoneManager {
                 
                 // Publish streaming event if applicable
                 if (context.isStreaming() && context.getSessionId() != null) {
-                    JsonObject result = getShareableResult(context);
-                    if (anyFailed) {
-                        result.put("degraded", true);
-                    }
-                    publishStreamingEvent(context.getConversationId(), "milestone.data_stats_complete", result);
+                    publishStreamingEvent(context.getConversationId(), "milestone.data_stats_complete",
+                        getShareableResult(context));
                 }
-                
-                log("Data statistics analysis complete" + (anyFailed ? " (with degradation)" : ""), 2);
+
+                log("Data statistics analysis complete", 2);
                 return context;
-            })
-            .recover(err -> {
-                // Complete failure - log explicitly
-                log("Data statistics analysis completely failed, continuing with degraded mode: " + err.getMessage(), 1);
-                
-                // Mark context as severely degraded
-                context.setMilestoneDegraded(3, "Complete data analysis failure: " + err.getMessage());
-                publishDegradationEvent(context, "data_analysis", err.getMessage());
-                
-                // Don't create fake columns - fail open
-                // Column information should come from SchemaMilestone
-                context.setDataProfile(new JsonObject()
-                    .put("degraded", true)
-                    .put("degradation_reason", err.getMessage())
-                    .put("message", "Could not analyze table structures"));
-                
-                context.completeMilestone(3);
-                
-                if (context.isStreaming() && context.getSessionId() != null) {
-                    JsonObject result = getShareableResult(context);
-                    result.put("degraded", true)
-                        .put("message", "⚠️ Data analysis failed - proceeding without column statistics");
-                    publishStreamingEvent(context.getConversationId(), "milestone.data_stats_complete", result);
-                }
-                
-                return Future.succeededFuture(context);
             })
             .onComplete(ar -> {
                 if (ar.succeeded()) {
@@ -348,13 +291,9 @@ public class DataStatsMilestone extends MilestoneManager {
                 if (ar.succeeded()) {
                     promise.complete(ar.result().body());
                 } else {
-                    // DON'T return fake columns - mark as degraded instead
-                    log("Table structure analysis failed for " + table + ": " + ar.cause().getMessage(), 1);
-                    promise.complete(new JsonObject()
-                        .put("table", table)
-                        .put("degraded", true)
-                        .put("degradation_reason", "Could not analyze table structure: " + ar.cause().getMessage())
-                        .put("columns", new JsonArray())); // Empty array, not fake data
+                    // Fail fast - no degraded mode
+                    promise.fail(new RuntimeException("Table structure analysis failed for " + table + ": " +
+                        ar.cause().getMessage()));
                 }
             });
         
@@ -376,35 +315,60 @@ public class DataStatsMilestone extends MilestoneManager {
                 terms.add(word);
             }
         }
-        
-        // Build context object for the mapping
-        JsonObject mappingContext = new JsonObject()
-            .put("query", context.getQuery())
-            .put("intent", context.getIntent())
-            .put("table", table);
-        
-        JsonObject request = new JsonObject()
-            .put("terms", terms)
-            .put("context", mappingContext);
-        
-        // Call the mapping tool
-        vertx.eventBus().<JsonObject>request(
-            "mcp.clients.business_mapping.map_business_terms",
-            request,
-            ar -> {
-                if (ar.succeeded()) {
-                    promise.complete(ar.result().body());
-                } else {
-                    // Mark as degraded instead of silently returning empty
-                    log("Business term mapping failed for " + table + ": " + ar.cause().getMessage(), 1);
-                    promise.complete(new JsonObject()
-                        .put("table", table)
-                        .put("degraded", true)
-                        .put("degradation_reason", "Could not map business terms: " + ar.cause().getMessage())
-                        .put("mappings", new JsonObject())); // Empty mapping with degradation flag
+
+        // Process ALL terms, not just the first one
+        // Since resolve_synonym expects a single term, we'll batch process them
+        if (terms.isEmpty()) {
+            // No terms to resolve, return empty result immediately
+            promise.complete(new JsonObject()
+                .put("table", table)
+                .put("mappings", new JsonObject()));
+            return promise.future();
+        }
+
+        // Process all terms and aggregate results
+        List<Future> termFutures = new ArrayList<>();
+        for (int i = 0; i < terms.size(); i++) {
+            String term = terms.getString(i);
+            JsonObject termRequest = new JsonObject().put("term", term);
+
+            Promise<JsonObject> termPromise = Promise.promise();
+            vertx.eventBus().<JsonObject>request(
+                "mcp.clients.oracleschemaintelligence.resolve_synonym",
+                termRequest,
+                ar -> {
+                    if (ar.succeeded()) {
+                        termPromise.complete(ar.result().body());
+                    } else {
+                        termPromise.fail(ar.cause());
+                    }
+                });
+            termFutures.add(termPromise.future());
+        }
+
+        CompositeFuture.join(termFutures)
+            .onComplete(ar -> {
+                // Process results even if some failed
+                JsonObject allMappings = new JsonObject();
+                CompositeFuture composite = ar.result();
+
+                for (int i = 0; i < termFutures.size(); i++) {
+                    if (composite.succeeded(i)) {
+                        JsonObject termResult = composite.resultAt(i);
+                        JsonArray matches = termResult.getJsonArray("matches", new JsonArray());
+                        String term = terms.getString(i);
+                        if (!matches.isEmpty()) {
+                            allMappings.put(term, matches);
+                        }
+                    }
                 }
+
+                // Complete with whatever mappings we got
+                promise.complete(new JsonObject()
+                    .put("table", table)
+                    .put("mappings", allMappings));
             });
-        
+
         return promise.future();
     }
     
@@ -433,25 +397,25 @@ public class DataStatsMilestone extends MilestoneManager {
      */
     private Future<JsonObject> loadEnumCache() {
         Promise<JsonObject> promise = Promise.promise();
-        
-        JsonObject request = new JsonObject()
-            .put("force_refresh", false);  // Use cached values if available
-        
-        // Call the load_enum_cache tool
+
+        // Call get_enum_metadata to check if enum data is available
         vertx.eventBus().<JsonObject>request(
-            "mcp.clients.businessmapping.load_enum_cache",
-            request,
+            "mcp.clients.oracleschemaintelligence.get_enum_metadata",
+            new JsonObject(),
             ar -> {
                 if (ar.succeeded()) {
                     JsonObject result = ar.result().body();
-                    log("Enum cache loaded with " + result.getInteger("cache_size", 0) + " mappings", 2);
-                    promise.complete(result);
+                    JsonArray enumTables = result.getJsonArray("enumTables", new JsonArray());
+                    log("Enum metadata loaded with " + enumTables.size() + " enum tables", 2);
+                    promise.complete(new JsonObject()
+                        .put("status", "loaded")
+                        .put("cache_size", enumTables.size()));
                 } else {
-                    log("Failed to load enum cache: " + ar.cause().getMessage(), 1);
+                    log("Failed to load enum metadata: " + ar.cause().getMessage(), 1);
                     promise.fail(ar.cause());
                 }
             });
-        
+
         return promise.future();
     }
     

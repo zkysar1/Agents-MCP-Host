@@ -3,7 +3,6 @@ package agents.director.hosts.milestones;
 import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneManager;
 import agents.director.mcp.clients.OracleSchemaIntelligenceClient;
-import agents.director.mcp.clients.BusinessMappingClient;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
@@ -20,7 +19,6 @@ import java.util.*;
 public class SchemaMilestone extends MilestoneManager {
     
     private static final String SCHEMA_CLIENT = "schema";
-    private static final String BUSINESS_CLIENT = "business";
     private final Map<String, String> deploymentIds = new HashMap<>();
     
     public SchemaMilestone(Vertx vertx, String baseUrl) {
@@ -34,11 +32,9 @@ public class SchemaMilestone extends MilestoneManager {
         
         // Deploy the MCP clients directly
         List<Future> deploymentFutures = new ArrayList<>();
-        
+
         OracleSchemaIntelligenceClient schemaClient = new OracleSchemaIntelligenceClient(baseUrl);
-        BusinessMappingClient businessClient = new BusinessMappingClient(baseUrl);
         deploymentFutures.add(deployClient(SCHEMA_CLIENT, schemaClient));
-        deploymentFutures.add(deployClient(BUSINESS_CLIENT, businessClient));
         
         CompositeFuture.all(deploymentFutures)
             .onSuccess(v -> {
@@ -91,19 +87,20 @@ public class SchemaMilestone extends MilestoneManager {
                 
                 // Process tables
                 List<String> relevantTables = new ArrayList<>();
+                List<String> relevantViews = new ArrayList<>();
                 Map<String, String> tableDescriptions = new HashMap<>();
-                
+
                 if (tables != null) {
                     for (int i = 0; i < tables.size(); i++) {
                     JsonObject table = tables.getJsonObject(i);
                     String tableName = table.getString("name");
                     String description = table.getString("description", "");
-                    
+
                     relevantTables.add(tableName);
                     if (!description.isEmpty()) {
                         tableDescriptions.put(tableName, description);
                     }
-                    
+
                     // Extract and store complete column information
                     JsonArray columns = table.getJsonArray("columns");
                     if (columns != null) {
@@ -112,21 +109,37 @@ public class SchemaMilestone extends MilestoneManager {
                     }
                     }
                 }
-                
-                // Add views as well
+
+                // Process views separately
                 if (views != null) {
                     for (int i = 0; i < views.size(); i++) {
                     JsonObject view = views.getJsonObject(i);
+                    // Check both "name" and "viewName" fields
                     String viewName = view.getString("name");
-                    String description = view.getString("description", "View: " + viewName);
-                    
-                    relevantTables.add(viewName);
-                    tableDescriptions.put(viewName, description);
+                    if (viewName == null) {
+                        viewName = view.getString("viewName");
+                    }
+
+                    // Skip if we couldn't get a view name
+                    if (viewName != null) {
+                        String description = view.getString("description", "View: " + viewName);
+
+                        relevantViews.add(viewName);
+                        relevantTables.add(viewName);  // Also add to tables for compatibility
+                        tableDescriptions.put(viewName, description);
+
+                        // Extract view columns if available
+                        JsonArray columns = view.getJsonArray("columns");
+                        if (columns != null) {
+                            context.setTableColumns(viewName, columns);
+                        }
+                    }
                     }
                 }
                 
                 // Update context with schema information
                 context.setRelevantTables(relevantTables);
+                context.setRelevantViews(relevantViews);
                 for (Map.Entry<String, String> entry : tableDescriptions.entrySet()) {
                     context.setTableDescription(entry.getKey(), entry.getValue());
                 }
@@ -198,13 +211,41 @@ public class SchemaMilestone extends MilestoneManager {
     private Future<JsonObject> discoverRelevantSchema(String query, JsonObject searchContext, String sessionId) {
         // Extract terms from query for business mapping
         JsonArray terms = extractTermsFromQuery(query);
-        
-        // First map business terms
-        Future<JsonObject> businessTermsFuture = callTool(BUSINESS_CLIENT, "map_business_terms",
-            new JsonObject()
-                .put("terms", terms)
-                .put("context", searchContext));
-        
+
+        // Resolve business terms/synonyms using knowledge graph
+        // Process ALL terms and aggregate results
+        Future<JsonObject> businessTermsFuture;
+        if (!terms.isEmpty()) {
+            // Process each term and collect all matches
+            List<Future> termFutures = new ArrayList<>();
+            for (int i = 0; i < terms.size(); i++) {
+                String term = terms.getString(i);
+                termFutures.add(callTool(SCHEMA_CLIENT, "resolve_synonym",
+                    new JsonObject().put("term", term)));
+            }
+
+            businessTermsFuture = CompositeFuture.join(termFutures)
+                .map(composite -> {
+                    JsonArray allMatches = new JsonArray();
+                    for (int i = 0; i < composite.size(); i++) {
+                        // Only process successful results
+                        if (composite.succeeded(i)) {
+                            JsonObject termResult = composite.resultAt(i);
+                            JsonArray termMatches = termResult.getJsonArray("matches", new JsonArray());
+                            // Add all matches from this term
+                            for (int j = 0; j < termMatches.size(); j++) {
+                                allMatches.add(termMatches.getValue(j));
+                            }
+                        }
+                    }
+                    return new JsonObject().put("matches", allMatches);
+                });
+        } else {
+            // No terms to resolve
+            businessTermsFuture = Future.succeededFuture(new JsonObject()
+                .put("matches", new JsonArray()));
+        }
+
         // Then match to Oracle schema
         Future<JsonObject> schemaMatchFuture = businessTermsFuture
             .compose(mappedTerms -> {
@@ -213,7 +254,7 @@ public class SchemaMilestone extends MilestoneManager {
                     .put("intent", searchContext.getString("intent", ""))
                     .put("queryType", searchContext.getString("intent_type", "query"))
                     .put("entities", extractTermsFromQuery(query))
-                    .put("businessTerms", mappedTerms)
+                    .put("businessTerms", mappedTerms.getJsonArray("matches", new JsonArray()))
                     .put("originalQuery", query);  // Include original query for term extraction
                 
                 return callTool(SCHEMA_CLIENT, "match_oracle_schema",
@@ -269,9 +310,16 @@ public class SchemaMilestone extends MilestoneManager {
         Future<JsonObject> relationshipsFuture = schemaMatchFuture
             .compose(match -> {
                 JsonArray tables = match.getJsonArray("tables");
-                if (tables != null && tables.size() > 0) {
-                    return callTool(SCHEMA_CLIENT, "infer_table_relationships",
-                        new JsonObject().put("tables", tables));
+                if (tables != null && tables.size() > 1) {
+                    // Use find_join_path for pairs of tables
+                    JsonObject table1 = tables.getJsonObject(0);
+                    JsonObject table2 = tables.getJsonObject(1);
+                    String tableName1 = table1.getString("name", table1.getString("tableName"));
+                    String tableName2 = table2.getString("name", table2.getString("tableName"));
+                    return callTool(SCHEMA_CLIENT, "find_join_path",
+                        new JsonObject()
+                            .put("fromTable", tableName1)
+                            .put("toTable", tableName2));
                 }
                 return Future.succeededFuture(new JsonObject());
             });
@@ -347,9 +395,7 @@ public class SchemaMilestone extends MilestoneManager {
             case SCHEMA_CLIENT:
                 serverName = "oracleschemaintelligence";
                 break;
-            case BUSINESS_CLIENT:
-                serverName = "businessmapping";
-                break;
+            // BusinessMappingServer removed - all functionality in SCHEMA_CLIENT
             default:
                 serverName = clientName.toLowerCase();
         }

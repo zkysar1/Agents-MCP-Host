@@ -29,6 +29,7 @@ public class MilestoneContext {
     
     // Milestone 2: Schema Discovery
     private List<String> relevantTables;
+    private List<String> relevantViews;  // Track views separately
     private Map<String, String> tableDescriptions;
     private JsonObject schemaDetails;
     
@@ -81,6 +82,7 @@ public class MilestoneContext {
         
         // Initialize collections
         this.relevantTables = new ArrayList<>();
+        this.relevantViews = new ArrayList<>();
         this.tableDescriptions = new HashMap<>();
         this.tableColumns = new HashMap<>();
         this.columnStats = new HashMap<>();
@@ -221,7 +223,10 @@ public class MilestoneContext {
     public List<String> getRelevantTables() { return relevantTables; }
     public void addRelevantTable(String table) { this.relevantTables.add(table); }
     public void setRelevantTables(List<String> tables) { this.relevantTables = tables; }
-    
+
+    public List<String> getRelevantViews() { return relevantViews; }
+    public void setRelevantViews(List<String> views) { this.relevantViews = views; }
+
     public Map<String, String> getTableDescriptions() { return tableDescriptions; }
     public void setTableDescription(String table, String description) { 
         this.tableDescriptions.put(table, description); 
