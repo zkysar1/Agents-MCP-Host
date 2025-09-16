@@ -285,7 +285,7 @@ public class DataStatsMilestone extends MilestoneManager {
         
         // Call the analysis tool
         vertx.eventBus().<JsonObject>request(
-            "mcp.clients.oracle_query_analysis.analyze_query",
+            "mcp.clients.oraclequeryanalysis.analyze_query",
             request,
             ar -> {
                 if (ar.succeeded()) {

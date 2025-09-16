@@ -524,6 +524,140 @@ public class SQLGenerationMilestone extends MilestoneManager {
     }
     
     /**
+     * Filter WHERE clause hints based on query relevance using LLM
+     */
+    private Future<JsonArray> filterHintsForRelevance(JsonArray allHints, MilestoneContext context) {
+        Promise<JsonArray> promise = Promise.promise();
+
+        // If no hints, return empty array
+        if (allHints == null || allHints.isEmpty()) {
+            return Future.succeededFuture(new JsonArray());
+        }
+
+        // Use LLM to determine which hints are actually relevant to the query
+        String systemPrompt = """
+            You are a SQL query analyzer. Given a user's query and potential WHERE clause hints,
+            determine which hints are ACTUALLY relevant to answering the query.
+
+            Rules:
+            - Only include hints that directly relate to filtering criteria mentioned in the query
+            - For "How many X" queries without additional criteria, return NO hints (empty array)
+            - For queries with explicit filters (e.g., "pending orders", "in California"), include relevant hints
+            - Be conservative - when in doubt, exclude the hint
+            - The query intent matters more than keyword matching
+
+            Return a JSON array containing only the relevant hints, or an empty array [] if none apply.
+            Each hint in your response must be an exact copy from the input hints.
+            """;
+
+        // Build query context
+        String queryContext = String.format("""
+            User Query: "%s"
+            Query Intent: %s
+            Intent Type: %s
+            """,
+            context.getQuery(),
+            context.getIntent() != null ? context.getIntent() : "unknown",
+            context.getIntentType() != null ? context.getIntentType() : "unknown"
+        );
+
+        String userPrompt = String.format("""
+            %s
+
+            Potential WHERE clause hints to evaluate:
+            %s
+
+            Which of these hints should actually be used in the SQL WHERE clause?
+
+            Examples of when to include/exclude hints:
+            - "How many orders?" → Return empty array [] (counting all orders, no filtering needed)
+            - "How many pending orders?" → Include hints related to status='pending'
+            - "Show orders in California" → Include hints related to location/state='California'
+            - "List all customers" → Return empty array [] (no filtering needed)
+
+            IMPORTANT: Only return hints that are explicitly relevant to the user's query intent.
+            Return the filtered hints as a JSON array. If no hints are relevant, return an empty array [].
+            """,
+            queryContext,
+            allHints.encodePrettily()
+        );
+
+        try {
+            llmService.chatCompletion(
+                Arrays.asList(
+                    new JsonObject().put("role", "system").put("content", systemPrompt).encode(),
+                    new JsonObject().put("role", "user").put("content", userPrompt).encode()
+                ),
+                0.3,  // Low temperature for consistency
+                2000  // Max tokens
+            ).whenComplete((response, error) -> {
+                if (error != null) {
+                    log("LLM call failed for hint filtering: " + error.getMessage(), 0);
+                    // Fail open - no hints rather than wrong hints
+                    promise.fail(error);
+                } else {
+                    try {
+                        String content = response.getString("content", "[]");
+
+                        // Extract JSON array from response (handle markdown code blocks)
+                        if (content.contains("```json")) {
+                            content = content.substring(content.indexOf("```json") + 7);
+                            content = content.substring(0, content.indexOf("```"));
+                        } else if (content.contains("```")) {
+                            content = content.substring(content.indexOf("```") + 3);
+                            content = content.substring(0, content.indexOf("```"));
+                        }
+
+                        // Parse the filtered hints
+                        JsonArray filteredHints = new JsonArray(content.trim());
+
+                        // Validate that returned hints exist in original set (security check)
+                        JsonArray validatedHints = new JsonArray();
+                        for (int i = 0; i < filteredHints.size(); i++) {
+                            JsonObject hint = filteredHints.getJsonObject(i);
+                            if (hintExistsInOriginal(hint, allHints)) {
+                                validatedHints.add(hint);
+                            } else {
+                                log("LLM returned invalid hint not in original set, skipping: " + hint.encode(), 1);
+                            }
+                        }
+
+                        promise.complete(validatedHints);
+                    } catch (Exception e) {
+                        log("Failed to parse LLM response for hint filtering: " + e.getMessage(), 0);
+                        // Fail open - no hints rather than wrong hints
+                        promise.fail(new RuntimeException("Failed to parse filtered hints", e));
+                    }
+                }
+            });
+        } catch (Exception e) {
+            log("Failed to call LLM for hint filtering: " + e.getMessage(), 0);
+            promise.fail(e);
+        }
+
+        return promise.future();
+    }
+
+    /**
+     * Check if a hint exists in the original hint array (for security validation)
+     */
+    private boolean hintExistsInOriginal(JsonObject hint, JsonArray originalHints) {
+        String hintTable = hint.getString("table");
+        String hintColumn = hint.getString("column");
+        String hintValue = hint.getString("value");
+
+        for (int i = 0; i < originalHints.size(); i++) {
+            JsonObject original = originalHints.getJsonObject(i);
+            if (hintTable != null && hintTable.equals(original.getString("table")) &&
+                hintColumn != null && hintColumn.equals(original.getString("column")) &&
+                hintValue != null && hintValue.equals(original.getString("value"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Detect SQL query type from the statement
      */
     private String detectQueryType(String sql) {
@@ -759,25 +893,55 @@ public class SQLGenerationMilestone extends MilestoneManager {
                                 log("Added " + enumHints.size() + " enum-resolved hints", 2);
                             }
                             
-                            // Complete with whatever hints we have
+                            // Complete with whatever hints we have after filtering
                             if (allHints.isEmpty()) {
-                                log("WARNING: No WHERE clause hints generated - query may return unfiltered results!", 1);
+                                log("No initial WHERE clause hints generated", 2);
+                                promise.complete(allHints);
                             } else {
-                                log("Generated " + allHints.size() + " total WHERE clause hints", 2);
+                                log("Generated " + allHints.size() + " total WHERE clause hints, filtering for relevance...", 2);
+                                // Filter hints based on query relevance using LLM
+                                filterHintsForRelevance(allHints, context)
+                                    .onSuccess(filteredHints -> {
+                                        if (filteredHints.isEmpty()) {
+                                            log("No WHERE clause hints relevant to query - will use simple query", 2);
+                                        } else {
+                                            log("Filtered to " + filteredHints.size() + " relevant WHERE clause hints", 2);
+                                        }
+                                        promise.complete(filteredHints);
+                                    })
+                                    .onFailure(err -> {
+                                        log("Failed to filter WHERE hints with LLM: " + err.getMessage(), 0);
+                                        // Fail open - no hints rather than wrong hints
+                                        promise.fail(new RuntimeException("WHERE hint filtering failed", err));
+                                    });
                             }
-                            promise.complete(allHints);
                         });
                 } else {
                     // No failed mappings, complete normally
                     if (allHints.isEmpty()) {
-                        log("WARNING: No WHERE clause hints generated - query may return unfiltered results!", 1);
+                        log("No initial WHERE clause hints generated", 2);
+                        promise.complete(allHints);
                     } else {
-                        log("Generated " + allHints.size() + " WHERE clause hints", 2);
+                        log("Generated " + allHints.size() + " initial WHERE clause hints, filtering for relevance...", 2);
+                        // Filter hints based on query relevance using LLM
+                        filterHintsForRelevance(allHints, context)
+                            .onSuccess(filteredHints -> {
+                                if (filteredHints.isEmpty()) {
+                                    log("No WHERE clause hints relevant to query - will use simple query", 2);
+                                } else {
+                                    log("Filtered to " + filteredHints.size() + " relevant WHERE clause hints", 2);
+                                }
+                                promise.complete(filteredHints);
+                            })
+                            .onFailure(err -> {
+                                log("Failed to filter WHERE hints with LLM: " + err.getMessage(), 0);
+                                // Fail open - no hints rather than wrong hints
+                                promise.fail(new RuntimeException("WHERE hint filtering failed", err));
+                            });
                     }
-                    promise.complete(allHints);
                 }
             });
-        
+
         return promise.future();
     }
     

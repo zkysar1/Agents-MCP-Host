@@ -250,12 +250,14 @@ public class OracleSQLGenerationServer extends MCPServerBase {
             
             Rules:
             - Use proper Oracle syntax (e.g., ROWNUM for limiting rows)
-            - CRITICAL: If whereClauseHints are provided, USE THEM EXACTLY AS SPECIFIED
-            - The hints contain ACTUAL DATABASE VALUES - use these instead of generic patterns
+            - If whereClauseHints are provided, use them to construct appropriate WHERE clauses
+            - If NO whereClauseHints are provided, DO NOT add WHERE clauses unless explicitly required by the query
+            - The hints contain ACTUAL DATABASE VALUES - use these when provided
             - IMPORTANT: When a query asks "how many X" where X matches a table name:
               * This means COUNT rows in that table, NOT search for the word X
+              * For simple "How many X?" queries without filters, use COUNT(*) FROM X without WHERE
               * DO NOT create WHERE clauses that search for entity names in their own ID columns
-              * Example: "How many orders" means COUNT(*) FROM ORDERS, not WHERE order_id LIKE '%orders%'
+              * Example: "How many orders" means COUNT(*) FROM ORDERS (no WHERE clause)
             - For aggregate queries (COUNT, SUM, AVG) that return a single row, DO NOT add ORDER BY
             - CRITICAL JOIN RULES - DEFAULT TO FULL OUTER JOIN:
               * Always use FULL OUTER JOIN as the default when joining tables
@@ -289,7 +291,7 @@ public class OracleSQLGenerationServer extends MCPServerBase {
               * enum_desc_column: The description column in the enum table (e.g., STATUS_DESCRIPTION)
             - Example with metadata: If hint has enum_table="ORDER_STATUS_ENUM", enum_id_column="STATUS_ID", enum_desc_column="STATUS_DESCRIPTION":
                 FULL OUTER JOIN ORDER_STATUS_ENUM e ON o.STATUS_ID = e.STATUS_ID
-                WHERE UPPER(e.STATUS_DESCRIPTION) = 'PENDING' OR o.STATUS_ID = hint_value
+                WHERE UPPER(e.STATUS_DESCRIPTION) = hint_value OR o.STATUS_ID = hint_code
             - If enum metadata is not provided, try to infer the enum table name from the column name
             - This ensures the query works whether the user provides a code or description
             

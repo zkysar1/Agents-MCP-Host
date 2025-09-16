@@ -110,6 +110,9 @@ public class KnowledgeGraphBuilder {
                     metadata.getInteger("relationshipCount", 0),
                     metadata.getInteger("synonymCount", 0)
                 ));
+
+                // Log table names for debugging
+                logGraphContents(graph);
             })
             .onFailure(error -> {
                 vertx.eventBus().publish("log",
@@ -775,6 +778,62 @@ public class KnowledgeGraphBuilder {
         // Oracle identifiers: start with letter, contain only letters, numbers, underscore, #, $
         // Max length 30 characters (128 in 12.2+, but we'll use 30 for compatibility)
         return identifier.matches("^[A-Za-z][A-Za-z0-9_#$]{0,29}$");
+    }
+
+    /**
+     * Log the contents of the knowledge graph for debugging
+     */
+    private void logGraphContents(JsonObject graph) {
+        try {
+            JsonArray tables = graph.getJsonArray("tables");
+            if (tables != null && !tables.isEmpty()) {
+                // Collect all table names
+                List<String> tableNames = new ArrayList<>();
+                for (int i = 0; i < tables.size(); i++) {
+                    JsonObject table = tables.getJsonObject(i);
+                    String tableName = table.getString("tableName");
+                    if (tableName != null) {
+                        tableNames.add(tableName);
+                    }
+                }
+
+                // Log table names
+                vertx.eventBus().publish("log", String.format(
+                    "[KnowledgeGraph] Tables in schema: %s,1,KnowledgeGraphBuilder,Graph,Info",
+                    String.join(", ", tableNames)
+                ));
+
+                // Log detailed info for tables containing order-related terms
+                for (int i = 0; i < tables.size(); i++) {
+                    JsonObject table = tables.getJsonObject(i);
+                    String tableName = table.getString("tableName", "").toLowerCase();
+                    if (tableName.contains("order") || tableName.contains("purchase") ||
+                        tableName.contains("sale") || tableName.contains("transaction")) {
+
+                        JsonArray columns = table.getJsonArray("columns");
+                        List<String> columnNames = new ArrayList<>();
+                        if (columns != null) {
+                            for (int j = 0; j < columns.size(); j++) {
+                                JsonObject col = columns.getJsonObject(j);
+                                columnNames.add(col.getString("name", ""));
+                            }
+                        }
+
+                        vertx.eventBus().publish("log", String.format(
+                            "[KnowledgeGraph] Order-related table: %s, Columns: %s,2,KnowledgeGraphBuilder,Graph,Detail",
+                            table.getString("tableName"),
+                            String.join(", ", columnNames)
+                        ));
+                    }
+                }
+            } else {
+                vertx.eventBus().publish("log",
+                    "[KnowledgeGraph] WARNING: No tables found in graph!,1,KnowledgeGraphBuilder,Graph,Warning");
+            }
+        } catch (Exception e) {
+            vertx.eventBus().publish("log",
+                "[KnowledgeGraph] Error logging graph contents: " + e.getMessage() + ",1,KnowledgeGraphBuilder,Graph,Error");
+        }
     }
 
     /**

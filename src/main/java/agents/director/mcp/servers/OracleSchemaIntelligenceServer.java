@@ -382,11 +382,43 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 }
                 
                 // Filter by confidence and limit results
+                List<SchemaMatch> rejectedMatches = verifiedMatches.stream()
+                    .filter(m -> m.confidence < confidenceThreshold)
+                    .collect(Collectors.toList());
+
                 List<SchemaMatch> finalMatches = verifiedMatches.stream()
                     .filter(m -> m.confidence >= confidenceThreshold)
                     .sorted((a, b) -> Double.compare(b.confidence, a.confidence))
                     .limit(maxSuggestions)
                     .collect(Collectors.toList());
+
+                // Log rejected matches
+                if (!rejectedMatches.isEmpty()) {
+                    String rejectedSummary = rejectedMatches.stream()
+                        .map(m -> m.table.tableName + "(" + String.format("%.2f", m.confidence) + ")")
+                        .collect(Collectors.joining(", "));
+
+                    vertx.eventBus().publish("log", String.format(
+                        "[Filter] Rejected %d tables below threshold %.2f: %s,1,OracleSchemaIntelligenceServer,Filter,Info",
+                        rejectedMatches.size(),
+                        confidenceThreshold,
+                        rejectedSummary
+                    ));
+                }
+
+                // Log accepted matches
+                if (!finalMatches.isEmpty()) {
+                    String acceptedSummary = finalMatches.stream()
+                        .map(m -> m.table.tableName + "(" + String.format("%.2f", m.confidence) + ")")
+                        .collect(Collectors.joining(", "));
+
+                    vertx.eventBus().publish("log", String.format(
+                        "[Filter] Accepted %d tables above threshold %.2f: %s,1,OracleSchemaIntelligenceServer,Filter,Info",
+                        finalMatches.size(),
+                        confidenceThreshold,
+                        acceptedSummary
+                    ));
+                }
 
                 // NO FALLBACK: If no matches meet criteria, return empty result (fail fast)
                 if (finalMatches.isEmpty()) {
@@ -767,11 +799,11 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 }
             }
         }
-        
+
         // For schema matching, prioritize structural terms
         // Value terms will be handled by BusinessMappingServer
-        List<String> searchTerms = new ArrayList<>(structuralTerms);
-        
+        // NOTE: Don't create searchTerms yet - wait until after LLM expansion
+
         // Log classification for debugging
         if (!valueTerms.isEmpty()) {
             vertx.eventBus().publish("log", "Value terms (for enum lookup): " + valueTerms + ",2,OracleSchemaIntelligenceServer,MCP,System");
@@ -779,10 +811,111 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
         if (!structuralTerms.isEmpty()) {
             vertx.eventBus().publish("log", "Structural terms (for schema matching): " + structuralTerms + ",2,OracleSchemaIntelligenceServer,MCP,System");
         }
-        
+
+        // NEW: Expand search terms using LLM and intent analysis
+        if (!structuralTerms.isEmpty() && llmService.isInitialized()) {
+            List<String> expandedTerms = expandSearchTermsWithLLM(
+                new ArrayList<>(structuralTerms),
+                analysis
+            );
+            structuralTerms.addAll(expandedTerms);
+            vertx.eventBus().publish("log",
+                "Expanded search terms via LLM: " + expandedTerms + ",2,OracleSchemaIntelligenceServer,MCP,System");
+        }
+
+        // NOW create searchTerms from the expanded structuralTerms
+        List<String> searchTerms = new ArrayList<>(structuralTerms);
         return searchTerms;
     }
-    
+
+    /**
+     * Expand search terms using LLM based on intent analysis
+     * This replaces hardcoded patterns with intelligent, database-agnostic expansion
+     */
+    private List<String> expandSearchTermsWithLLM(List<String> terms, JsonObject analysis) {
+        // Build prompt using existing intent analysis
+        String originalQuery = analysis.getString("originalQuery", "");
+        String intent = analysis.getString("intent", "");
+        String queryType = analysis.getString("queryType", "");
+
+        // Create a focused prompt for term expansion
+        String systemPrompt = "You are a database term expander. Given search terms and query context, " +
+                             "generate variations that might appear in table names. Be concise.";
+
+        String userPrompt = String.format("""
+            Query: "%s"
+            Intent: %s
+            Query Type: %s
+            Terms to expand: %s
+
+            Generate variations of these terms that might appear in database table names.
+            Include:
+            - Singular and plural forms
+            - Common synonyms (e.g., order->purchase, customer->client)
+            - Related business concepts
+            - Common abbreviations
+
+            Return ONLY a JSON array of additional search terms. Do not include the original terms.
+            Example: ["purchase", "transaction", "sale"] for term "order"
+            """,
+            originalQuery,
+            intent,
+            queryType,
+            terms.toString()
+        );
+
+        try {
+            // Call LLM service
+            List<JsonObject> messages = Arrays.asList(
+                new JsonObject().put("role", "system").put("content", systemPrompt),
+                new JsonObject().put("role", "user").put("content", userPrompt)
+            );
+
+            JsonObject llmResponse = llmService.chatCompletion(
+                messages.stream().map(JsonObject::encode).collect(Collectors.toList()),
+                0.3, // Low temperature for consistency
+                500  // Max tokens
+            ).get(3, TimeUnit.SECONDS); // Quick timeout
+
+            // Parse response
+            String content = llmResponse
+                .getJsonArray("choices")
+                .getJsonObject(0)
+                .getJsonObject("message")
+                .getString("content");
+
+            // Clean and parse JSON response
+            content = content.trim();
+            if (content.startsWith("```json")) {
+                content = content.substring(7);
+            }
+            if (content.startsWith("```")) {
+                content = content.substring(3);
+            }
+            if (content.endsWith("```")) {
+                content = content.substring(0, content.length() - 3);
+            }
+
+            JsonArray expandedArray = new JsonArray(content);
+            List<String> expanded = new ArrayList<>();
+
+            for (int i = 0; i < expandedArray.size(); i++) {
+                String term = expandedArray.getString(i).toLowerCase();
+                if (!terms.contains(term) && !term.isEmpty()) {
+                    expanded.add(term);
+                }
+            }
+
+            return expanded;
+
+        } catch (Exception e) {
+            vertx.eventBus().publish("log",
+                "Error in LLM term expansion: " + e.getMessage() + ",0,OracleSchemaIntelligenceServer,MCP,Error");
+            // Fail open - throw exception instead of hiding it
+            throw new RuntimeException("Failed to expand search terms with LLM", e);
+        }
+    }
+
     /**
      * Determine if a term is likely a data value (like an enum value)
      */
@@ -937,7 +1070,7 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 You are a database schema expert. Your task is to verify and re-rank schema matches.
                 Given a user's query analysis and a list of potential table matches from fuzzy matching,
                 determine which tables are actually relevant and assign confidence scores (0.0-1.0).
-                
+
                 Consider:
                 1. Semantic relevance to the user's intent
                 2. Column names that would contain the requested data
@@ -945,11 +1078,27 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 4. Likely join relationships
                 5. IMPORTANT: Tables may still be relevant even if they don't contain all filter columns
                    (e.g., ORDERS table is relevant for "orders in California" even if location is in CUSTOMERS)
-                
+
                 Be INCLUSIVE rather than exclusive - if a table contains the main entity (orders, customers, etc.)
                 it should have high confidence even if filters require joins to other tables.
-                
-                Respond with a JSON array of matches with adjusted confidence scores and reasons.
+
+                Respond with a JSON array where each object has EXACTLY these fields:
+                [
+                  {
+                    "tableName": "ORDERS",              // string - exact table name from input
+                    "confidence": 0.95,                 // number (NOT string) - between 0.0 and 1.0
+                    "reason": "Directly matches query"  // string - why this table is relevant
+                  },
+                  {
+                    "tableName": "ORDER_DETAILS",
+                    "confidence": 0.85,
+                    "reason": "Contains order line items"
+                  }
+                ]
+
+                IMPORTANT:
+                - Use exactly "confidence" not "confidenceScore" or any other variation
+                - confidence must be a JSON number (0.95), NOT a string ("0.95")
                 """;
             
             JsonObject promptData = new JsonObject()
@@ -970,7 +1119,13 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                     .put("fuzzyReason", match.reason));
             }
             promptData.put("fuzzyMatches", matchesForLLM);
-            
+
+            // Log what we're sending to LLM for verification
+            vertx.eventBus().publish("log",
+                "[LLM-Verify] Sending " + matchesForLLM.size() + " tables for verification,2,OracleSchemaIntelligenceServer,LLM,Request");
+            vertx.eventBus().publish("log",
+                "[LLM-Verify] Tables to verify: " + matchesForLLM.encodePrettily() + ",3,OracleSchemaIntelligenceServer,LLM,Request");
+
             List<JsonObject> messages = Arrays.asList(
                 new JsonObject().put("role", "system").put("content", systemPrompt),
                 new JsonObject().put("role", "user").put("content", promptData.encode())
@@ -987,7 +1142,11 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 .getJsonObject(0)
                 .getJsonObject("message")
                 .getString("content");
-            
+
+            // Log LLM response
+            vertx.eventBus().publish("log",
+                "[LLM-Verify] LLM response: " + content + ",3,OracleSchemaIntelligenceServer,LLM,Response");
+
             // Parse LLM response and update matches
             JsonArray verifiedMatches = parseJsonArray(content);
             
@@ -999,22 +1158,45 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 Double confidence = verified.getDouble("confidence", 0.0);
                 llmScores.put(tableName.toLowerCase(), confidence);
             }
+
+            // Log LLM scores
+            String scoresSummary = llmScores.entrySet().stream()
+                .map(e -> e.getKey() + "=" + String.format("%.2f", e.getValue()))
+                .collect(Collectors.joining(", "));
+            vertx.eventBus().publish("log",
+                "[LLM-Verify] LLM scores: " + (scoresSummary.isEmpty() ? "none" : scoresSummary) + ",1,OracleSchemaIntelligenceServer,LLM,Scores");
             
             // Update original matches with LLM scores
             for (SchemaMatch match : fuzzyMatches) {
+                double originalConfidence = match.confidence;
                 Double llmScore = llmScores.get(match.table.tableName.toLowerCase());
+
                 if (llmScore != null) {
                     match.confidence = llmScore;
                     match.reason += " (LLM verified)";
                 } else {
-                    match.confidence *= 0.5; // Reduce confidence if LLM didn't verify
+                    // LLM didn't return this table - set confidence to 0 (fail open)
+                    match.confidence = 0.0;
+                    match.reason += " (Not verified by LLM)";
                 }
+
+                // Log confidence adjustment
+                vertx.eventBus().publish("log", String.format(
+                    "[LLM-Verify] Table %s: Fuzzy=%.2f, LLM=%.2f, Final=%.2f,2,OracleSchemaIntelligenceServer,LLM,Adjustment",
+                    match.table.tableName,
+                    originalConfidence,
+                    llmScore != null ? llmScore : 0.0,
+                    match.confidence
+                ));
             }
-            
+
         } catch (Exception e) {
-            vertx.eventBus().publish("log", "LLM verification failed, using fuzzy matches only" + ",1,OracleSchemaIntelligenceServer,MCP,System");
+            // Fail open - throw the exception instead of hiding it
+            vertx.eventBus().publish("log",
+                "[LLM-Verify] LLM verification failed with error: " + e.getMessage() + ",0,OracleSchemaIntelligenceServer,LLM,Error");
+            throw new RuntimeException("LLM verification failed", e);
         }
-        
+
         return fuzzyMatches;
     }
     
@@ -1356,6 +1538,15 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 // If no synonym match, try direct similarity
                 if (!foundSynonym) {
                     double similarity = calculateSimilarity(tableName.toLowerCase(), term);
+
+                    // Log near-misses for debugging
+                    if (similarity > 0.4) {
+                        vertx.eventBus().publish("log", String.format(
+                            "[FuzzyMatch] Table: %s, Term: %s, Similarity: %.3f, Threshold: 0.6, Match: %s,3,OracleSchemaIntelligenceServer,Match,Debug",
+                            tableName, term, similarity, similarity > 0.6 ? "YES" : "NO"
+                        ));
+                    }
+
                     if (similarity > 0.6) {
                         tableScore = Math.max(tableScore, similarity);
                         matchReason = "Table name matches '" + term + "'";
@@ -1426,6 +1617,21 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
                 match.reason = matchReason;
                 matches.add(match);
             }
+        }
+
+        // Log summary of matches found
+        if (!matches.isEmpty()) {
+            String matchSummary = matches.stream()
+                .map(m -> m.table.tableName + "(" + String.format("%.2f", m.confidence) + ")")
+                .collect(Collectors.joining(", "));
+
+            vertx.eventBus().publish("log", String.format(
+                "[FuzzyMatch] Found %d matches: %s,1,OracleSchemaIntelligenceServer,Match,Summary",
+                matches.size(), matchSummary
+            ));
+        } else {
+            vertx.eventBus().publish("log",
+                "[FuzzyMatch] No matches found from " + tables.size() + " tables,1,OracleSchemaIntelligenceServer,Match,Summary");
         }
 
         return matches;
