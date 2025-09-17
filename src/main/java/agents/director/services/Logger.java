@@ -88,9 +88,6 @@ public class Logger extends AbstractVerticle {
       long now = System.currentTimeMillis();
       buffer.add(msg.body() + "," + sequenceCounter + "," + now + "\n");
 
-      if (logLevel >= 2) {
-        System.out.println("[LOG] " + msg.body());
-      }
     });
 
     vertx.eventBus().consumer("saveAllDataToFiles_OnTermination", m -> flushBuffer(ar -> {

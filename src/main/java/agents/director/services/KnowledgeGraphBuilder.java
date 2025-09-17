@@ -2,15 +2,12 @@ package agents.director.services;
 
 import io.vertx.core.Vertx;
 import io.vertx.core.Future;
-import io.vertx.core.Promise;
 import io.vertx.core.CompositeFuture;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
-
+import static agents.director.Driver.logLevel;
 import java.sql.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * Knowledge Graph Builder for Oracle Schema Intelligence.
@@ -19,7 +16,6 @@ import java.util.stream.Collectors;
  * - Foreign key relationships for join path discovery
  * - Synonym mappings for business term resolution
  * - Column indexes for disambiguation
- *
  * Uses Vert.x async patterns for parallel loading and non-blocking operations.
  */
 public class KnowledgeGraphBuilder {
@@ -28,40 +24,33 @@ public class KnowledgeGraphBuilder {
     private volatile Vertx vertx;
     private OracleConnectionManager connectionManager;
 
-    // The in-memory knowledge graph
+    // The in-memory knowledge graph containing everything
     private volatile JsonObject knowledgeGraph;
     private volatile boolean graphBuilt = false;
     private volatile long graphBuildTimestamp = 0;
 
-    // Graph components for fast lookup
-    private final Map<String, JsonObject> tableIndex = new ConcurrentHashMap<>();
-    private final Map<String, List<String>> columnToTablesIndex = new ConcurrentHashMap<>();
-    private final Map<String, List<JsonObject>> synonymIndex = new ConcurrentHashMap<>();
-    private final Map<String, List<JsonObject>> relationshipIndex = new ConcurrentHashMap<>();
-    private final Map<String, JsonObject> enumTableIndex = new ConcurrentHashMap<>();
-    private final Map<String, Map<String, String>> enumValuesIndex = new ConcurrentHashMap<>();
-
     // Common business term patterns (shared with BusinessMappingServer)
-    // Using unmodifiable map for thread safety
-    private static final Map<String, List<String>> COMMON_TERM_PATTERNS;
+    // Using JsonObject for thread safety and Vert.x consistency
+    private static final JsonObject COMMON_TERM_PATTERNS;
 
     static {
-        Map<String, List<String>> patterns = new HashMap<>();
-        patterns.put("customer", Arrays.asList("customer", "clients", "account", "user", "member"));
-        patterns.put("order", Arrays.asList("order", "purchase", "transaction", "sale"));
-        patterns.put("product", Arrays.asList("product", "item", "sku", "merchandise", "goods"));
-        patterns.put("employee", Arrays.asList("employee", "staff", "worker", "personnel", "emp"));
-        patterns.put("date", Arrays.asList("date", "datetime", "timestamp", "created", "modified"));
-        patterns.put("status", Arrays.asList("status", "state", "flag", "active", "enabled"));
-        patterns.put("amount", Arrays.asList("amount", "total", "sum", "price", "cost", "value"));
-        patterns.put("name", Arrays.asList("name", "title", "description", "label"));
-        patterns.put("location", Arrays.asList("state", "province", "region", "territory", "prov"));
-        patterns.put("postal", Arrays.asList("zip", "zipcode", "postal", "postal_code", "postcode"));
-        patterns.put("province", Arrays.asList("state", "province", "prov"));
-        patterns.put("postal_code", Arrays.asList("zip", "zipcode", "postal_code"));
-        patterns.put("phone", Arrays.asList("phone", "telephone", "tel", "mobile", "cell"));
-        patterns.put("address", Arrays.asList("address", "addr", "street", "location"));
-        COMMON_TERM_PATTERNS = Collections.unmodifiableMap(patterns);
+        JsonObject patterns = new JsonObject();
+        patterns.put("customer", new JsonArray().add("customer").add("clients").add("account").add("user").add("member"));
+        patterns.put("order", new JsonArray().add("order").add("purchase").add("transaction").add("sale"));
+        patterns.put("product", new JsonArray().add("product").add("item").add("sku").add("merchandise").add("goods"));
+        patterns.put("employee", new JsonArray().add("employee").add("staff").add("worker").add("personnel").add("emp"));
+        patterns.put("date", new JsonArray().add("date").add("datetime").add("timestamp").add("created").add("modified"));
+        patterns.put("status", new JsonArray().add("status").add("state").add("flag").add("active").add("enabled"));
+        patterns.put("amount", new JsonArray().add("amount").add("total").add("sum").add("price").add("cost").add("value"));
+        patterns.put("name", new JsonArray().add("name").add("title").add("description").add("label"));
+        patterns.put("location", new JsonArray().add("state").add("province").add("region").add("territory").add("prov"));
+        patterns.put("postal", new JsonArray().add("zip").add("zipcode").add("postal").add("postal_code").add("postcode"));
+        patterns.put("province", new JsonArray().add("state").add("province").add("prov"));
+        patterns.put("postal_code", new JsonArray().add("zip").add("zipcode").add("postal_code"));
+        patterns.put("phone", new JsonArray().add("phone").add("telephone").add("tel").add("mobile").add("cell"));
+        patterns.put("address", new JsonArray().add("address").add("addr").add("street").add("location"));
+        // JsonObject is immutable once created, no need for unmodifiableMap wrapper
+        COMMON_TERM_PATTERNS = patterns;
     }
 
     private KnowledgeGraphBuilder() {
@@ -102,6 +91,10 @@ public class KnowledgeGraphBuilder {
                 this.graphBuildTimestamp = System.currentTimeMillis();
                 this.graphBuilt = true; // Set this last after everything is ready
 
+                // Keep print for debugging + add log level 4 (data)
+                System.out.println(knowledgeGraph.encode());
+                if (logLevel >= 4) vertx.eventBus().publish("log", "Knowledge graph JSON: " + knowledgeGraph.encode() + ",4,KnowledgeGraphBuilder,Graph,Data");
+
                 // Log statistics
                 JsonObject metadata = graph.getJsonObject("metadata");
                 vertx.eventBus().publish("log", String.format(
@@ -127,12 +120,17 @@ public class KnowledgeGraphBuilder {
         long startTime = System.currentTimeMillis();
 
         // Load components in parallel where possible
-        CompositeFuture composite = CompositeFuture.join(
-            loadTablesAndColumns(),
-            loadForeignKeys(),
-            loadSynonyms(),
-            loadEnumTablesAndValues()
-        );
+        Future<JsonArray> tablesFuture = loadTablesAndColumns();
+        Future<JsonArray> relationshipsFuture = loadForeignKeys();
+        Future<JsonArray> synonymsFuture = loadSynonyms();
+        Future<JsonObject> enumDataFuture = loadEnumTablesAndValues();
+
+        CompositeFuture composite = Future.join(Arrays.asList(
+            tablesFuture,
+            relationshipsFuture,
+            synonymsFuture,
+            enumDataFuture
+        ));
 
         return composite.map(ar -> {
             JsonArray tables = composite.resultAt(0);
@@ -140,17 +138,25 @@ public class KnowledgeGraphBuilder {
             JsonArray synonyms = composite.resultAt(2);
             JsonObject enumData = composite.resultAt(3);
 
-            // Build indexes for fast lookup
-            buildIndexes(tables, relationships, synonyms);
+            // Build all indexes as JsonObjects
+            JsonObject indexes = buildIndexes(tables, relationships, synonyms, enumData);
 
-            // Assemble the final graph
-            JsonObject graph = new JsonObject()
+            // Assemble the final graph with everything in one structure
+            // All indexes stored directly in the graph
+
+            return new JsonObject()
                 .put("tables", tables)
                 .put("relationships", relationships)
                 .put("synonyms", synonyms)
-                .put("columnIndex", createColumnIndex())
                 .put("enumTables", enumData.getJsonObject("enumTables", new JsonObject()))
                 .put("enumValues", enumData.getJsonObject("enumValues", new JsonObject()))
+                // All indexes stored directly in the graph
+                .put("tableIndex", indexes.getJsonObject("tableIndex"))
+                .put("columnIndex", indexes.getJsonObject("columnIndex"))
+                .put("relationshipIndex", indexes.getJsonObject("relationshipIndex"))
+                .put("synonymIndex", indexes.getJsonObject("synonymIndex"))
+                .put("enumTableIndex", indexes.getJsonObject("enumTableIndex"))
+                .put("enumValuesIndex", indexes.getJsonObject("enumValuesIndex"))
                 .put("metadata", new JsonObject()
                     .put("buildTime", System.currentTimeMillis() - startTime)
                     .put("timestamp", System.currentTimeMillis())
@@ -160,8 +166,6 @@ public class KnowledgeGraphBuilder {
                     .put("enumTableCount", enumData.getJsonObject("enumTables", new JsonObject()).size())
                     .put("schema", getDefaultSchema())
                 );
-
-            return graph;
         });
     }
 
@@ -177,7 +181,7 @@ public class KnowledgeGraphBuilder {
         return connectionManager.listTables()
             .compose(tableList -> {
                 // Load metadata for each table in parallel
-                List<Future> metadataFutures = new ArrayList<>();
+                List<Future<JsonObject>> metadataFutures = new ArrayList<>();
 
                 for (int i = 0; i < tableList.size(); i++) {
                     JsonObject tableInfo = tableList.getJsonObject(i);
@@ -195,11 +199,12 @@ public class KnowledgeGraphBuilder {
                 }
 
                 // Wait for all metadata to load
-                return CompositeFuture.join(metadataFutures)
+                // Future.join accepts List<? extends Future<?>> so we can pass our typed list directly
+                return Future.join(metadataFutures)
                     .map(composite -> {
                         JsonArray tables = new JsonArray();
-                        for (int i = 0; i < metadataFutures.size(); i++) {
-                            tables.add(metadataFutures.get(i).result());
+                        for (Future<JsonObject> metadataFuture : metadataFutures) {
+                            tables.add(metadataFuture.result());
                         }
 
                         vertx.eventBus().publish("log",
@@ -215,9 +220,11 @@ public class KnowledgeGraphBuilder {
     private Future<JsonArray> loadForeignKeys() {
         vertx.eventBus().publish("log", "[KnowledgeGraphBuilder] Loading foreign key relationships,2,KnowledgeGraphBuilder,Graph,Loading");
 
-        return vertx.<JsonArray>executeBlocking(promise -> {
+        return vertx.executeBlocking(() -> {
             try {
-                JsonArray relationships = connectionManager.executeWithConnection(conn -> {
+                // Get all foreign keys in the schema
+
+                return connectionManager.executeWithConnection(conn -> {
                     JsonArray rels = new JsonArray();
 
                     try {
@@ -273,12 +280,10 @@ public class KnowledgeGraphBuilder {
                     return rels;
                 }).toCompletionStage().toCompletableFuture().get();
 
-                promise.complete(relationships);
-
             } catch (Exception e) {
-                promise.fail(e);
+                throw new RuntimeException(e);
             }
-        }, false);
+        });
     }
 
     /**
@@ -287,7 +292,7 @@ public class KnowledgeGraphBuilder {
     private Future<JsonObject> loadEnumTablesAndValues() {
         vertx.eventBus().publish("log", "[KnowledgeGraphBuilder] Loading enum tables and values,2,KnowledgeGraphBuilder,Graph,Loading");
 
-        return vertx.<JsonObject>executeBlocking(promise -> {
+        return vertx.executeBlocking(() -> {
             try {
                 JsonObject enumData = new JsonObject();
                 JsonObject enumTables = new JsonObject();
@@ -344,55 +349,55 @@ public class KnowledgeGraphBuilder {
 
                         if (idColumn != null && descColumn != null) {
                             // Validate SQL identifiers to prevent injection
-                            if (!isValidOracleIdentifier(tableName) ||
-                                !isValidOracleIdentifier(idColumn) ||
-                                !isValidOracleIdentifier(descColumn)) {
+                            if (isValidOracleIdentifier(tableName) &&
+                                isValidOracleIdentifier(idColumn) &&
+                                isValidOracleIdentifier(descColumn)) {
+
+                                // This is a valid enum table
+                                JsonObject enumTable = new JsonObject()
+                                    .put("isEnum", true)
+                                    .put("idColumn", idColumn)
+                                    .put("descColumn", descColumn)
+                                    .put("referencedBy", new JsonArray());
+
+                                enumTables.put(tableName, enumTable);
+
+                                // Load enum values (identifiers are now validated)
+                                String valuesQuery = String.format(
+                                    "SELECT %s, %s FROM %s ORDER BY %s",
+                                    idColumn, descColumn, tableName, idColumn
+                                );
+
+                                try {
+                                    JsonArray valueResults = connectionManager.executeQuery(valuesQuery)
+                                        .toCompletionStage().toCompletableFuture().get();
+
+                                    JsonObject tableValues = new JsonObject();
+                                    for (int k = 0; k < valueResults.size(); k++) {
+                                        JsonObject valueRow = valueResults.getJsonObject(k);
+                                        String code = valueRow.getString(idColumn);
+                                        String description = valueRow.getString(descColumn);
+                                        if (code != null && description != null) {
+                                            // Store with uppercase code for consistent retrieval
+                                            tableValues.put(code.toUpperCase(), description);
+                                        }
+                                    }
+
+                                    if (!tableValues.isEmpty()) {
+                                        enumValues.put(tableName, tableValues);
+                                        vertx.eventBus().publish("log",
+                                            "[KnowledgeGraphBuilder] Loaded " + tableValues.size() +
+                                            " enum values from " + tableName + ",3,KnowledgeGraphBuilder,Graph,Progress");
+                                    }
+                                } catch (Exception e) {
+                                    vertx.eventBus().publish("log",
+                                        "[KnowledgeGraphBuilder] Failed to load values from " + tableName + ": " +
+                                        e.getMessage() + ",2,KnowledgeGraphBuilder,Graph,Warning");
+                                }
+                            } else {
                                 vertx.eventBus().publish("log",
                                     "[KnowledgeGraphBuilder] Skipping table with invalid identifiers: " + tableName +
                                     ",1,KnowledgeGraphBuilder,Graph,Warning");
-                                continue;
-                            }
-
-                            // This is a valid enum table
-                            JsonObject enumTable = new JsonObject()
-                                .put("isEnum", true)
-                                .put("idColumn", idColumn)
-                                .put("descColumn", descColumn)
-                                .put("referencedBy", new JsonArray());
-
-                            enumTables.put(tableName, enumTable);
-
-                            // Load enum values (identifiers are now validated)
-                            String valuesQuery = String.format(
-                                "SELECT %s, %s FROM %s ORDER BY %s",
-                                idColumn, descColumn, tableName, idColumn
-                            );
-
-                            try {
-                                JsonArray valueResults = connectionManager.executeQuery(valuesQuery)
-                                    .toCompletionStage().toCompletableFuture().get();
-
-                                JsonObject tableValues = new JsonObject();
-                                for (int k = 0; k < valueResults.size(); k++) {
-                                    JsonObject valueRow = valueResults.getJsonObject(k);
-                                    String code = valueRow.getString(idColumn);
-                                    String description = valueRow.getString(descColumn);
-                                    if (code != null && description != null) {
-                                        // Store with uppercase code for consistent retrieval
-                                        tableValues.put(code.toUpperCase(), description);
-                                    }
-                                }
-
-                                if (tableValues.size() > 0) {
-                                    enumValues.put(tableName, tableValues);
-                                    vertx.eventBus().publish("log",
-                                        "[KnowledgeGraphBuilder] Loaded " + tableValues.size() +
-                                        " enum values from " + tableName + ",3,KnowledgeGraphBuilder,Graph,Progress");
-                                }
-                            } catch (Exception e) {
-                                vertx.eventBus().publish("log",
-                                    "[KnowledgeGraphBuilder] Failed to load values from " + tableName + ": " +
-                                    e.getMessage() + ",2,KnowledgeGraphBuilder,Graph,Warning");
                             }
                         }
                     }
@@ -404,17 +409,17 @@ public class KnowledgeGraphBuilder {
                 vertx.eventBus().publish("log",
                     "[KnowledgeGraphBuilder] Discovered " + enumTables.size() + " enum tables,2,KnowledgeGraphBuilder,Graph,Progress");
 
-                promise.complete(enumData);
+                return enumData;
 
             } catch (Exception e) {
                 vertx.eventBus().publish("log",
                     "[KnowledgeGraphBuilder] Failed to load enum data: " + e.getMessage() + ",1,KnowledgeGraphBuilder,Graph,Warning");
                 // Return empty but don't fail the whole graph build
-                promise.complete(new JsonObject()
+                return new JsonObject()
                     .put("enumTables", new JsonObject())
-                    .put("enumValues", new JsonObject()));
+                    .put("enumValues", new JsonObject());
             }
-        }, false);
+        });
     }
 
     /**
@@ -423,20 +428,20 @@ public class KnowledgeGraphBuilder {
     private Future<JsonArray> loadSynonyms() {
         vertx.eventBus().publish("log", "[KnowledgeGraphBuilder] Building synonym mappings,2,KnowledgeGraphBuilder,Graph,Loading");
 
-        return vertx.<JsonArray>executeBlocking(promise -> {
+        return vertx.executeBlocking(() -> {
             try {
                 JsonArray synonyms = new JsonArray();
 
                 // Build synonyms from common patterns
-                for (Map.Entry<String, List<String>> entry : COMMON_TERM_PATTERNS.entrySet()) {
-                    String category = entry.getKey();
-                    List<String> terms = entry.getValue();
+                for (String category : COMMON_TERM_PATTERNS.fieldNames()) {
+                    JsonArray terms = COMMON_TERM_PATTERNS.getJsonArray(category);
 
-                    for (String term : terms) {
+                    for (int i = 0; i < terms.size(); i++) {
+                        String term = terms.getString(i);
                         JsonObject synonym = new JsonObject()
                             .put("term", term)
                             .put("category", category)
-                            .put("patterns", new JsonArray(terms))
+                            .put("patterns", terms.copy())  // Use copy for safety
                             .put("confidence", 0.8);
 
                         synonyms.add(synonym);
@@ -446,18 +451,25 @@ public class KnowledgeGraphBuilder {
                 vertx.eventBus().publish("log",
                     "[KnowledgeGraphBuilder] Built " + synonyms.size() + " synonym mappings,2,KnowledgeGraphBuilder,Graph,Progress");
 
-                promise.complete(synonyms);
+                return synonyms;
 
             } catch (Exception e) {
-                promise.fail(e);
+                throw new RuntimeException(e);
             }
-        }, false);
+        });
     }
 
     /**
-     * Build indexes for fast lookup
+     * Build indexes for fast lookup - returns JsonObject containing all indexes
      */
-    private void buildIndexes(JsonArray tables, JsonArray relationships, JsonArray synonyms) {
+    private JsonObject buildIndexes(JsonArray tables, JsonArray relationships, JsonArray synonyms, JsonObject enumData) {
+        // Create index objects
+        JsonObject tableIndex = new JsonObject();
+        JsonObject columnToTablesIndex = new JsonObject();
+        JsonObject relationshipIndex = new JsonObject();
+        JsonObject synonymIndex = new JsonObject();
+        JsonObject enumTableIndex = new JsonObject();
+        JsonObject enumValuesIndex = new JsonObject();
         // Build table index
         for (int i = 0; i < tables.size(); i++) {
             JsonObject table = tables.getJsonObject(i);
@@ -473,8 +485,13 @@ public class KnowledgeGraphBuilder {
                         JsonObject column = columns.getJsonObject(j);
                         String columnName = column.getString("name");
                         if (columnName != null) {
-                            columnToTablesIndex.computeIfAbsent(columnName.toUpperCase(), k -> new ArrayList<>())
-                                .add(tableName.toUpperCase());
+                            String upperColumnName = columnName.toUpperCase();
+                            JsonArray tablesList = columnToTablesIndex.getJsonArray(upperColumnName);
+                            if (tablesList == null) {
+                                tablesList = new JsonArray();
+                                columnToTablesIndex.put(upperColumnName, tablesList);
+                            }
+                            tablesList.add(tableName.toUpperCase());
                         }
                     }
                 }
@@ -491,7 +508,13 @@ public class KnowledgeGraphBuilder {
 
             if (fromTable != null && toTable != null) {
                 // Store with uppercase for consistency
-                relationshipIndex.computeIfAbsent(fromTable.toUpperCase(), k -> new ArrayList<>()).add(rel);
+                String upperFromTable = fromTable.toUpperCase();
+                JsonArray fromRelList = relationshipIndex.getJsonArray(upperFromTable);
+                if (fromRelList == null) {
+                    fromRelList = new JsonArray();
+                    relationshipIndex.put(upperFromTable, fromRelList);
+                }
+                fromRelList.add(rel);
 
                 // Also index reverse relationship for bidirectional traversal
                 // NOTE: Swap both tables AND columns for correct reverse relationship
@@ -502,55 +525,58 @@ public class KnowledgeGraphBuilder {
                     .put("fromColumn", toColumn)  // Swap columns too
                     .put("toColumn", fromColumn);
 
-                relationshipIndex.computeIfAbsent(toTable.toUpperCase(), k -> new ArrayList<>()).add(reverseRel);
+                String upperToTable = toTable.toUpperCase();
+                JsonArray toRelList = relationshipIndex.getJsonArray(upperToTable);
+                if (toRelList == null) {
+                    toRelList = new JsonArray();
+                    relationshipIndex.put(upperToTable, toRelList);
+                }
+                toRelList.add(reverseRel);
             }
         }
 
         // Build synonym index
         for (int i = 0; i < synonyms.size(); i++) {
             JsonObject synonym = synonyms.getJsonObject(i);
-            String term = synonym.getString("term").toLowerCase();
-
-            synonymIndex.computeIfAbsent(term, k -> new ArrayList<>()).add(synonym);
-        }
-
-        // Build enum indexes from the graph if it's been built
-        if (knowledgeGraph != null) {
-            JsonObject enumTables = knowledgeGraph.getJsonObject("enumTables");
-            JsonObject enumValues = knowledgeGraph.getJsonObject("enumValues");
-
-            if (enumTables != null) {
-                for (String tableName : enumTables.fieldNames()) {
-                    enumTableIndex.put(tableName.toUpperCase(), enumTables.getJsonObject(tableName));
+            String term = synonym.getString("term");
+            if (term != null) {
+                term = term.toLowerCase();
+                JsonArray synList = synonymIndex.getJsonArray(term);
+                if (synList == null) {
+                    synList = new JsonArray();
+                    synonymIndex.put(term, synList);
                 }
-            }
-
-            if (enumValues != null) {
-                for (String tableName : enumValues.fieldNames()) {
-                    JsonObject tableValues = enumValues.getJsonObject(tableName);
-                    Map<String, String> valueMap = new HashMap<>();
-                    for (String code : tableValues.fieldNames()) {
-                        // Code is already uppercase from loading phase
-                        valueMap.put(code, tableValues.getString(code));
-                    }
-                    enumValuesIndex.put(tableName.toUpperCase(), valueMap);
-                }
+                synList.add(synonym);
             }
         }
-    }
 
-    /**
-     * Create column index for the graph
-     */
-    private JsonObject createColumnIndex() {
-        JsonObject index = new JsonObject();
+        // Build enum indexes from enumData
+        JsonObject enumTables = enumData.getJsonObject("enumTables");
+        JsonObject enumValues = enumData.getJsonObject("enumValues");
 
-        for (Map.Entry<String, List<String>> entry : columnToTablesIndex.entrySet()) {
-            index.put(entry.getKey(), new JsonArray(entry.getValue()));
+        if (enumTables != null) {
+            for (String tableName : enumTables.fieldNames()) {
+                enumTableIndex.put(tableName.toUpperCase(), enumTables.getJsonObject(tableName));
+            }
         }
 
-        return index;
+        if (enumValues != null) {
+            for (String tableName : enumValues.fieldNames()) {
+                JsonObject tableValues = enumValues.getJsonObject(tableName);
+                enumValuesIndex.put(tableName.toUpperCase(), tableValues);
+            }
+        }
+
+        // Return all indexes as a single JsonObject
+        return new JsonObject()
+            .put("tableIndex", tableIndex)
+            .put("columnIndex", columnToTablesIndex)
+            .put("relationshipIndex", relationshipIndex)
+            .put("synonymIndex", synonymIndex)
+            .put("enumTableIndex", enumTableIndex)
+            .put("enumValuesIndex", enumValuesIndex);
     }
+
 
     /**
      * Find join path between two tables using BFS
@@ -564,15 +590,15 @@ public class KnowledgeGraphBuilder {
         toTable = toTable.toUpperCase();
 
         // BFS to find shortest path
-        Queue<List<String>> queue = new LinkedList<>();
+        Queue<JsonArray> queue = new LinkedList<>();
         Set<String> visited = new HashSet<>();
 
-        queue.offer(Arrays.asList(fromTable));
+        queue.offer(new JsonArray().add(fromTable));
         visited.add(fromTable);
 
         while (!queue.isEmpty()) {
-            List<String> path = queue.poll();
-            String currentTable = path.get(path.size() - 1);
+            JsonArray path = queue.poll();
+            String currentTable = path.getString(path.size() - 1);
 
             if (currentTable.equals(toTable)) {
                 // Found path - convert to join information
@@ -580,14 +606,16 @@ public class KnowledgeGraphBuilder {
             }
 
             // Explore neighbors
-            List<JsonObject> relationships = relationshipIndex.get(currentTable);
+            JsonObject relationshipIndex = knowledgeGraph.getJsonObject("relationshipIndex");
+            JsonArray relationships = relationshipIndex != null ? relationshipIndex.getJsonArray(currentTable) : null;
             if (relationships != null) {
-                for (JsonObject rel : relationships) {
+                for (int i = 0; i < relationships.size(); i++) {
+                    JsonObject rel = relationships.getJsonObject(i);
                     String nextTable = rel.getString("toTable");
 
                     if (!visited.contains(nextTable)) {
                         visited.add(nextTable);
-                        List<String> newPath = new ArrayList<>(path);
+                        JsonArray newPath = path.copy();
                         newPath.add(nextTable);
                         queue.offer(newPath);
                     }
@@ -602,17 +630,19 @@ public class KnowledgeGraphBuilder {
     /**
      * Build join path details from table path
      */
-    private JsonArray buildJoinPath(List<String> tablePath) {
+    private JsonArray buildJoinPath(JsonArray tablePath) {
         JsonArray joinPath = new JsonArray();
 
         for (int i = 0; i < tablePath.size() - 1; i++) {
-            String fromTable = tablePath.get(i);
-            String toTable = tablePath.get(i + 1);
+            String fromTable = tablePath.getString(i);
+            String toTable = tablePath.getString(i + 1);
 
             // Find the relationship (use uppercase for lookup)
-            List<JsonObject> rels = relationshipIndex.get(fromTable.toUpperCase());
+            JsonObject relationshipIndex = knowledgeGraph.getJsonObject("relationshipIndex");
+            JsonArray rels = relationshipIndex != null ? relationshipIndex.getJsonArray(fromTable.toUpperCase()) : null;
             if (rels != null) {
-                for (JsonObject rel : rels) {
+                for (int j = 0; j < rels.size(); j++) {
+                    JsonObject rel = rels.getJsonObject(j);
                     String relToTable = rel.getString("toTable");
                     if (relToTable != null && relToTable.equalsIgnoreCase(toTable)) {
                         joinPath.add(new JsonObject()
@@ -643,41 +673,45 @@ public class KnowledgeGraphBuilder {
         String lowerTerm = term.toLowerCase();
 
         // Check direct synonym match
-        List<JsonObject> synonyms = synonymIndex.get(lowerTerm);
+        JsonObject synonymIndex = knowledgeGraph.getJsonObject("synonymIndex");
+        JsonArray synonyms = synonymIndex != null ? synonymIndex.getJsonArray(lowerTerm) : null;
         if (synonyms != null) {
-            for (JsonObject synonym : synonyms) {
+            for (int i = 0; i < synonyms.size(); i++) {
+                JsonObject synonym = synonyms.getJsonObject(i);
                 String category = synonym.getString("category");
 
                 // Find matching tables and columns
-                for (Map.Entry<String, JsonObject> entry : tableIndex.entrySet()) {
-                    String tableName = entry.getKey();
-                    JsonObject table = entry.getValue();
+                JsonObject tableIndex = knowledgeGraph.getJsonObject("tableIndex");
+                if (tableIndex != null) {
+                    for (String tableName : tableIndex.fieldNames()) {
+                        JsonObject table = tableIndex.getJsonObject(tableName);
 
-                    // Check if table name matches pattern
-                    if (matchesPattern(tableName, synonym.getJsonArray("patterns"))) {
-                        results.add(new JsonObject()
-                            .put("type", "table")
-                            .put("name", tableName)
-                            .put("confidence", synonym.getDouble("confidence"))
-                            .put("reason", "Table name matches " + category + " pattern")
-                        );
-                    }
+                        // Check if table name matches pattern
+                        if (matchesPattern(tableName, synonym.getJsonArray("patterns"))) {
+                            results.add(new JsonObject()
+                                .put("type", "table")
+                                .put("name", tableName)
+                                .put("confidence", synonym.getDouble("confidence"))
+                                .put("reason", "Table name matches " + category + " pattern")
+                            );
+                        }
 
-                    // Check columns
-                    JsonArray columns = table.getJsonArray("columns");
-                    if (columns != null) {
-                        for (int i = 0; i < columns.size(); i++) {
-                            JsonObject column = columns.getJsonObject(i);
-                            String columnName = column.getString("name");
+                        // Check columns
+                        JsonArray columns = table.getJsonArray("columns");
+                        if (columns != null) {
+                            for (int j = 0; j < columns.size(); j++) {
+                                JsonObject column = columns.getJsonObject(j);
+                                String columnName = column.getString("name");
 
-                            if (columnName != null && matchesPattern(columnName, synonym.getJsonArray("patterns"))) {
-                                results.add(new JsonObject()
-                                    .put("type", "column")
-                                    .put("table", tableName)
-                                    .put("column", columnName)
-                                    .put("confidence", synonym.getDouble("confidence") * 0.9)
-                                    .put("reason", "Column name matches " + category + " pattern")
-                                );
+                                if (columnName != null && matchesPattern(columnName, synonym.getJsonArray("patterns"))) {
+                                    results.add(new JsonObject()
+                                        .put("type", "column")
+                                        .put("table", tableName)
+                                        .put("column", columnName)
+                                        .put("confidence", synonym.getDouble("confidence") * 0.9)
+                                        .put("reason", "Column name matches " + category + " pattern")
+                                    );
+                                }
                             }
                         }
                     }
@@ -699,7 +733,8 @@ public class KnowledgeGraphBuilder {
         JsonArray results = new JsonArray();
         String upperColumn = columnName.toUpperCase();
 
-        List<String> tables = columnToTablesIndex.get(upperColumn);
+        JsonObject columnIndex = knowledgeGraph.getJsonObject("columnIndex");
+        JsonArray tables = columnIndex != null ? columnIndex.getJsonArray(upperColumn) : null;
         if (tables == null || tables.isEmpty()) {
             return results;
         }
@@ -708,7 +743,8 @@ public class KnowledgeGraphBuilder {
         JsonArray contextTables = context.getJsonArray("tables");
         String queryIntent = context.getString("intent", "");
 
-        for (String tableName : tables) {
+        for (int i = 0; i < tables.size(); i++) {
+            String tableName = tables.getString(i);
             double confidence = 0.5; // Base confidence
             String reason = "Column exists in table";
 
@@ -737,19 +773,26 @@ public class KnowledgeGraphBuilder {
             );
         }
 
-        // Sort by confidence
-        List<Object> sorted = results.stream()
-            .sorted((a, b) -> {
-                JsonObject ja = (JsonObject) a;
-                JsonObject jb = (JsonObject) b;
-                return Double.compare(
-                    jb.getDouble("confidence"),
-                    ja.getDouble("confidence")
-                );
-            })
-            .collect(Collectors.toList());
+        // Sort by confidence using JsonArray
+        // Create a list for sorting to avoid modifying during iteration
+        List<JsonObject> toSort = new ArrayList<>();
+        for (int i = 0; i < results.size(); i++) {
+            toSort.add(results.getJsonObject(i));
+        }
 
-        return new JsonArray(sorted);
+        // Sort with comparator
+        toSort.sort((a, b) -> Double.compare(
+            b.getDouble("confidence"),
+            a.getDouble("confidence")
+        ));
+
+        // Create new sorted JsonArray
+        JsonArray sorted = new JsonArray();
+        for (JsonObject obj : toSort) {
+            sorted.add(obj);
+        }
+
+        return sorted;
     }
 
     /**
@@ -896,7 +939,8 @@ public class KnowledgeGraphBuilder {
         }
 
         String upperTable = table.toUpperCase();
-        Map<String, String> tableValues = enumValuesIndex.get(upperTable);
+        JsonObject enumValuesIndex = knowledgeGraph.getJsonObject("enumValuesIndex");
+        JsonObject tableValues = enumValuesIndex != null ? enumValuesIndex.getJsonObject(upperTable) : null;
 
         if (tableValues == null || tableValues.isEmpty()) {
             return new JsonObject()
@@ -915,7 +959,7 @@ public class KnowledgeGraphBuilder {
 
             if ("code_to_description".equals(direction)) {
                 // Translate code to description
-                String description = tableValues.get(upperValue);
+                String description = tableValues.getString(upperValue);
                 if (description != null) {
                     translation.put("translated", description);
                     translation.put("found", true);
@@ -926,9 +970,9 @@ public class KnowledgeGraphBuilder {
             } else if ("description_to_code".equals(direction)) {
                 // Translate description to code
                 String code = null;
-                for (Map.Entry<String, String> entry : tableValues.entrySet()) {
-                    if (entry.getValue().equalsIgnoreCase(value)) {
-                        code = entry.getKey();
+                for (String key : tableValues.fieldNames()) {
+                    if (tableValues.getString(key).equalsIgnoreCase(value)) {
+                        code = key;
                         break;
                     }
                 }
@@ -943,15 +987,15 @@ public class KnowledgeGraphBuilder {
                 // Auto-detect direction
                 if (tableValues.containsKey(upperValue)) {
                     // It's a code
-                    translation.put("translated", tableValues.get(upperValue));
+                    translation.put("translated", tableValues.getString(upperValue));
                     translation.put("found", true);
                     translation.put("detectedDirection", "code_to_description");
                 } else {
                     // Try as description
                     String code = null;
-                    for (Map.Entry<String, String> entry : tableValues.entrySet()) {
-                        if (entry.getValue().equalsIgnoreCase(value)) {
-                            code = entry.getKey();
+                    for (String key : tableValues.fieldNames()) {
+                        if (tableValues.getString(key).equalsIgnoreCase(value)) {
+                            code = key;
                             break;
                         }
                     }
@@ -989,7 +1033,8 @@ public class KnowledgeGraphBuilder {
         if (table != null) {
             // Get specific enum table metadata
             String upperTable = table.toUpperCase();
-            JsonObject enumTable = enumTableIndex.get(upperTable);
+            JsonObject enumTableIndex = knowledgeGraph.getJsonObject("enumTableIndex");
+            JsonObject enumTable = enumTableIndex != null ? enumTableIndex.getJsonObject(upperTable) : null;
             if (enumTable != null) {
                 result.put("table", table);
                 result.put("isEnum", true);
@@ -997,15 +1042,16 @@ public class KnowledgeGraphBuilder {
                 result.put("descColumn", enumTable.getString("descColumn"));
 
                 // Include sample values
-                Map<String, String> values = enumValuesIndex.get(upperTable);
+                JsonObject enumValuesIndex = knowledgeGraph.getJsonObject("enumValuesIndex");
+                JsonObject values = enumValuesIndex != null ? enumValuesIndex.getJsonObject(upperTable) : null;
                 if (values != null && !values.isEmpty()) {
                     JsonArray sampleValues = new JsonArray();
                     int count = 0;
-                    for (Map.Entry<String, String> entry : values.entrySet()) {
+                    for (String code : values.fieldNames()) {
                         if (count++ >= 5) break; // Only show first 5 as samples
                         sampleValues.add(new JsonObject()
-                            .put("code", entry.getKey())
-                            .put("description", entry.getValue()));
+                            .put("code", code)
+                            .put("description", values.getString(code)));
                     }
                     result.put("sampleValues", sampleValues);
                     result.put("totalValues", values.size());
@@ -1017,16 +1063,21 @@ public class KnowledgeGraphBuilder {
         } else {
             // Return all enum tables
             JsonArray enumTableList = new JsonArray();
-            for (Map.Entry<String, JsonObject> entry : enumTableIndex.entrySet()) {
-                JsonObject tableInfo = new JsonObject()
-                    .put("tableName", entry.getKey())
-                    .put("metadata", entry.getValue());
+            JsonObject enumTableIndex = knowledgeGraph.getJsonObject("enumTableIndex");
+            JsonObject enumValuesIndex = knowledgeGraph.getJsonObject("enumValuesIndex");
+            if (enumTableIndex != null) {
+                for (String enumTableName : enumTableIndex.fieldNames()) {
+                    JsonObject enumTableMeta = enumTableIndex.getJsonObject(enumTableName);
+                    JsonObject tableInfo = new JsonObject()
+                        .put("tableName", enumTableName)
+                        .put("metadata", enumTableMeta);
 
-                Map<String, String> values = enumValuesIndex.get(entry.getKey());
-                if (values != null) {
-                    tableInfo.put("valueCount", values.size());
+                    JsonObject values = enumValuesIndex != null ? enumValuesIndex.getJsonObject(enumTableName) : null;
+                    if (values != null) {
+                        tableInfo.put("valueCount", values.size());
+                    }
+                    enumTableList.add(tableInfo);
                 }
-                enumTableList.add(tableInfo);
             }
             result.put("enumTables", enumTableList);
         }

@@ -153,6 +153,7 @@ public class ConversationStreaming extends AbstractVerticle {
         eventBus.consumer("system.fully.ready", msg -> {
             systemReady = true;
             if (logLevel >= 1) vertx.eventBus().publish("log", "System fully ready - accepting requests,1,ConversationStreaming,System,Ready");
+            System.out.println("System fully ready - accepting requests");
         });
         
         // Listen for critical error events
@@ -237,6 +238,7 @@ public class ConversationStreaming extends AbstractVerticle {
         if (!systemReady) {
             sendEarlyError(context, 503, "System is starting up. Please try again in a few seconds.");
             if (logLevel >= 3) vertx.eventBus().publish("log", "Request rejected - system not ready,3,ConversationStreaming,Request,Validation");
+            System.out.println("Request rejected - system not ready");
             return;
         }
         
@@ -291,7 +293,7 @@ public class ConversationStreaming extends AbstractVerticle {
             logMessage += " [Custom: backstory=" + (backstory != null ? "yes" : "no") + ", guidance=" + (guidance != null ? "yes" : "no") + "]";
         }
         vertx.eventBus().publish("log", logMessage + ",2,ConversationStreaming,API,System");
-        
+        System.out.println(logMessage);
         // Track request
         String requestId = UUID.randomUUID().toString();
         requestMetrics.put(requestId, System.currentTimeMillis());
@@ -347,6 +349,7 @@ public class ConversationStreaming extends AbstractVerticle {
         activeSessions.put(sessionId, enhancedSession);
         
         // Send initial connection event
+        if (logLevel >= 2) vertx.eventBus().publish("log", "SSE connection established for session: " + sessionId + ", host: " + finalHost + ",2,ConversationStreaming,Connection,Established");
         enhancedSession.sendSSEEvent("connected", new JsonObject()
             .put("sessionId", sessionId)
             .put("conversationId", conversationId)
@@ -705,6 +708,9 @@ public class ConversationStreaming extends AbstractVerticle {
         // Progress events from hosts
         MessageConsumer<JsonObject> progressConsumer = eventBus.consumer("streaming." + conversationId + ".progress", msg -> {
             JsonObject progress = msg.body();
+            String message = progress.getString("message", "");
+            if (logLevel >= 3) vertx.eventBus().publish("log", "Streaming progress event for session: " + sessionId + ", message: " + message + ",3,ConversationStreaming,Streaming,Progress");
+            // Removed console print for progress events
             session.sendSSEEvent("progress", progress
                 .put("sessionId", sessionId)
                 .put("timestamp", System.currentTimeMillis()));
@@ -714,6 +720,9 @@ public class ConversationStreaming extends AbstractVerticle {
         // Tool start events
         MessageConsumer<JsonObject> toolStartConsumer = eventBus.consumer("streaming." + conversationId + ".tool.start", msg -> {
             JsonObject toolInfo = msg.body();
+            String toolName = toolInfo.getString("tool", toolInfo.getString("toolName", "unknown")); // Check both fields
+            if (logLevel >= 3) vertx.eventBus().publish("log", "Streaming tool_start event for session: " + sessionId + ", tool: " + toolName + ",3,ConversationStreaming,Streaming,ToolStart");
+            // Removed console print for tool events
             session.sendSSEEvent("tool_start", toolInfo
                 .put("sessionId", sessionId)
                 .put("timestamp", System.currentTimeMillis()));
@@ -723,6 +732,9 @@ public class ConversationStreaming extends AbstractVerticle {
         // Tool complete events
         MessageConsumer<JsonObject> toolCompleteConsumer = eventBus.consumer("streaming." + conversationId + ".tool.complete", msg -> {
             JsonObject toolResult = msg.body();
+            String toolName = toolResult.getString("tool", toolResult.getString("toolName", "unknown")); // Check both fields
+            if (logLevel >= 3) vertx.eventBus().publish("log", "Streaming tool_complete event for session: " + sessionId + ", tool: " + toolName + ",3,ConversationStreaming,Streaming,ToolComplete");
+            // Removed console print for tool events
             session.sendSSEEvent("tool_complete", toolResult
                 .put("sessionId", sessionId)
                 .put("timestamp", System.currentTimeMillis()));
@@ -732,10 +744,12 @@ public class ConversationStreaming extends AbstractVerticle {
         // Final response events
         MessageConsumer<JsonObject> finalConsumer = eventBus.consumer("streaming." + conversationId + ".final", msg -> {
             JsonObject finalResponse = msg.body();
+            if (logLevel >= 2) vertx.eventBus().publish("log", "Streaming final response for session: " + sessionId + ",2,ConversationStreaming,Streaming,Final");
+            // Removed console print for session completion
             session.sendSSEEvent("final", finalResponse
                 .put("sessionId", sessionId)
                 .put("timestamp", System.currentTimeMillis()));
-            
+
             // Mark session as completed
             session.completed = true;
             
@@ -872,6 +886,8 @@ public class ConversationStreaming extends AbstractVerticle {
             EnhancedStreamingSession enhancedSession = (EnhancedStreamingSession) session;
             enhancedSession.cleanup();
             if (logLevel >= 3) vertx.eventBus().publish("log", "Cleaned up session: " + sessionId + ",3,ConversationStreaming,Session,Cleanup");
+            // Print session cleanup to console
+            System.out.println("Session closed: " + sessionId);
         }
         
         // Clean up interrupt manager state

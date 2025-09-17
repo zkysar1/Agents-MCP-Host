@@ -4,6 +4,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.Future;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
+import static agents.director.Driver.logLevel;
 
 import java.sql.*;
 
@@ -75,8 +76,8 @@ public class OracleConnectionManager {
      * Validate loaded configuration
      */
     private void validateConfiguration() {
-        // Log loaded configuration (without password)
-        System.out.println("[OracleConnectionManager] Configuration loaded:");
+        // Log loaded configuration (without password) - Keep prints for critical startup info
+        System.out.println("OracleConnectionManager Configuration loaded:");
         System.out.println("  Environment: " + ENVIRONMENT);
         System.out.println("  Host: " + DB_HOST);
         System.out.println("  Port: " + DB_PORT);
@@ -84,6 +85,13 @@ public class OracleConnectionManager {
         System.out.println("  User: " + DB_USER);
         System.out.println("  Schema: " + DEFAULT_SCHEMA);
         System.out.println("  Password: [REDACTED]");
+
+        // Also log to eventBus
+        if (logLevel >= 1 && vertx != null) {
+            vertx.eventBus().publish("log", "OracleConnectionManager Configuration loaded - Environment: " + ENVIRONMENT +
+                ", Host: " + DB_HOST + ", Port: " + DB_PORT + ", Service: " + DB_SERVICE +
+                ", User: " + DB_USER + ", Schema: " + DEFAULT_SCHEMA + ",1,OracleConnectionManager,Database,Configuration");
+        }
 
         // Validate ENVIRONMENT value
         if (!"WORK".equals(ENVIRONMENT) && !"PERSONAL".equals(ENVIRONMENT)) {

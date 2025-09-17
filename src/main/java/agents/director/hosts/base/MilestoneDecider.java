@@ -4,6 +4,7 @@ import agents.director.services.LlmAPIService;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import java.util.Arrays;
+import static agents.director.Driver.logLevel;
 
 /**
  * Simple milestone decision maker that replaces the complex IntentEngine.
@@ -135,9 +136,16 @@ public class MilestoneDecider {
     }
     
     private final LlmAPIService llmService;
-    
+    private final Vertx vertx;
+
     public MilestoneDecider() {
         this.llmService = LlmAPIService.getInstance();
+        this.vertx = null;  // For backwards compatibility
+    }
+
+    public MilestoneDecider(Vertx vertx) {
+        this.llmService = LlmAPIService.getInstance();
+        this.vertx = vertx;
     }
     
     /**
@@ -190,8 +198,9 @@ public class MilestoneDecider {
             .whenComplete((result, error) -> {
                 Runnable handler = () -> {
                     if (error != null) {
-                        // Log the failure explicitly
+                        // Keep System.err for visibility + add log
                         System.err.println("WARNING: LLM milestone decision failed, using rule-based fallback: " + error.getMessage());
+                        if (vertx != null && logLevel >= 0) vertx.eventBus().publish("log", "LLM milestone decision failed, using rule-based fallback: " + error.getMessage() + ",0,MilestoneDecider,LLM,Error");
                         // Fallback to rules on error, but mark as degraded
                         int milestone = determineByRules(query, backstory, guidance);
                         // Return with degradation flag
@@ -213,8 +222,9 @@ public class MilestoneDecider {
                         
                         promise.complete(milestone);
                     } catch (Exception e) {
-                        // Log the parse error explicitly
+                        // Keep System.err for visibility + add log
                         System.err.println("WARNING: Failed to parse LLM milestone response, using rule-based fallback: " + e.getMessage());
+                        if (vertx != null && logLevel >= 0) vertx.eventBus().publish("log", "Failed to parse LLM milestone response, using rule-based fallback: " + e.getMessage() + ",0,MilestoneDecider,LLM,ParseError");
                         // Fallback to rules on parse error
                         int milestone = determineByRules(query, backstory, guidance);
                         // Return with degradation flag

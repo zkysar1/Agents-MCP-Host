@@ -4,6 +4,7 @@ import agents.director.hosts.base.MilestoneContext;
 import agents.director.hosts.base.MilestoneDecider;
 import agents.director.hosts.base.MilestoneManager;
 import agents.director.hosts.milestones.*;
+import agents.director.hosts.base.MilestoneDecider;
 import agents.director.services.InterruptManager;
 import io.vertx.core.*;
 import io.vertx.core.eventbus.Message;
@@ -36,7 +37,7 @@ public class UniversalHost extends AbstractVerticle {
     @Override
     public void start(Promise<Void> startPromise) {
         eventBus = vertx.eventBus();
-        milestoneDecider = new MilestoneDecider();
+        milestoneDecider = new MilestoneDecider(vertx);
         interruptManager = new InterruptManager(vertx);
         
         // Initialize all 6 milestones at startup
@@ -139,14 +140,16 @@ public class UniversalHost extends AbstractVerticle {
                     
                     // Also publish as progress event so frontend sees it
                     String description = MilestoneDecider.getMilestoneDescription(targetMilestone);
-                    String strategyMessage = String.format("Will execute %d step%s to %s", 
-                        targetMilestone, targetMilestone == 1 ? "" : "s", 
+                    String strategyMessage = String.format("Will execute %d step%s to %s",
+                        targetMilestone, targetMilestone == 1 ? "" : "s",
                         description.toLowerCase());
-                    
+
                     if (degraded) {
                         strategyMessage += " (using fallback strategy)";
                     }
-                    
+
+                    // Removed strategy console print - milestones will be shown as they execute
+
                     publishStreamingEvent(conversationId, "progress", new JsonObject()
                         .put("step", "Processing Strategy")
                         .put("message", strategyMessage)
@@ -222,6 +225,9 @@ public class UniversalHost extends AbstractVerticle {
         }
         
         log("Executing milestone " + currentMilestone + ": " + milestone.getMilestoneName(), 3);
+
+        // Print milestone execution to console (simplified)
+        System.out.println("➤ Step " + currentMilestone + ": " + milestone.getClass().getSimpleName());
         
         // Don't publish generic milestone start - let each milestone publish its own descriptive message
         

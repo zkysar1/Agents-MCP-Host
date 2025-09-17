@@ -104,6 +104,7 @@ public abstract class MilestoneManager {
         data.put("milestone", milestoneNumber)
             .put("milestone_name", milestoneName)
             .put("timestamp", System.currentTimeMillis());
+        // Removed console prints - keeping only logs
         vertx.eventBus().publish(address, data);
     }
     
@@ -111,6 +112,7 @@ public abstract class MilestoneManager {
      * Publish a progress event with standard structure
      */
     protected void publishProgressEvent(String conversationId, String step, String message, JsonObject details) {
+        // Removed console prints - keeping only event publishing
         JsonObject progressData = new JsonObject()
             .put("step", step)
             .put("message", message)
@@ -124,6 +126,7 @@ public abstract class MilestoneManager {
     protected void publishToolStartEvent(String conversationId, String toolName, String description) {
         JsonObject toolData = new JsonObject()
             .put("tool", toolName)
+            .put("toolName", toolName)  // Add for compatibility with frontend
             .put("description", description != null ? description : "Calling " + toolName);
         publishStreamingEvent(conversationId, "tool.start", toolData);
     }
@@ -134,6 +137,7 @@ public abstract class MilestoneManager {
     protected void publishToolCompleteEvent(String conversationId, String toolName, boolean success) {
         JsonObject toolData = new JsonObject()
             .put("tool", toolName)
+            .put("toolName", toolName)  // Add for compatibility with frontend
             .put("success", success);
         publishStreamingEvent(conversationId, "tool.complete", toolData);
     }

@@ -17,6 +17,7 @@ import java.util.Set;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import static agents.director.Driver.logLevel;
 
 /**
  * Master router service for the MCP architecture.
@@ -182,7 +183,10 @@ public class MCPRouterService extends AbstractVerticle {
         } else {
             // Otherwise, store for later mounting
             pendingRouters.put(path, subRouter);
-            System.out.println("[MCPRouterService] Router registered for path: " + path + " (pending mount)");
+            // Convert to log level 2 (detail) - remove print
+            if (instance != null && instance.vertx != null && logLevel >= 2) {
+                instance.vertx.eventBus().publish("log", "Router registered for path: " + path + " (pending mount),2,MCPRouterService,HTTP,Router");
+            }
         }
     }
     

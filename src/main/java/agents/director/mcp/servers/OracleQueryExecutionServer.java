@@ -19,6 +19,7 @@ import java.util.concurrent.CompletableFuture;
 
 import agents.director.services.LlmAPIService;
 import agents.director.services.OracleConnectionManager;
+import static agents.director.Driver.logLevel;
 
 /**
  * MCP Server for Oracle database query execution.
@@ -37,18 +38,20 @@ public class OracleQueryExecutionServer extends MCPServerBase {
     
     @Override
     public void start(Promise<Void> startPromise) {
-        System.out.println("[OracleQueryExecutionServer] Getting OracleConnectionManager instance...");
-        
+        // Remove debug print, add as log level 3
+        if (logLevel >= 3) vertx.eventBus().publish("log", "Getting OracleConnectionManager instance,3,OracleQueryExecutionServer,MCP,Initialization");
+
         // Get connection manager instance (already initialized in Driver)
         connectionManager = OracleConnectionManager.getInstance();
-        
+
         // Check if connection manager is healthy
         if (!connectionManager.isConnectionHealthy()) {
+            // Keep print for critical error + existing log
             System.out.println("[OracleQueryExecutionServer] Connection manager not healthy");
-            vertx.eventBus().publish("log", "Oracle Connection Manager not healthy - server will operate with limited functionality,1,OracleQueryExecutionServer,MCP,System");
+            vertx.eventBus().publish("log", "Oracle Connection Manager not healthy - server will operate with limited functionality,0,OracleQueryExecutionServer,MCP,Error");
         } else {
-            System.out.println("[OracleQueryExecutionServer] Connection manager is healthy");
-            vertx.eventBus().publish("log", "OracleQueryExecutionServer using connection pool,2,OracleQueryExecutionServer,MCP,System");
+            // Remove debug print, convert to log level 3
+            if (logLevel >= 3) vertx.eventBus().publish("log", "OracleQueryExecutionServer connection manager is healthy,3,OracleQueryExecutionServer,MCP,System");
         }
         
         // Continue with parent initialization regardless
