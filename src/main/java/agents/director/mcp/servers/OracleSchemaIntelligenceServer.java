@@ -1505,13 +1505,12 @@ public class OracleSchemaIntelligenceServer extends MCPServerBase {
     private List<SchemaMatch> performGraphBasedMatching(List<String> searchTerms) {
         List<SchemaMatch> matches = new ArrayList<>();
         JsonObject graph = graphBuilder.getKnowledgeGraph();
-        JsonArray tables = graph.getJsonArray("tables");
+        JsonObject tables = graph.getJsonObject("tables");
 
         vertx.eventBus().publish("log", "Performing graph-based matching on " + tables.size() + " tables,3,OracleSchemaIntelligenceServer,MCP,System");
 
-        for (int i = 0; i < tables.size(); i++) {
-            JsonObject table = tables.getJsonObject(i);
-            String tableName = table.getString("tableName");
+        for (String tableName : tables.fieldNames()) {
+            JsonObject table = tables.getJsonObject(tableName);
             JsonArray columns = table.getJsonArray("columns");
 
             double tableScore = 0;

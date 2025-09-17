@@ -60,6 +60,9 @@ public class Logger extends AbstractVerticle {
       currentBlockStart = System.currentTimeMillis();
       setupConsumers();
       scheduleFlush();
+
+      // Signal to Driver that logger is ready
+      vertx.eventBus().publish("logger.ready", "true");
     });
   }
 
@@ -72,11 +75,13 @@ public class Logger extends AbstractVerticle {
           if (x.succeeded()) {
             ready.run();
           } else {
-            System.err.println("Failed to write initial log file: " + x.cause().getMessage());
+            // Cannot log to file system if initialization fails - fail silently
+            // The application will continue but without logging capability
           }
         });
       } else {
-        System.err.println("Failed to create logs directory: " + r.cause().getMessage());
+        // Cannot log to file system if directory creation fails - fail silently
+        // The application will continue but without logging capability
       }
     });
   }
@@ -136,20 +141,29 @@ public class Logger extends AbstractVerticle {
   private void rotate(long now, io.vertx.core.Handler<AsyncResult<Void>> after) {
     String rotatedPath = logsDir + "/" + FILE_STAMP.format(Instant.ofEpochMilli(currentBlockStart)) + ".csv";
 
-    flushBuffer(flush -> vertx.fileSystem().move(currentFile, rotatedPath, mv -> {
-      if (mv.succeeded()) {
-        // Permissions are handled automatically by FileSystemHelper during move
-        
-        currentBlockStart = now;
-        vertx.fileSystem().writeFile(currentFile, Buffer.buffer(HEADER), hdr -> {
-            hdr.succeeded();// Permissions are handled automatically by FileSystemHelper
-            cleanupOld();
-          if (after != null) after.handle(mv.mapEmpty());
+    // First flush all pending logs to ensure nothing is lost
+    flushBuffer(flush -> {
+      if (flush.succeeded()) {
+        // Then move the file after flush is complete
+        vertx.fileSystem().move(currentFile, rotatedPath, mv -> {
+          if (mv.succeeded()) {
+            currentBlockStart = now;
+            // Create new file with header only after move is complete
+            vertx.fileSystem().writeFile(currentFile, Buffer.buffer(HEADER), hdr -> {
+              if (hdr.succeeded()) {
+                cleanupOld();
+              }
+              if (after != null) after.handle(hdr.mapEmpty());
+            });
+          } else {
+            if (after != null) after.handle(mv.mapEmpty());
+          }
         });
       } else {
-        if (after != null) after.handle(mv.mapEmpty());
+        // If flush failed, still notify the caller
+        if (after != null) after.handle(flush);
       }
-    }));
+    });
   }
 
   private void cleanupOld() {
