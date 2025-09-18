@@ -1132,15 +1132,19 @@ column.replace("_ID", "_CODE"),  // Map _ID to _CODE for enum lookup
             String tableUpper = table.toUpperCase();
             
             // Try to find enum table dynamically
+            // Get DEFAULT_SCHEMA from environment
+            String currentSchema = System.getProperty("DEFAULT_SCHEMA");
+            if (currentSchema == null) currentSchema = System.getenv("DEFAULT_SCHEMA");
+
             String checkQuery = String.format(
-                "SELECT table_name FROM user_tables WHERE " +
+                "SELECT table_name FROM all_tables WHERE owner = '%s' AND " +
                 "(table_name LIKE '%%%s_ENUM' OR " +
                 " table_name LIKE '%%%s_LOOKUP' OR " +
                 " table_name LIKE '%%%s_REF') " +
                 "AND ROWNUM = 1",
-                baseName, baseName, baseName
+                currentSchema.toUpperCase(), baseName, baseName, baseName
             );
-            
+
             try {
                 JsonArray results = connectionManager.executeQuery(checkQuery)
                     .toCompletionStage()

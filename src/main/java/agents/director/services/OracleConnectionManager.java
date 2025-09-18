@@ -393,27 +393,36 @@ public class OracleConnectionManager {
             try (Connection conn = getConnection()) {
                 JsonArray tables = new JsonArray();
 
-                // Use user_tables which automatically shows tables from the current schema
+                // Use all_tables with owner filter to show tables from the DEFAULT_SCHEMA
+                // This ensures we get tables regardless of whether DB_USER owns them
                 String sql = "SELECT table_name, num_rows " +
-                           "FROM user_tables " +
-                           "WHERE table_name NOT LIKE 'SYS_%' " +
+                           "FROM all_tables " +
+                           "WHERE owner = ? " +
+                           "AND table_name NOT LIKE 'SYS_%' " +
                            "AND table_name NOT LIKE 'APEX_%' " +
                            "ORDER BY table_name";
 
-                try (Statement stmt = conn.createStatement();
-                     ResultSet rs = stmt.executeQuery(sql)) {
+                try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                    stmt.setString(1, DEFAULT_SCHEMA.toUpperCase());
 
-                    while (rs.next()) {
-                        String tableName = rs.getString("TABLE_NAME");
-                        long rowCount = rs.getLong("NUM_ROWS");
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            String tableName = rs.getString("TABLE_NAME");
+                            long rowCount = rs.getLong("NUM_ROWS");
 
-                        tables.add(new JsonObject()
-                            .put("name", tableName)
-                            .put("row_count", rowCount > 0 ? rowCount : 100));
+                            tables.add(new JsonObject()
+                                .put("name", tableName)
+                                .put("row_count", rowCount > 0 ? rowCount : 100));
+                        }
                     }
                 }
 
-                // No fallback - return what we found (empty if no tables)
+                // Log if no tables found for debugging
+                if (tables.isEmpty() && vertx != null) {
+                    vertx.eventBus().publish("log",
+                        "[OracleConnectionManager] No tables found in schema: " + DEFAULT_SCHEMA +
+                        " (DB_USER=" + DB_USER + "),1,OracleConnectionManager,Database,Warning");
+                }
 
                 return tables;
 

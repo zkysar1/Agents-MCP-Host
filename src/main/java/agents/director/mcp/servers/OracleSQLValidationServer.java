@@ -773,10 +773,13 @@ public class OracleSQLValidationServer extends MCPServerBase {
                         ps.close();
                         
                         if (!hasPrivilege) {
-                            // Check if it's user's own table
-                            String ownerQuery = "SELECT 1 FROM user_tables WHERE table_name = UPPER(?)";
+                            // Check if table exists in the current schema
+                            String currentSchema = System.getProperty("DEFAULT_SCHEMA");
+                            if (currentSchema == null) currentSchema = System.getenv("DEFAULT_SCHEMA");
+                            String ownerQuery = "SELECT 1 FROM all_tables WHERE owner = UPPER(?) AND table_name = UPPER(?)";
                             ps = conn.prepareStatement(ownerQuery);
-                            ps.setString(1, table);
+                            ps.setString(1, currentSchema);
+                            ps.setString(2, table);
                             rs = ps.executeQuery();
                             hasPrivilege = rs.next();
                             rs.close();
@@ -1015,9 +1018,12 @@ public class OracleSQLValidationServer extends MCPServerBase {
             // Use connection manager to find similar tables
             return connectionManager.executeWithConnection(conn -> {
                 try {
-                    String query = "SELECT table_name FROM user_tables";
-                    Statement stmt = conn.createStatement();
-                    ResultSet rs = stmt.executeQuery(query);
+                    String currentSchema = System.getProperty("DEFAULT_SCHEMA");
+                    if (currentSchema == null) currentSchema = System.getenv("DEFAULT_SCHEMA");
+                    String query = "SELECT table_name FROM all_tables WHERE owner = UPPER(?)";
+                    PreparedStatement stmt = conn.prepareStatement(query);
+                    stmt.setString(1, currentSchema);
+                    ResultSet rs = stmt.executeQuery();
                     
                     String bestMatch = null;
                     double bestScore = 0.0;

@@ -269,20 +269,23 @@ public class KnowledgeGraphBuilder {
                 JsonObject enumValues = new JsonObject();
 
                 // Discover enum tables
+                // Use all_tables with owner filter to ensure we find enum tables regardless of DB_USER
+                String currentSchema = getDefaultSchema().toUpperCase();
                 String enumTableQuery = """
                     SELECT table_name
-                    FROM user_tables
-                    WHERE table_name LIKE '%ENUM%'
+                    FROM all_tables
+                    WHERE owner = ?
+                      AND (table_name LIKE '%ENUM%'
                        OR table_name LIKE '%LOOKUP%'
                        OR table_name LIKE '%REFERENCE%'
                        OR table_name LIKE '%_REF'
                        OR table_name LIKE '%_TYPE%'
                        OR table_name LIKE '%_STATUS%'
-                       OR table_name LIKE '%_CODE%'
+                       OR table_name LIKE '%_CODE%')
                     ORDER BY table_name
                 """;
 
-                JsonArray enumTableResults = connectionManager.executeQuery(enumTableQuery)
+                JsonArray enumTableResults = connectionManager.executeQuery(enumTableQuery, currentSchema)
                     .toCompletionStage().toCompletableFuture().get();
 
                 // Process each enum table
