@@ -115,7 +115,7 @@ public class KnowledgeGraphBuilder {
                     .compose(relationships ->
                         loadEnumTablesAndValues(relationships)
                             .compose(enumData ->
-                                generateSynonymsFromSchema(tablesObj)
+                                generateSynonymsFromSchema(tablesObj, relationships, enumData)
                                     .map(synonyms -> {
                                         // Assemble the final simplified graph
                                         return new JsonObject()
@@ -407,7 +407,7 @@ public class KnowledgeGraphBuilder {
     /**
      * Generate synonyms dynamically from actual schema using LLM
      */
-    private Future<JsonObject> generateSynonymsFromSchema(JsonObject tables) {
+    private Future<JsonObject> generateSynonymsFromSchema(JsonObject tables, JsonArray relationships, JsonObject enumData) {
         vertx.eventBus().publish("log", "[KnowledgeGraphBuilder] Generating dynamic synonyms from schema,2,KnowledgeGraphBuilder,Graph,Loading");
 
         // Initialize LLM service if not already done
@@ -426,43 +426,69 @@ public class KnowledgeGraphBuilder {
         return vertx.executeBlocking(() -> {
             try {
                 // Extract unique terms from table and column names
+                // Keep both original and cleaned (underscore-free) versions
                 Set<String> uniqueTerms = new HashSet<>();
+                Set<String> originalTerms = new HashSet<>();
                 JsonArray schemaElements = new JsonArray();
+                JsonArray cleanedSchemaElements = new JsonArray();
 
                 for (String tableName : tables.fieldNames()) {
                     JsonObject table = tables.getJsonObject(tableName);
+
+                    // Store original with underscores
+                    originalTerms.add(tableName.toLowerCase());
                     uniqueTerms.add(tableName.toLowerCase());
 
-                    // Add table info for LLM context
+                    // Also add cleaned version without underscores
+                    String cleanedTableName = tableName.replace("_", " ");
+                    uniqueTerms.add(cleanedTableName.toLowerCase());
+
+                    // Add both original and cleaned table info for LLM context
                     JsonObject tableInfo = new JsonObject()
                         .put("table", tableName);
+                    JsonObject cleanedTableInfo = new JsonObject()
+                        .put("table", cleanedTableName);
 
                     JsonArray columns = table.getJsonArray("columns");
                     if (columns != null) {
                         JsonArray columnNames = new JsonArray();
+                        JsonArray cleanedColumnNames = new JsonArray();
                         for (int i = 0; i < columns.size(); i++) {
                             JsonObject col = columns.getJsonObject(i);
                             String colName = col.getString("name");
                             if (colName != null) {
+                                // Store original
+                                originalTerms.add(colName.toLowerCase());
                                 uniqueTerms.add(colName.toLowerCase());
                                 columnNames.add(colName);
+
+                                // Add cleaned version
+                                String cleanedColName = colName.replace("_", " ");
+                                uniqueTerms.add(cleanedColName.toLowerCase());
+                                cleanedColumnNames.add(cleanedColName);
                             }
                         }
                         tableInfo.put("columns", columnNames);
+                        cleanedTableInfo.put("columns", cleanedColumnNames);
                     }
                     schemaElements.add(tableInfo);
+                    cleanedSchemaElements.add(cleanedTableInfo);
                 }
 
-                // Use LLM to generate synonyms based on actual schema
+                // Use LLM to generate synonyms based on cleaned schema (without underscores)
                 String prompt = "Analyze this database schema and identify business term synonyms. " +
                     "For each group of related terms (like customer/client/user or order/purchase/transaction), " +
                     "create a synonym mapping. Focus on terms that actually appear in the schema.\n\n" +
-                    "Schema:\n" + schemaElements.encodePrettily() + "\n\n" +
+                    "Schema (underscores have been replaced with spaces for clarity):\n" +
+                    cleanedSchemaElements.encodePrettily() + "\n\n" +
+                    "Original schema with underscores:\n" +
+                    schemaElements.encodePrettily() + "\n\n" +
                     "Return a JSON object where keys are primary terms and values are objects with:\n" +
                     "- category: the business concept\n" +
-                    "- related_terms: array of synonymous terms found in the schema\n" +
+                    "- related_terms: array of synonymous terms found in the schema (include both underscore and space versions)\n" +
                     "- confidence: 0.0-1.0 based on how certain the relationship is\n\n" +
-                    "Only include terms that actually appear in the provided schema. Return empty object {} if no clear synonyms found.";
+                    "Include both the cleaned (space-separated) and original (underscore) versions in related_terms. " +
+                    "Return empty object {} if no clear synonyms found.";
 
                 JsonArray messages = new JsonArray()
                     .add(new JsonObject().put("role", "system").put("content", "You are a database schema analyst. Identify business term synonyms based only on the provided schema."))
@@ -489,21 +515,35 @@ public class KnowledgeGraphBuilder {
                         // Extract and parse JSON using helper method
                         JsonObject synonyms = extractJsonFromLLMResponse(content);
 
+                        // Validate the initial LLM response
+                        synonyms = validateSynonymStructure(synonyms, "initial");
+
                         if (!synonyms.isEmpty()) {
                             vertx.eventBus().publish("log",
                                 "[KnowledgeGraphBuilder] Successfully parsed " + synonyms.size() +
                                 " synonym groups from schema,2,KnowledgeGraphBuilder,Graph,Success");
 
-                            // Log the synonym groups at debug level
+                            // Add plurals to all synonym terms
+                            JsonObject enrichedSynonyms = addPluralsToSynonyms(synonyms);
+
+                            vertx.eventBus().publish("log",
+                                "[KnowledgeGraphBuilder] Added plural forms to synonyms,2,KnowledgeGraphBuilder,Graph,Progress");
+
+                            // Perform full-graph refinement with all relationships
+                            JsonObject refinedSynonyms = refineWithFullGraph(enrichedSynonyms, tables, relationships, enumData);
+
+                            // Log the final synonym groups at debug level
                             if (Driver.logLevel >= 3) {
-                                for (String key : synonyms.fieldNames()) {
-                                    JsonObject group = synonyms.getJsonObject(key);
+                                for (String key : refinedSynonyms.fieldNames()) {
+                                    JsonObject group = refinedSynonyms.getJsonObject(key);
                                     vertx.eventBus().publish("log",
-                                        "[KnowledgeGraphBuilder] Synonym group '" + key + "': " +
+                                        "[KnowledgeGraphBuilder] Final synonym group '" + key + "': " +
                                         group.encodePrettily().substring(0, Math.min(group.encodePrettily().length(), 200)) +
                                         ",3,KnowledgeGraphBuilder,Graph,Debug");
                                 }
                             }
+
+                            return refinedSynonyms;
                         } else {
                             vertx.eventBus().publish("log",
                                 "[KnowledgeGraphBuilder] No synonyms extracted from LLM response (may be empty or parsing failed),2,KnowledgeGraphBuilder,Graph,Warning");
@@ -524,6 +564,282 @@ public class KnowledgeGraphBuilder {
         });
     }
 
+
+    /**
+     * Generate plural form of a word following common English patterns
+     */
+    private String generatePlural(String word) {
+        if (word == null || word.isEmpty()) {
+            return word;
+        }
+
+        String lower = word.toLowerCase();
+        String result;
+
+        // Common irregular plurals
+        if (lower.equals("child")) {
+            result = "children";
+        } else if (lower.equals("person")) {
+            result = "people";
+        } else if (lower.equals("man")) {
+            result = "men";
+        } else if (lower.equals("woman")) {
+            result = "women";
+        } else if (lower.endsWith("y") && !lower.endsWith("ay") && !lower.endsWith("ey")
+                   && !lower.endsWith("oy") && !lower.endsWith("uy")) {
+            // Words ending in consonant + y: change y to ies
+            result = word.substring(0, word.length() - 1) + "ies";
+        } else if (lower.endsWith("s") || lower.endsWith("ss") || lower.endsWith("x")
+                   || lower.endsWith("z") || lower.endsWith("ch") || lower.endsWith("sh")) {
+            // Words ending in s, x, z, ch, sh: add es
+            result = word + "es";
+        } else if (lower.endsWith("f")) {
+            // Words ending in f: change to ves
+            result = word.substring(0, word.length() - 1) + "ves";
+        } else if (lower.endsWith("fe")) {
+            // Words ending in fe: change to ves
+            result = word.substring(0, word.length() - 2) + "ves";
+        } else if (lower.endsWith("o") && !lower.endsWith("oo") && !lower.endsWith("eo")) {
+            // Words ending in consonant + o: add es
+            result = word + "es";
+        } else {
+            // Default: just add s
+            result = word + "s";
+        }
+
+        // Preserve original casing pattern
+        if (word.equals(word.toUpperCase())) {
+            return result.toUpperCase();
+        } else if (Character.isUpperCase(word.charAt(0))) {
+            return Character.toUpperCase(result.charAt(0)) + result.substring(1);
+        }
+        return result;
+    }
+
+    /**
+     * Add plural forms to all synonym terms
+     */
+    private JsonObject addPluralsToSynonyms(JsonObject synonyms) {
+        JsonObject enrichedSynonyms = new JsonObject();
+
+        for (String key : synonyms.fieldNames()) {
+            JsonObject group = synonyms.getJsonObject(key);
+            JsonArray relatedTerms = group.getJsonArray("related_terms");
+
+            if (relatedTerms != null) {
+                JsonArray expandedTerms = new JsonArray();
+                Set<String> addedTerms = new HashSet<>();
+
+                // Add original terms and their plurals
+                for (int i = 0; i < relatedTerms.size(); i++) {
+                    String term = relatedTerms.getString(i);
+                    if (term != null && !addedTerms.contains(term.toLowerCase())) {
+                        expandedTerms.add(term);
+                        addedTerms.add(term.toLowerCase());
+
+                        // Generate and add plural if different
+                        String plural = generatePlural(term);
+                        if (!plural.equalsIgnoreCase(term) && !addedTerms.contains(plural.toLowerCase())) {
+                            expandedTerms.add(plural);
+                            addedTerms.add(plural.toLowerCase());
+                        }
+                    }
+                }
+
+                // Create updated group with expanded terms
+                JsonObject updatedGroup = group.copy();
+                updatedGroup.put("related_terms", expandedTerms);
+                enrichedSynonyms.put(key, updatedGroup);
+
+                // Also add plural of the key itself as a synonym group
+                String pluralKey = generatePlural(key);
+                if (!pluralKey.equalsIgnoreCase(key) && !enrichedSynonyms.containsKey(pluralKey)) {
+                    enrichedSynonyms.put(pluralKey, updatedGroup.copy());
+                }
+            } else {
+                // Preserve group even if no related_terms
+                enrichedSynonyms.put(key, group);
+            }
+        }
+
+        return enrichedSynonyms;
+    }
+
+    /**
+     * Validate synonym structure and ensure required fields exist
+     */
+    private JsonObject validateSynonymStructure(JsonObject synonyms, String stage) {
+        if (synonyms == null) {
+            vertx.eventBus().publish("log",
+                "[KnowledgeGraphBuilder] Synonym validation failed at " + stage + " stage: null response,1,KnowledgeGraphBuilder,Graph,Warning");
+            return new JsonObject();
+        }
+
+        JsonObject validatedSynonyms = new JsonObject();
+        int invalidCount = 0;
+
+        for (String key : synonyms.fieldNames()) {
+            JsonObject group = synonyms.getJsonObject(key);
+
+            // Validate required fields
+            if (group != null && group.containsKey("category") && group.containsKey("related_terms")) {
+                // Ensure related_terms is an array
+                try {
+                    JsonArray relatedTerms = group.getJsonArray("related_terms");
+                    if (relatedTerms != null) {
+                        // Add default confidence if missing
+                        if (!group.containsKey("confidence")) {
+                            group.put("confidence", 0.7);
+                        }
+                        validatedSynonyms.put(key, group);
+                    } else {
+                        invalidCount++;
+                    }
+                } catch (ClassCastException e) {
+                    invalidCount++;
+                    vertx.eventBus().publish("log",
+                        "[KnowledgeGraphBuilder] Invalid related_terms format for key '" + key +
+                        "' at " + stage + " stage,2,KnowledgeGraphBuilder,Graph,Warning");
+                }
+            } else {
+                invalidCount++;
+                if (Driver.logLevel >= 3) {
+                    vertx.eventBus().publish("log",
+                        "[KnowledgeGraphBuilder] Missing required fields for synonym key '" + key +
+                        "' at " + stage + " stage,3,KnowledgeGraphBuilder,Graph,Debug");
+                }
+            }
+        }
+
+        if (invalidCount > 0) {
+            vertx.eventBus().publish("log",
+                "[KnowledgeGraphBuilder] Filtered out " + invalidCount +
+                " invalid synonym groups at " + stage + " stage,2,KnowledgeGraphBuilder,Graph,Warning");
+        }
+
+        return validatedSynonyms;
+    }
+
+    /**
+     * Refine synonyms using full graph context including relationships
+     */
+    private JsonObject refineWithFullGraph(JsonObject initialSynonyms, JsonObject tables, JsonArray relationships, JsonObject enumData) {
+        vertx.eventBus().publish("log",
+            "[KnowledgeGraphBuilder] Starting full-graph synonym refinement,2,KnowledgeGraphBuilder,Graph,Progress");
+
+        try {
+            // Build comprehensive context for refinement
+            JsonObject graphContext = new JsonObject();
+
+            // Add table count and names
+            graphContext.put("tableCount", tables.size());
+            JsonArray tableNames = new JsonArray();
+            for (String tableName : tables.fieldNames()) {
+                tableNames.add(tableName);
+            }
+            graphContext.put("tableNames", tableNames);
+
+            // Add relationships if available
+            if (relationships != null && !relationships.isEmpty()) {
+                // Summarize foreign key patterns
+                JsonObject fkPatterns = new JsonObject();
+                for (int i = 0; i < relationships.size(); i++) {
+                    JsonObject rel = relationships.getJsonObject(i);
+                    String fromTable = rel.getString("fromTable");
+                    String toTable = rel.getString("toTable");
+                    String fromColumn = rel.getString("fromColumn");
+
+                    if (fromTable != null && toTable != null && fromColumn != null) {
+                        if (!fkPatterns.containsKey(toTable)) {
+                            fkPatterns.put(toTable, new JsonArray());
+                        }
+                        fkPatterns.getJsonArray(toTable).add(
+                            new JsonObject()
+                                .put("referencedBy", fromTable)
+                                .put("throughColumn", fromColumn)
+                        );
+                    }
+                }
+                graphContext.put("foreignKeyPatterns", fkPatterns);
+            }
+
+            // Add enum table information
+            JsonObject enumTables = enumData != null ? enumData.getJsonObject("enumTables") : null;
+            if (enumTables != null && !enumTables.isEmpty()) {
+                JsonArray enumTableList = new JsonArray();
+                for (String enumTable : enumTables.fieldNames()) {
+                    JsonObject enumInfo = enumTables.getJsonObject(enumTable);
+                    enumTableList.add(new JsonObject()
+                        .put("table", enumTable)
+                        .put("referencedBy", enumInfo.getJsonArray("referencedBy", new JsonArray()))
+                    );
+                }
+                graphContext.put("enumTables", enumTableList);
+            }
+
+            // Add current synonyms
+            graphContext.put("currentSynonyms", initialSynonyms);
+
+            // Create refinement prompt
+            String refinementPrompt = "Review these synonym mappings against the complete database schema with relationships.\n\n" +
+                "Graph Context:\n" + graphContext.encodePrettily() + "\n\n" +
+                "Consider:\n" +
+                "1. Cross-table patterns (e.g., CUSTOMER table links to CUST_ORDER - strengthen customer/order synonyms)\n" +
+                "2. Foreign key naming conventions (e.g., CUST_ID in multiple tables suggests 'cust' = 'customer')\n" +
+                "3. Enum table references (e.g., ORDER_STATUS_ENUM suggests 'status' relates to 'order state')\n" +
+                "4. Missing transitive relationships (if 'client'='customer' and 'customer'='buyer', add 'client'='buyer')\n\n" +
+                "Refine the synonyms by:\n" +
+                "- Adjusting confidence scores based on relationship evidence (increase if FK patterns support)\n" +
+                "- Adding newly discovered synonym relationships from FK patterns\n" +
+                "- Merging synonym groups that should be unified\n" +
+                "- Identifying domain-specific terms from table clusters\n\n" +
+                "Return the refined synonym mappings with the same JSON structure:\n" +
+                "- category: the business concept\n" +
+                "- related_terms: expanded array of synonymous terms\n" +
+                "- confidence: updated confidence based on graph evidence\n\n" +
+                "Return the complete refined mappings, not just changes.";
+
+            JsonArray messages = new JsonArray()
+                .add(new JsonObject().put("role", "system").put("content",
+                    "You are a database schema analyst specializing in identifying business term relationships through foreign keys and table structures."))
+                .add(new JsonObject().put("role", "user").put("content", refinementPrompt));
+
+            // Call LLM for refinement
+            JsonObject llmResponse = llmService.chatCompletion(messages)
+                .toCompletionStage().toCompletableFuture().get();
+
+            // Parse response
+            JsonArray choices = llmResponse.getJsonArray("choices");
+            if (choices != null && !choices.isEmpty()) {
+                JsonObject firstChoice = choices.getJsonObject(0);
+                JsonObject message = firstChoice.getJsonObject("message");
+                String content = message.getString("content");
+
+                // Extract and validate refined synonyms
+                JsonObject refinedSynonyms = extractJsonFromLLMResponse(content);
+                refinedSynonyms = validateSynonymStructure(refinedSynonyms, "refinement");
+
+                if (!refinedSynonyms.isEmpty()) {
+                    vertx.eventBus().publish("log",
+                        "[KnowledgeGraphBuilder] Successfully refined synonyms with full graph context - " +
+                        refinedSynonyms.size() + " groups,2,KnowledgeGraphBuilder,Graph,Success");
+                    return refinedSynonyms;
+                } else {
+                    vertx.eventBus().publish("log",
+                        "[KnowledgeGraphBuilder] Refinement produced empty result, keeping initial synonyms,2,KnowledgeGraphBuilder,Graph,Warning");
+                    return initialSynonyms;
+                }
+            }
+
+        } catch (Exception e) {
+            vertx.eventBus().publish("log",
+                "[KnowledgeGraphBuilder] Full-graph refinement failed: " + e.getMessage() +
+                " - keeping initial synonyms (fail open),1,KnowledgeGraphBuilder,Graph,Warning");
+        }
+
+        // Fail open - return initial synonyms if refinement fails
+        return initialSynonyms;
+    }
 
     /**
      * Extract JSON from LLM response content that may contain markdown formatting
