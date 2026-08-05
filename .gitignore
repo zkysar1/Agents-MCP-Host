@@ -197,3 +197,5 @@ nbdist/
 ### Build Files Not Needed ###
 /build/
 .env.local
+.env
+
