@@ -10,27 +10,54 @@ import io.vertx.core.json.JsonObject;
  */
 public class OracleConnectionTest {
     
+    /**
+     * Read configuration from system properties (loaded from .env.local by dotenv)
+     * with a fallback to OS environment variables. Mirrors the lookup used by
+     * OracleConnectionManager and the DEFAULT_SCHEMA pattern elsewhere in the codebase.
+     */
+    private static String env(String key) {
+        String value = System.getProperty(key);
+        if (value == null || value.trim().isEmpty()) {
+            value = System.getenv(key);
+        }
+        return (value == null || value.trim().isEmpty()) ? null : value.trim();
+    }
+
     public static void main(String[] args) {
         System.out.println("=== Oracle Database Connection Test ===");
         System.out.println();
-        
-        // Use hardcoded password for consistency
-        String password = "ARmy0320-- milk";
-        System.out.println("[OK] Using configured Oracle password");
+
+        // Read DB connection details from the same source as production code
+        // (System.getProperty from dotenv, falling back to System.getenv).
+        // Never hardcode credentials in source.
+        String host = env("DB_HOST");
+        String port = env("DB_PORT");
+        String service = env("DB_SERVICE");
+        String user = env("DB_USER");
+        String password = env("DB_PASSWORD");
+
+        // This smoke test needs a live Oracle DB and configured credentials.
+        // If any are missing, skip cleanly rather than attempting a connection with nulls.
+        if (host == null || port == null || service == null || user == null || password == null) {
+            System.out.println("Skipped: set DB_* env vars (DB_HOST, DB_PORT, DB_SERVICE, "
+                + "DB_USER, DB_PASSWORD) in .env.local or the environment to run this smoke test.");
+            System.exit(0);
+        }
+        System.out.println("[OK] Using configured Oracle credentials from environment");
         System.out.println();
-        
+
         // Create Vert.x instance
         Vertx vertx = Vertx.vertx();
-        
+
         // Get connection manager instance
         OracleConnectionManager connManager = OracleConnectionManager.getInstance();
-        
+
         // Initialize connection pool
         System.out.println("Initializing Oracle connection pool...");
-        System.out.println("Host: adb.us-ashburn-1.oraclecloud.com");
-        System.out.println("Port: 1522 (TLS)");
-        System.out.println("Service: gd77773c35a7f01_zaksedwtest_high.adb.oraclecloud.com");
-        System.out.println("User: ADMIN");
+        System.out.println("Host: " + host);
+        System.out.println("Port: " + port);
+        System.out.println("Service: " + service);
+        System.out.println("User: " + user);
         System.out.println();
         
         connManager.initialize(vertx)
@@ -157,7 +184,7 @@ public class OracleConnectionTest {
                 System.err.println("Error: " + err.getMessage());
                 System.err.println();
                 System.err.println("Possible causes:");
-                System.err.println("1. Incorrect password configured (check hardcoded value)");
+                System.err.println("1. Incorrect password configured (check DB_PASSWORD env var)");
                 System.err.println("2. Network connectivity issues");
                 System.err.println("3. Oracle Cloud database not accessible");
                 System.err.println("4. TLS/SSL configuration issues");
