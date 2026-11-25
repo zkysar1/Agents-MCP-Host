@@ -31,7 +31,7 @@ Java 21 / Gradle (wrapper pins **Gradle 8.8**). The build needs a JDK 21 toolcha
 - `build` → `BUILD SUCCESSFUL`, fat jar assembled (`Agents-MCP-Host-1.0.0-fat.jar`).
 - `run` was **not executed** — it requires `.env.local` with live Oracle + LLM credentials, which are not present.
 
-There is no CI configured. `OracleConnectionTest.java` is a `main()` smoke test (not a JUnit test) — it is **not** part of the `test` task and requires a live database. It reads `DB_HOST`, `DB_PORT`, `DB_SERVICE`, `DB_USER` and `DB_PASSWORD` the same way the app does (System properties loaded from `.env.local`, falling back to OS env vars) and exits without connecting if any is missing.
+There is no CI configured. `OracleConnectionTest.java` is a `main()` smoke test (not a JUnit test) — it is **not** part of the `test` task and requires a live database. It reads `DB_HOST`, `DB_PORT`, `DB_SERVICE`, `DB_USER` and `DB_PASSWORD` from JVM system properties, falling back to OS env vars. Unlike the app it does **not** load `.env.local`, so pass them as `-D` properties or environment variables; if any is missing it prints "Skipped" and exits 0 without connecting.
 
 ## Quick Reference
 
@@ -55,7 +55,7 @@ There is no CI configured. `OracleConnectionTest.java` is a `main()` smoke test 
 
 ### Environment / config (`.env.local`)
 
-Loaded at startup by `Driver` from `.env.local` (not `.env`) into System properties; also falls back to OS env vars. All are **required** — `OracleConnectionManager` and `LlmAPIService` throw on startup if any is missing. See `.env.example` for the key list:
+Loaded at startup by `Driver` from `.env.local` (not `.env`) into System properties; also falls back to OS env vars. The database keys are **required**: `OracleConnectionManager` throws if any is missing. The LLM keys are not: without them `LlmAPIService` logs an error and the app still starts, with the LLM service disabled. See `.env.example` for the key list:
 
 ```
 ENVIRONMENT=WORK|PERSONAL
@@ -138,8 +138,8 @@ src/test/java/agents/director/mcp/
 ## Constraints
 
 - **Java 21 toolchain required.** The build declares a 21 toolchain; on a machine without it set, export `JAVA_HOME` to a JDK 21 (e.g. `C:\Program Files\Java\jdk21.0.3_9`).
-- **Config is mandatory at runtime.** Missing any DB/LLM key in `.env.local` causes startup failure (services throw on missing config). The app will compile and unit-test fine without it, but `run` will not come up.
-- `.env.local` and `.env` are git-ignored — never commit credentials, and never hardcode them in source (the app and the smoke test read them from `.env.local` or the environment).
+- **DB config is mandatory at runtime.** A missing DB key makes `OracleConnectionManager` throw; a missing LLM key only disables the LLM service, and startup continues. The app compiles and unit-tests fine without either.
+- `.env.local` and `.env` are git-ignored — never commit credentials, and never hardcode them in source (the app reads them from `.env.local` or the environment; the smoke test reads only system properties and the environment).
 - **Streaming-only API.** `/conversations` always responds with SSE; there is no non-streaming JSON response mode.
 - Tests are minimal (7 self-contained unit tests); there is no integration test that exercises the DB/LLM path in the `test` task.
 - Keep this file in sync with the code; do not "fix" it to match the outdated `README.md`.
